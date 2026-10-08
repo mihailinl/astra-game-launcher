@@ -80,7 +80,6 @@ impl GameTarget {
         }
         Ok(parent)
     }
-    }
 }
 
 /// The Proton prefix Steam keeps for `appid`, for a game installed at
