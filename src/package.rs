@@ -16,7 +16,7 @@ use crate::error::{LauncherError, Result, codes};
 use crate::manifest::{
     FromPattern, IntegrationInfo, MANIFEST_FILE, Manifest, Target, from_pattern, safe_component,
 };
-use crate::paths::parse_jailed;
+use crate::paths::{is_reserved, parse_jailed};
 
 /// The caps a package must stay under.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,6 +301,16 @@ impl GiPackage {
                 size,
                 sha256: String::new(),
             });
+        }
+
+        // A `**` mapping joins the zip's own names to the folder: check the joined result, so no
+        // entry can land on the ledger, its lock or the backups.
+        for f in &profile_files {
+            if f.rel.first().is_some_and(|c| is_reserved(c)) {
+                return Err(LauncherError::new(codes::PATH_ESCAPES)
+                    .with("path", format!("${{profile}}/{}", f.rel_string()))
+                    .with("reason", "reserved"));
+            }
         }
 
         for set in [&profile_files, &game_files] {

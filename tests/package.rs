@@ -321,3 +321,27 @@ fn the_manifest_s_anti_cheat_and_overrides_are_checked() {
     let text = base.replacen("engine = \"unity-mono\"", "engine = \"source2\"", 1);
     assert_eq!(parse_err(&text).code, codes::MANIFEST_INVALID);
 }
+
+#[test]
+fn a_wildcard_cannot_land_on_the_profile_s_bookkeeping() {
+    for name in [
+        "astra-launcher-ledger.json",
+        "Astra-Launcher-Ledger.lock",
+        "astra-launcher-backup/game/winhttp.dll",
+    ] {
+        let m = runner_manifest("\n[[files]]\nfrom = \"**\"\nto = \"${profile}/\"\n");
+        let z = zip(&[
+            E::File("astra-gi.toml", m.as_bytes()),
+            E::File("winhttp.dll", WINHTTP),
+            E::File("doorstop_config.ini", DOORSTOP_INI),
+            E::File("BepInEx/core/BepInEx.dll", CORE_DLL),
+            E::File(name, b"{\"forged\": true}"),
+        ]);
+        let e = refusal(&z);
+        assert_eq!(
+            (e.code, e.param("reason")),
+            (codes::PATH_ESCAPES, Some("reserved")),
+            "{name}"
+        );
+    }
+}

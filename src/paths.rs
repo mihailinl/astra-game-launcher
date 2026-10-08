@@ -84,7 +84,8 @@ pub(crate) fn parse_jailed(s: &str) -> Result<JailPath> {
     Ok(JailPath { root, rel, is_dir })
 }
 
-fn is_reserved(first: &str) -> bool {
+/// The profile's own bookkeeping: the ledger, its lock, the backups. Case-insensitive.
+pub(crate) fn is_reserved(first: &str) -> bool {
     let f = first.to_ascii_lowercase();
     f == LEDGER_FILE || f == LOCK_FILE || f == BACKUP_DIR
 }
