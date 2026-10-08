@@ -36,3 +36,4 @@ ureq = { version = "3", optional = true, default-features = false, features = ["
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp"] }
+

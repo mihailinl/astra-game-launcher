@@ -153,10 +153,11 @@ fn place(
     let total = pkg.game_files.len() as u64;
     for (i, (f, a)) in pkg.game_files.iter().zip(&plan.game_files).enumerate() {
         ctx.check()?;
-        if a.rel_path != f.rel_string() || a.sha256 != f.sha256 {
+        if !a.rel_path.eq_ignore_ascii_case(&f.rel_string()) || a.sha256 != f.sha256 {
             return Err(stale("game-files"));
         }
-        let target = prepare_target(game_root, &f.rel)?;
+        // The plan's spelling: an existing case variant is the file Windows and Wine would load.
+        let target = prepare_target(game_root, &checked_rel(&a.rel_path)?)?;
         let current = file_state(&target)?;
         match a.action {
             GameAction::Add => {
@@ -224,10 +225,20 @@ pub(crate) fn uninstall_ledger(
 
     for g in ledger.game_files.iter().rev() {
         let comps = checked_rel(&g.rel)?;
-        let Some(target) = existing_target(game_root, &comps)? else {
-            continue;
+        // A link where our file was is never followed: that file is not ours to touch now.
+        let found = existing_target(game_root, &comps).and_then(|t| match t {
+            Some(t) => file_state(&t).map(|s| Some((t, s))),
+            None => Ok(None),
+        });
+        let (target, current) = match found {
+            Ok(Some(x)) => x,
+            Ok(None) => continue,
+            Err(e) if e.code == codes::PATH_ESCAPES => {
+                report.kept.push(g.rel.clone());
+                continue;
+            }
+            Err(e) => return Err(e),
         };
-        let current = file_state(&target)?;
         match g.action {
             GameAction::Add => match current {
                 FileState::File { sha256 } if sha256 == g.sha256 => {
@@ -267,7 +278,13 @@ pub(crate) fn uninstall_ledger(
 
     for f in &ledger.files {
         let comps = checked_rel(&f.rel)?;
-        if let Some(p) = existing_target(profile, &comps)? {
+        let found = match existing_target(profile, &comps) {
+            Ok(p) => p,
+            // Never delete through a link.
+            Err(e) if e.code == codes::PATH_ESCAPES => None,
+            Err(e) => return Err(e),
+        };
+        if let Some(p) = found {
             match fs::symlink_metadata(&p) {
                 Ok(m) if m.is_file() || m.file_type().is_symlink() => {
                     fs::remove_file(&p).map_err(|e| LauncherError::io_at(&e, &p))?;

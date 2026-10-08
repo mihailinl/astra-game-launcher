@@ -15,7 +15,7 @@ use crate::ledger::{self, Ledger};
 use crate::manifest::IntegrationInfo;
 use crate::package::GiPackage;
 use crate::paths::{
-    FileState, absolute, canonical_dir, existing_target, file_state, resolve_lenient,
+    FileState, absolute, canonical_dir, existing_target, file_state, real_case, resolve_lenient,
 };
 
 /// What happens to one file beside the game's exe.
@@ -170,8 +170,9 @@ pub fn plan_install(
 
     let mut game_files = Vec::new();
     for f in &pkg.game_files {
-        let rel = f.rel_string();
-        let state = match existing_target(&game_root, &f.rel)? {
+        let real = real_case(&game_root, &f.rel)?;
+        let rel = real.join("/");
+        let state = match existing_target(&game_root, &real)? {
             Some(path) => state_before(&path, &rel, existing.as_ref())?,
             None => FileState::Absent,
         };
