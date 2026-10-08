@@ -78,9 +78,7 @@ fn proton_override_is_applied_and_restored_leaving_other_sections_alone() {
     let reg = w.user_reg();
     let section = format!("[Software\\\\Wine\\\\AppDefaults\\\\{GAME}.exe\\\\DllOverrides] ");
     assert!(reg.contains(&section), "{reg}");
-    assert!(
-        reg.contains("\"winhttp\"=\"native,builtin\"\n")
-    );
+    assert!(reg.contains("\"winhttp\"=\"native,builtin\"\n"));
     // Every byte of the original is still there, in order, ahead of the new section.
     assert!(reg.starts_with(USER_REG.trim_end_matches('\n')));
     assert!(reg.contains("[Software\\\\Wine\\\\DllOverrides] 1784681205\n#time=1dcf9d1a3c4e000\n\"winhttp\"=\"builtin\"\n"));

@@ -42,11 +42,12 @@ pub use game::{GameTarget, Platform, proton_prefix_for};
 pub use install::{UninstallReport, install, installed, uninstall};
 pub use launch::{ProcessPlan, Spawn, StdSpawn, find_steam, launch, prepare_launch};
 pub use ledger::{
-    LEDGER_SCHEMA, Ledger, LedgerBackup, LedgerFile, LedgerGame, LedgerGameFile, LedgerSource, LedgerState,
-    ProtonRecord,
+    LEDGER_SCHEMA, Ledger, LedgerBackup, LedgerFile, LedgerGame, LedgerGameFile, LedgerSource,
+    LedgerState, ProtonRecord,
 };
 pub use manifest::{
-    ConfigWrite, FileRule, GameFileRule, IntegrationInfo, Launch, MANIFEST_FILE, Manifest, SCHEMA, Target,
+    ConfigWrite, FileRule, GameFileRule, IntegrationInfo, Launch, MANIFEST_FILE, Manifest, SCHEMA,
+    Target,
 };
 pub use package::{GiPackage, Limits, PackageSummary, SummaryConfigWrite, SummaryGameFile};
 pub use plan::{GameAction, GameFileAction, InstallPlan, plan_install};

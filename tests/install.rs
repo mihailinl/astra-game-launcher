@@ -208,7 +208,10 @@ fn a_foreign_loader_is_refused() {
         let e = plan_install(&runner(), &w.target(), &w.profile()).unwrap_err();
         assert_eq!(e.code, codes::FOREIGN_LOADER, "{name}");
         let file = e.param("file").unwrap();
-        assert!(file.eq_ignore_ascii_case("winhttp.dll"), "a case variant is the same file to Wine");
+        assert!(
+            file.eq_ignore_ascii_case("winhttp.dll"),
+            "a case variant is the same file to Wine"
+        );
     }
 }
 

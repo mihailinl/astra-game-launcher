@@ -16,7 +16,12 @@ pub trait Fetch {
 }
 
 /// Downloads `url` and checks it against `expected_sha256` before returning a byte of it.
-pub fn fetch_verified(fetch: &dyn Fetch, url: &str, expected_sha256: &str, max_bytes: u64) -> Result<Vec<u8>> {
+pub fn fetch_verified(
+    fetch: &dyn Fetch,
+    url: &str,
+    expected_sha256: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>> {
     let Some(want) = normalize_hex(expected_sha256) else {
         return Err(LauncherError::new(codes::DIGEST_MISMATCH)
             .with("want", expected_sha256)
@@ -28,7 +33,9 @@ pub fn fetch_verified(fetch: &dyn Fetch, url: &str, expected_sha256: &str, max_b
     }
     let got = sha256_hex(&bytes);
     if got != want {
-        return Err(LauncherError::new(codes::DIGEST_MISMATCH).with("want", want).with("got", got));
+        return Err(LauncherError::new(codes::DIGEST_MISMATCH)
+            .with("want", want)
+            .with("got", got));
     }
     Ok(bytes)
 }
@@ -47,7 +54,9 @@ impl Default for UreqFetch {
             .timeout_global(Some(std::time::Duration::from_secs(600)))
             .user_agent(concat!("astra-game-launcher/", env!("CARGO_PKG_VERSION")))
             .build();
-        UreqFetch { agent: config.into() }
+        UreqFetch {
+            agent: config.into(),
+        }
     }
 }
 
@@ -61,10 +70,16 @@ impl Fetch for UreqFetch {
             ureq::Error::BodyExceedsLimit(_) => {
                 LauncherError::new(codes::TOO_LARGE).with("limit", max_bytes.to_string())
             }
-            ureq::Error::StatusCode(s) => LauncherError::new(codes::FETCH_FAILED).with("status", s.to_string()),
+            ureq::Error::StatusCode(s) => {
+                LauncherError::new(codes::FETCH_FAILED).with("status", s.to_string())
+            }
             other => LauncherError::new(codes::FETCH_FAILED).with("detail", other.to_string()),
         };
         let mut resp = self.agent.get(url).call().map_err(failed)?;
-        resp.body_mut().with_config().limit(max_bytes).read_to_vec().map_err(failed)
+        resp.body_mut()
+            .with_config()
+            .limit(max_bytes)
+            .read_to_vec()
+            .map_err(failed)
     }
 }

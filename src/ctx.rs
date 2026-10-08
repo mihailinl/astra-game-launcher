@@ -31,7 +31,10 @@ fn ignore(_: Progress) {}
 impl Ctx<'static> {
     /// Never cancelled, reports nothing.
     pub fn silent() -> Ctx<'static> {
-        Ctx { cancel: &never, progress: &ignore }
+        Ctx {
+            cancel: &never,
+            progress: &ignore,
+        }
     }
 }
 

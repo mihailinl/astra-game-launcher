@@ -217,12 +217,18 @@ pub(crate) fn existing_target(root: &Path, rel: &[String]) -> Result<Option<Path
 /// The real spelling of `rel`'s last component below `root` when only a case variant of it
 /// exists: Windows and Wine treat the two as one file. Returns `rel` unchanged otherwise.
 pub(crate) fn real_case(root: &Path, rel: &[String]) -> Result<Vec<String>> {
-    let Some(path) = existing_target(root, rel)? else { return Ok(rel.to_vec()) };
+    let Some(path) = existing_target(root, rel)? else {
+        return Ok(rel.to_vec());
+    };
     if fs::symlink_metadata(&path).is_ok() {
         return Ok(rel.to_vec());
     }
-    let (Some(parent), Some(last)) = (path.parent(), rel.last()) else { return Ok(rel.to_vec()) };
-    let Ok(entries) = fs::read_dir(parent) else { return Ok(rel.to_vec()) };
+    let (Some(parent), Some(last)) = (path.parent(), rel.last()) else {
+        return Ok(rel.to_vec());
+    };
+    let Ok(entries) = fs::read_dir(parent) else {
+        return Ok(rel.to_vec());
+    };
     for e in entries.flatten() {
         if let Some(n) = e.file_name().to_str()
             && n.eq_ignore_ascii_case(last)
