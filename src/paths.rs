@@ -146,9 +146,6 @@ pub(crate) fn canonical_dir(p: &Path) -> Result<PathBuf> {
     Ok(c)
 }
 
-    p
-}
-
 /// Re-checks a recorded relative path before acting on it (a ledger is a file on disk).
 pub(crate) fn checked_rel(rel: &str) -> Result<Vec<String>> {
     relative_components(rel)
