@@ -85,7 +85,7 @@ HTTP (`Fetch`) and process spawning (`Spawn`) are injected. Build with
   `version.dll`, `dxgi.dll` or `d3d11.dll` is another mod loader: the install is refused. Any
   other existing file is backed up into the profile and replaced. Uninstall removes or restores
   a file only while it still has our digest; a file the game updated since is the game's.
-- **Anti-cheat.** A game folder carrying EasyAntiCheat, BattlEye, GameGuard or XIGNCODE is
+- **Anti-cheat.** A game folder carrying EasyAntiCheat, BattlEye, GameGuard, XIGNCODE or HoYoverse protection is
   refused, and so is a manifest whose `anti_cheat` is not `"none"`.
 - **Proton.** The Wine DLL override goes into `<prefix>/user.reg`, in the game's own
   `AppDefaults\<exe>\DllOverrides` section only, written atomically with every other byte kept;

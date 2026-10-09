@@ -73,7 +73,7 @@ pub struct Detection {
     /// The game's program, relative to the folder detected.
     pub exe: Option<PathBuf>,
     pub binary: Binary,
-    /// Codes: "easy-anti-cheat", "battleye", "gameguard", "xigncode".
+    /// Codes: "easy-anti-cheat", "battleye", "gameguard", "xigncode", "hoyo-protect".
     pub anti_cheat: Vec<String>,
 }
 
@@ -146,6 +146,9 @@ fn anti_cheat_of(entries: &[Entry]) -> Vec<String> {
             Some("easy-anti-cheat")
         } else if n.starts_with("beservice") && n.ends_with(".exe") {
             Some("battleye")
+        } else if n == "mhypbase.dll" || n == "hoyokprotect.sys" {
+            // HoYoverse's protection (Genshin Impact, Honkai: Star Rail, Zenless Zone Zero).
+            Some("hoyo-protect")
         } else {
             None
         };

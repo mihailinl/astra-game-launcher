@@ -121,6 +121,8 @@ fn anti_cheat_markers_are_found() {
         ("BEService_x64.exe", false, "battleye"),
         ("GameGuard", true, "gameguard"),
         ("XIGNCODE", true, "xigncode"),
+        ("mhypbase.dll", false, "hoyo-protect"),
+        ("HoYoKProtect.sys", false, "hoyo-protect"),
     ];
     for (name, is_dir, code) in cases {
         let t = Tmp::new("ac");
