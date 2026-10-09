@@ -20,7 +20,8 @@ const USAGE: &str =
     "astra-game-launcher: put a game-integration mod into a game and launch the game with it.
 
 USAGE
-  astra-game-launcher detect <game-dir> [--json]
+  astra-game-launcher detect <game-dir> [--hint <rel-exe>] [--appid N] [--steam-root <dir>]
+                             [--json]
   astra-game-launcher inspect <zip> --sha256 <hex> [--json]
   astra-game-launcher plan <zip> --sha256 <hex> --game <dir> --exe <rel> [--appid N]
                            [--proton-prefix P] [--platform windows|linux-proton|linux-native]
@@ -34,6 +35,9 @@ USAGE
   astra-game-launcher fetch <url> --sha256 <hex> -o <file> [--json]
 
 NOTES
+  `detect --appid N` reads what Steam launches for the app from Steam's appinfo.vdf (in
+  --steam-root, or Steam's usual places) and uses it when it passes the engine rules;
+  `--hint` names that program directly.
   On Linux a game whose exe ends in .exe runs under Proton; its prefix defaults to
   <library>/steamapps/compatdata/<appid>/pfx.
   `launch --dry-run` prepares everything (INI keys, the Proton override, which uninstall
@@ -189,12 +193,13 @@ fn code_of<T: serde::Serialize>(v: &T) -> String {
     json!(v).as_str().unwrap_or("").to_owned()
 }
 
-fn detection_text(d: &Detection) -> String {
-    let exe = d
-        .exe
-        .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "-".into());
+fn detection_text(d: &Detection, hints: &[String]) -> String {
+    let shown = |p: &Option<PathBuf>| {
+        p.as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "-".into())
+    };
+    let exe = shown(&d.exe);
     let ac = if d.anti_cheat.is_empty() {
         "none".into()
     } else {
@@ -209,8 +214,74 @@ fn detection_text(d: &Detection) -> String {
     );
     let _ = writeln!(s, "binary:     {}", code_of(&d.binary));
     let _ = writeln!(s, "exe:        {exe}");
+    let _ = writeln!(s, "evidence:   {}", shown(&d.evidence));
+    let hint = match (hints, d.hint_used) {
+        ([], _) => "-".to_owned(),
+        (_, true) => format!(
+            "{} (used)",
+            d.exe
+                .as_ref()
+                .map_or_else(String::new, |p| p.display().to_string())
+        ),
+        (h, false) => format!("{} (ignored: not a game by the rules)", h.join(", ")),
+    };
+    let _ = writeln!(s, "hint:       {hint}");
     let _ = writeln!(s, "anti-cheat: {ac}");
     s
+}
+
+/// `detect`: the hints asked for (`--hint`, then what Steam launches for `--appid`, the OS this
+/// game runs as first), each tried until one passes the rules.
+fn detect_cmd(a: &Args) -> Result<Output, LauncherError> {
+    let dir = PathBuf::from(a.positional(1, "<game-dir>")?);
+    let mut hints: Vec<String> = a.one("--hint").map(str::to_owned).into_iter().collect();
+    if let Some(id) = a.one("--appid") {
+        let id = id
+            .parse::<u32>()
+            .map_err(|_| usage("--appid must be a number"))?;
+        let roots = match a.one("--steam-root") {
+            Some(r) => vec![PathBuf::from(r)],
+            None => gl::steam_roots(),
+        };
+        let appinfo = roots
+            .iter()
+            .map(|r| r.join("appcache").join("appinfo.vdf"))
+            .find(|p| p.is_file());
+        // On Linux a game with a Proton prefix runs its Windows build.
+        let proton = gl::proton_prefix_for(&dir, id).is_some_and(|p| p.is_dir());
+        let oses: &[&str] = if cfg!(windows) {
+            &["windows"]
+        } else if proton {
+            &["windows", "linux"]
+        } else {
+            &["linux", "windows"]
+        };
+        if let Some(appinfo) = appinfo {
+            for os in oses {
+                if let Some(h) = gl::launch_executable(&appinfo, id, os)
+                    && !hints.contains(&h)
+                {
+                    hints.push(h);
+                }
+            }
+        }
+    }
+    let mut found = None;
+    for h in &hints {
+        let d = gl::detect_with(&dir, Some(h))?;
+        if d.hint_used {
+            found = Some(d);
+            break;
+        }
+    }
+    let d = match found {
+        Some(d) => d,
+        None => gl::detect(&dir)?,
+    };
+    Ok(Output {
+        text: detection_text(&d, &hints),
+        json: to_json(&d),
+    })
 }
 
 fn plan_text(p: &InstallPlan) -> String {
@@ -324,14 +395,11 @@ fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), LauncherError> {
 fn run(argv: &[String]) -> Result<Output, LauncherError> {
     let cmd = argv.first().map(String::as_str).unwrap_or("help");
     match cmd {
-        "detect" => {
-            let a = Args::parse(argv, &[], &["--json"])?;
-            let d = gl::detect(Path::new(a.positional(1, "<game-dir>")?))?;
-            Ok(Output {
-                text: detection_text(&d),
-                json: to_json(&d),
-            })
-        }
+        "detect" => detect_cmd(&Args::parse(
+            argv,
+            &["--hint", "--appid", "--steam-root"],
+            &["--json"],
+        )?),
         "inspect" => {
             let a = Args::parse(argv, &["--sha256"], &["--json"])?;
             let s = open_package(&a)?.summary();
