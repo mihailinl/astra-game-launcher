@@ -243,6 +243,29 @@ fn ask(dir: &Tmp, bytes: &[u8], appid: u32, os: &str) -> Option<String> {
     launch_executable(&path, appid, os)
 }
 
+/// One pass answers many apps, the same as asking each one alone; an app with no fitting entry
+/// (or absent from the file) is simply not in the map.
+#[test]
+fn many_apps_in_one_pass_agree_with_one_at_a_time() {
+    for magic in [V28, V29] {
+        let t = Tmp::new("appinfo-batch");
+        let (bytes, _) = standard(magic);
+        let path = t.join("appinfo.vdf");
+        std::fs::write(&path, &bytes).unwrap();
+        let all =
+            astra_game_launcher::launch_executables(&path, &[APP, 999_999, 10, 12_345], "windows");
+        assert_eq!(all.get(&APP).map(String::as_str), Some("MiSideFull.exe"));
+        assert_eq!(all.get(&999_999).map(String::as_str), Some("Other.exe"));
+        assert!(!all.contains_key(&10) && !all.contains_key(&12_345));
+        for id in [APP, 999_999, 10, 12_345] {
+            assert_eq!(
+                all.get(&id).cloned(),
+                launch_executable(&path, id, "windows")
+            );
+        }
+    }
+}
+
 #[test]
 fn both_versions_give_each_os_its_launch_entry() {
     for magic in [V28, V29] {

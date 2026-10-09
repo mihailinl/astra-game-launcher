@@ -52,7 +52,7 @@ pub use manifest::{
 };
 pub use package::{GiPackage, Limits, PackageSummary, SummaryConfigWrite, SummaryGameFile};
 pub use plan::{GameAction, GameFileAction, InstallPlan, plan_install};
-pub use steam_appinfo::{launch_executable, steam_roots};
+pub use steam_appinfo::{launch_executable, launch_executables, steam_roots};
 
 /// The ledger's file name inside a profile.
 pub const LEDGER_FILE_NAME: &str = paths::LEDGER_FILE;

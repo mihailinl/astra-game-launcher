@@ -71,10 +71,30 @@ const T_END_ALT: u8 = 0x0B;
 /// `None` when the file is missing, unreadable or corrupt, the app is absent, or no entry fits.
 /// The answer is a hint, never trusted: [`crate::detect_with`] checks it against the folder.
 pub fn launch_executable(appinfo_path: &Path, appid: u32, os: &str) -> Option<String> {
-    let app = read_app(appinfo_path, appid)?;
+    launch_executables(appinfo_path, &[appid], os).remove(&appid)
+}
+
+/// [`launch_executable`] for many apps in ONE pass over the file, which is 100+ MB on a machine
+/// with a large library: a frontend listing a whole library asks once, not once per game. An app
+/// with no fitting entry is simply absent from the map; a missing or corrupt file gives an empty
+/// map.
+pub fn launch_executables(
+    appinfo_path: &Path,
+    appids: &[u32],
+    os: &str,
+) -> std::collections::BTreeMap<u32, String> {
+    let wanted: std::collections::BTreeSet<u32> = appids.iter().copied().collect();
+    read_apps(appinfo_path, &wanted)
+        .into_iter()
+        .filter_map(|(id, app)| pick(&app, os).map(|exe| (id, exe)))
+        .collect()
+}
+
+/// The launch entry [`launch_executable`] picks, from one app's parsed KeyValues.
+fn pick(app: &Kv, os: &str) -> Option<String> {
     let launch = LAUNCH_PATH
         .iter()
-        .try_fold(&app, |kv, key| kv.get(key))?
+        .try_fold(app, |kv, key| kv.get(key))?
         .object()?;
     // Ranked by (tier, Steam's order). Steam's order is the numeric key; any other key keeps its
     // place in the file, after.
@@ -261,7 +281,36 @@ fn read_i64(r: &mut impl Read) -> Option<i64> {
 }
 
 /// Streams to `appid` and parses its KeyValues. The root object, holding `appinfo`.
-fn read_app(path: &Path, appid: u32) -> Option<Kv> {
+/// The parsed KeyValues of every app in `wanted`, read in one pass. Corruption anywhere ends the
+/// pass with what was found before it; a corrupt app body is skipped.
+fn read_apps(
+    path: &Path,
+    wanted: &std::collections::BTreeSet<u32>,
+) -> std::collections::BTreeMap<u32, Kv> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(blobs) = read_blobs(path, wanted) else {
+        return out;
+    };
+    let (blobs, table) = blobs;
+    let keys = match &table {
+        Some(t) => Keys::Table(t),
+        None => Keys::Inline,
+    };
+    for (id, blob) in blobs {
+        let mut c = Cursor { b: &blob, at: 0 };
+        if let Some(obj) = object(&mut c, &keys, 0, Some(LAUNCH_PATH)) {
+            out.insert(id, Kv::Object(obj));
+        }
+    }
+    out
+}
+
+/// The raw bodies of the `wanted` apps, and the v29 string table, in one pass.
+#[allow(clippy::type_complexity)]
+fn read_blobs(
+    path: &Path,
+    wanted: &std::collections::BTreeSet<u32>,
+) -> Option<(Vec<(u32, Vec<u8>)>, Option<Table>)> {
     let file = File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
     let mut r = BufReader::with_capacity(1 << 16, file);
@@ -280,42 +329,46 @@ fn read_app(path: &Path, appid: u32) -> Option<Kv> {
     };
     // The apps end where the string table starts (v29) or at the end of the file (v28).
     let apps_end = table_at.unwrap_or(len);
-    loop {
+    let mut blobs = Vec::new();
+    while blobs.len() < wanted.len() {
         if pos + 8 > apps_end {
-            return None;
+            break;
         }
-        let id = read_u32(&mut r)?;
+        let Some(id) = read_u32(&mut r) else { break };
         if id == 0 {
-            return None;
+            break;
         }
-        let size = read_u32(&mut r)?;
+        let Some(size) = read_u32(&mut r) else { break };
         pos += 8;
         if size < APP_HEADER || pos + u64::from(size) > apps_end {
-            return None;
+            break;
         }
-        if id != appid {
-            r.seek_relative(i64::from(size)).ok()?;
+        if !wanted.contains(&id) || size - APP_HEADER > MAX_APP_BYTES {
+            if r.seek_relative(i64::from(size)).is_err() {
+                break;
+            }
             pos += u64::from(size);
             continue;
         }
         let body = size - APP_HEADER;
-        if body > MAX_APP_BYTES {
-            return None;
+        if r.seek_relative(i64::from(APP_HEADER)).is_err() {
+            break;
         }
-        r.seek_relative(i64::from(APP_HEADER)).ok()?;
         let mut blob = vec![0u8; body as usize];
-        r.read_exact(&mut blob).ok()?;
-        let table = match table_at {
-            Some(at) => Some(read_table(&mut r, at, len)?),
-            None => None,
-        };
-        let mut c = Cursor { b: &blob, at: 0 };
-        let keys = match &table {
-            Some(t) => Keys::Table(t),
-            None => Keys::Inline,
-        };
-        return Some(Kv::Object(object(&mut c, &keys, 0, Some(LAUNCH_PATH))?));
+        if r.read_exact(&mut blob).is_err() {
+            break;
+        }
+        pos += u64::from(size);
+        blobs.push((id, blob));
     }
+    if blobs.is_empty() {
+        return Some((blobs, None));
+    }
+    let table = match table_at {
+        Some(at) => Some(read_table(&mut r, at, len)?),
+        None => None,
+    };
+    Some((blobs, table))
 }
 
 /// The v29 string table: its bytes, and where each string starts in them.
