@@ -104,6 +104,83 @@ pub struct Detection {
     /// `false` when there was none or it was ignored (outside the folder, missing, a launcher).
     #[serde(default)]
     pub hint_used: bool,
+    /// The Unity version the game was built with (`2021.3.16f1`, `6000.3.1f1`), read from the
+    /// header of `<stem>_Data/globalgamemanagers` or `data.unity3d`. Unity games only; `None`
+    /// when neither file says. Some loaders break on some Unity lines, and this is how a
+    /// frontend tells them apart before anything is installed. See [`unity_version_parts`].
+    #[serde(default)]
+    pub unity_version: Option<String>,
+}
+
+/// The `(major, minor)` of a Unity version string: `6000.3.1f1` → `(6000, 3)`.
+pub fn unity_version_parts(version: &str) -> Option<(u32, u32)> {
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// How much of a data file's head is read for its version string. Both headers put it in the
+/// first hundred bytes; the margin is for formats this was not shown.
+const VERSION_HEAD: u64 = 4096;
+
+/// The Unity version in a game's data folder, from the first file that names one.
+fn unity_version_in(data_dir: &Path) -> Option<String> {
+    ["globalgamemanagers", "data.unity3d", "mainData"]
+        .iter()
+        .find_map(|name| {
+            let mut head = Vec::new();
+            File::open(data_dir.join(name))
+                .ok()?
+                .take(VERSION_HEAD)
+                .read_to_end(&mut head)
+                .ok()?;
+            find_unity_version(&head)
+        })
+}
+
+/// The first `<digits>.<digits>.<digits><a|b|f|p|x><digits>` in `bytes`. The letter is required:
+/// a bundle header also carries its format as `5.x.x`, which is not the engine's version.
+fn find_unity_version(bytes: &[u8]) -> Option<String> {
+    fn digits(b: &[u8], i: usize, max: usize) -> usize {
+        b[i..]
+            .iter()
+            .take(max)
+            .take_while(|c| c.is_ascii_digit())
+            .count()
+    }
+    for start in 0..bytes.len() {
+        if start > 0 && bytes[start - 1].is_ascii_digit() {
+            continue;
+        }
+        let mut i = start;
+        let mut ok = true;
+        for (max, sep) in [(4, Some(b'.')), (2, Some(b'.')), (3, None)] {
+            let n = digits(bytes, i, max);
+            if n == 0 {
+                ok = false;
+                break;
+            }
+            i += n;
+            if let Some(sep) = sep {
+                if bytes.get(i) != Some(&sep) {
+                    ok = false;
+                    break;
+                }
+                i += 1;
+            }
+        }
+        if !ok || !matches!(bytes.get(i), Some(b'a' | b'b' | b'f' | b'p' | b'x')) {
+            continue;
+        }
+        i += 1;
+        let n = digits(bytes, i, 3);
+        if n == 0 {
+            continue;
+        }
+        return Some(String::from_utf8_lossy(&bytes[start..i + n]).into_owned());
+    }
+    None
 }
 
 struct Entry {
@@ -227,8 +304,21 @@ struct Candidate {
 }
 
 impl Candidate {
-    fn into_detection(self, anti_cheat: Vec<String>, hint_used: bool) -> Detection {
+    fn into_detection(
+        self,
+        game_dir: &Path,
+        anti_cheat: Vec<String>,
+        hint_used: bool,
+    ) -> Detection {
+        let unity_version = match self.engine {
+            Engine::UnityMono | Engine::UnityIl2cpp => self
+                .evidence
+                .as_deref()
+                .and_then(|data| unity_version_in(&game_dir.join(rel_path(data)))),
+            _ => None,
+        };
         Detection {
+            unity_version,
             engine: self.engine,
             confidence: self.confidence,
             exe: self.exe.as_deref().map(rel_path),
@@ -556,7 +646,7 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
     let anti_cheat = anti_cheat_of(&entries);
 
     if let Some(c) = launch_hint.and_then(|h| hinted(game_dir, h)) {
-        return Ok(c.into_detection(anti_cheat, true));
+        return Ok(c.into_detection(game_dir, anti_cheat, true));
     }
 
     // Every folder's listing, as the walk saw it.
@@ -589,7 +679,7 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
         })
         .collect();
     if let Some(c) = best(game_dir, games) {
-        return Ok(c.into_detection(anti_cheat, false));
+        return Ok(c.into_detection(game_dir, anti_cheat, false));
     }
 
     // No game found. The weaker signs, each Low.
@@ -599,7 +689,7 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
         .filter_map(|(parent, _, name)| unreal(game_dir, parent, name))
         .collect();
     if let Some(c) = best(game_dir, half) {
-        return Ok(c.into_detection(anti_cheat, false));
+        return Ok(c.into_detection(game_dir, anti_cheat, false));
     }
     let shipping = entries.iter().find(|e| {
         !e.is_dir
@@ -634,7 +724,7 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
             passes: false,
             named_alike: false,
         }
-        .into_detection(anti_cheat, false));
+        .into_detection(game_dir, anti_cheat, false));
     }
 
     // Godot with the pck embedded in the program.
@@ -656,7 +746,7 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
             passes: false,
             named_alike: true,
         }
-        .into_detection(anti_cheat, false));
+        .into_detection(game_dir, anti_cheat, false));
     }
 
     // Unknown. Name the program when there is exactly one obvious one.
@@ -676,6 +766,7 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
         anti_cheat,
         evidence: None,
         hint_used: false,
+        unity_version: None,
     })
 }
 

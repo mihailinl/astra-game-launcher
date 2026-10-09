@@ -8,7 +8,7 @@ mod common;
 
 use std::path::PathBuf;
 
-use astra_game_launcher::{Binary, Confidence, Engine, detect, detect_with};
+use astra_game_launcher::{Binary, Confidence, Engine, detect, detect_with, unity_version_parts};
 use common::*;
 
 #[test]
@@ -34,6 +34,47 @@ fn unity_mono_native_linux_is_detected_as_linux() {
     let d = detect(t.path()).unwrap();
     assert_eq!((d.engine, d.binary), (Engine::UnityMono, Binary::Linux));
     assert_eq!(d.exe, Some(PathBuf::from("Game.x86_64")));
+}
+
+#[test]
+fn the_unity_version_comes_from_the_data_folders_header() {
+    let t = Tmp::new("il2cpp-version");
+    write(&t.join("Game.exe"), b"MZ");
+    write(&t.join("UnityPlayer.dll"), b"MZ");
+    write(&t.join("GameAssembly.dll"), b"MZ");
+    // A serialized-file header: sizes and offsets (digits among them), then the version.
+    let mut header = vec![0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x16, b'1', b'2', 0, 0];
+    header.extend_from_slice(b"6000.3.1f1\0");
+    write(&t.join("Game_Data/globalgamemanagers"), &header);
+    let d = detect(t.path()).unwrap();
+    assert_eq!(d.engine, Engine::UnityIl2cpp);
+    assert_eq!(d.unity_version.as_deref(), Some("6000.3.1f1"));
+    assert_eq!(unity_version_parts("6000.3.1f1"), Some((6000, 3)));
+}
+
+#[test]
+fn a_bundle_header_names_the_engine_not_its_own_format() {
+    let t = Tmp::new("bundle-version");
+    unity_game(t.path(), "Game");
+    // UnityFS: magic, format, the bundle's own `5.x.x` version, then the engine's.
+    let mut header = b"UnityFS\0\0\0\0\x08".to_vec();
+    header.extend_from_slice(b"5.6.0\0");
+    header.extend_from_slice(b"2021.3.16f1\0");
+    write(&t.join("Game_Data/data.unity3d"), &header);
+    let d = detect(t.path()).unwrap();
+    assert_eq!(d.unity_version.as_deref(), Some("2021.3.16f1"));
+}
+
+#[test]
+fn no_version_is_read_when_no_file_says_one() {
+    let t = Tmp::new("no-version");
+    unity_game(t.path(), "Game");
+    write(
+        &t.join("Game_Data/globalgamemanagers"),
+        b"\0\0no version here 1.2.3\0",
+    );
+    assert_eq!(detect(t.path()).unwrap().unity_version, None);
+    assert_eq!(unity_version_parts("garbage"), None);
 }
 
 #[test]

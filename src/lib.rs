@@ -34,7 +34,7 @@ mod running;
 pub mod steam_appinfo;
 
 pub use ctx::{Ctx, Progress};
-pub use detect::{Binary, Confidence, Detection, Engine, detect, detect_with};
+pub use detect::{Binary, Confidence, Detection, Engine, detect, detect_with, unity_version_parts};
 pub use error::{LauncherError, Result, codes};
 #[cfg(feature = "cli")]
 pub use fetch::UreqFetch;

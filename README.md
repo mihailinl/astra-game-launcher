@@ -77,7 +77,10 @@ program, never by which game it is. There is no per-game rule.
 2. **Unity.** A program with `<stem>_Data/` and `UnityPlayer.dll` (or `.so`) in its own folder:
    `MiSideFull.exe` with `MiSideFull_Data`.
 3. **Unity's flavour, from that folder.** `GameAssembly.dll`/`.so` beside it: IL2CPP.
-   `<stem>_Data/Managed/Assembly-CSharp.dll`: Mono.
+   `<stem>_Data/Managed/Assembly-CSharp.dll`: Mono. The Unity version the game was built with is
+   read from the head of `<stem>_Data/globalgamemanagers` (or `data.unity3d`) into
+   `Detection::unity_version`, since some loaders break on some Unity lines;
+   `unity_version_parts` gives its `(major, minor)`.
 4. **Several pass.** The shallowest, then the one Steam launches, then the largest evidence
    folder (a bounded walk).
 5. **The same idea per engine.** Unreal: `<Project>/Binaries/Win64/<Name>-Win64-Shipping.exe`
