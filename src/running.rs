@@ -11,8 +11,11 @@ fn base_name(s: &str) -> &str {
     s.rsplit(['/', '\\']).next().unwrap_or(s)
 }
 
+/// Is a process whose program is `exe_file` (a FILE NAME, compared without case) running? Best
+/// effort: on Linux the first argument of each process, which under Proton is the game's Windows
+/// path; on Windows each process's image name; elsewhere always `false`. This process never counts.
 #[cfg(target_os = "linux")]
-pub(crate) fn is_running(exe_file: &str) -> bool {
+pub fn is_running(exe_file: &str) -> bool {
     let me = std::process::id().to_string();
     let Ok(dir) = std::fs::read_dir("/proc") else {
         return false;
@@ -36,7 +39,7 @@ pub(crate) fn is_running(exe_file: &str) -> bool {
 }
 
 #[cfg(windows)]
-pub(crate) fn is_running(exe_file: &str) -> bool {
+pub fn is_running(exe_file: &str) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
@@ -75,7 +78,7 @@ pub(crate) fn is_running(exe_file: &str) -> bool {
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]
-pub(crate) fn is_running(_exe_file: &str) -> bool {
+pub fn is_running(_exe_file: &str) -> bool {
     false
 }
 
@@ -85,4 +88,29 @@ pub(crate) fn refuse_if_running(exe_file: &str) -> Result<()> {
         return Err(LauncherError::new(codes::GAME_RUNNING).with("exe", exe_file));
     }
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+
+    #[test]
+    fn a_proton_style_first_argument_counts_as_running_and_stops_counting_when_it_exits() {
+        let name = format!("Astra Probe {}.exe", std::process::id());
+        assert!(!is_running(&name));
+        let mut child = std::process::Command::new("sleep")
+            .arg0(format!("Z:\\games\\{name}"))
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let seen = (0..50).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            is_running(&name.to_uppercase())
+        });
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(seen, "the child's first argument names the program");
+        assert!(!is_running(&name), "a reaped child is not running");
+    }
 }
