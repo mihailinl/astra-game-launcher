@@ -348,6 +348,21 @@ fn game_root_for_uninstall(game: &GameTarget) -> Result<PathBuf> {
     }
 }
 
+/// The exe folder the ledger recorded at install, when it still exists and lies inside the same
+/// game folder `game` names; `None` otherwise.
+fn recorded_game_root(game: &GameTarget, ledger: &Ledger) -> Option<PathBuf> {
+    let current = canonical_dir(&game.dir).ok()?;
+    let recorded = canonical_dir(&ledger.game.dir).ok()?;
+    if recorded != current {
+        return None;
+    }
+    let comps = checked_rel(&ledger.game.exe.replace('\\', "/")).ok()?;
+    let mut p = current.clone();
+    p.extend(&comps[..comps.len().saturating_sub(1)]);
+    let root = canonical_dir(&p).ok()?;
+    root.starts_with(&current).then_some(root)
+}
+
 /// Removes an installed integration: restores the game files, the Proton override and the
 /// profile to what they were.
 pub fn uninstall(profile_dir: &Path, game: &GameTarget) -> Result<UninstallReport> {
@@ -361,7 +376,13 @@ pub fn uninstall(profile_dir: &Path, game: &GameTarget) -> Result<UninstallRepor
             return Err(LauncherError::new(codes::NOT_INSTALLED));
         };
         refuse_if_running(&game.exe_file_name()?)?;
-        let game_root = game_root_for_uninstall(game)?;
+        // The folder the files were PLACED in is the ledger's, not today's detection: an exe
+        // detected differently now (a launcher fix, a game update) must not send uninstall to
+        // another folder while ours stay behind. Trusted only inside the same game folder.
+        let game_root = match recorded_game_root(game, &ledger) {
+            Some(root) => root,
+            None => game_root_for_uninstall(game)?,
+        };
         uninstall_ledger(&profile, &game_root, &ledger)?
     };
     let _ = fs::remove_file(profile.join(LOCK_FILE));

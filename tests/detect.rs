@@ -150,3 +150,29 @@ fn the_walk_does_not_follow_links() {
         assert!(d.anti_cheat.is_empty(), "a link is never followed");
     }
 }
+
+/// MiSide's layout: an IL2CPP game at the root (`GameAssembly.dll` beside `UnityPlayer.dll`, no
+/// `il2cpp_data`) and a Mono tool in a subfolder. The ROOT game is the one detected, as IL2CPP.
+#[test]
+fn a_root_game_wins_over_a_mono_tool_in_a_subfolder() {
+    let t = Tmp::new("miside");
+    write(&t.join("MiSideFull.exe"), b"MZ game");
+    write(&t.join("UnityPlayer.dll"), b"MZ player");
+    write(&t.join("GameAssembly.dll"), b"MZ ga");
+    write(&t.join("MiSideFull_Data/globalgamemanagers"), b"x");
+    unity_game(&t.join("Voice Editor"), "Miside Voice Editor");
+    let d = detect(t.path()).unwrap();
+    assert_eq!(d.engine, Engine::UnityIl2cpp);
+    assert_eq!(d.exe, Some(PathBuf::from("MiSideFull.exe")));
+    assert_eq!(d.confidence, Confidence::High);
+}
+
+/// With nothing Unity at the root, a game one level down is still found.
+#[test]
+fn a_game_one_level_down_is_found_when_the_root_has_none() {
+    let t = Tmp::new("nested");
+    unity_game(&t.join("Game"), "Inner");
+    let d = detect(t.path()).unwrap();
+    assert_eq!(d.engine, Engine::UnityMono);
+    assert_eq!(d.exe, Some(PathBuf::from("Game/Inner.exe")));
+}

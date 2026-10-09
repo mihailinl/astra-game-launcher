@@ -230,6 +230,10 @@ fn unity_at(root: &Path, data_rel: &[String]) -> Option<UnityCandidate> {
     let player = player_dll || player_so;
     let (engine, confidence, score) = if il2cpp && ga {
         (Engine::UnityIl2cpp, Confidence::High, 4)
+    } else if ga && player {
+        // `GameAssembly` beside the player IS IL2CPP, with or without `il2cpp_data` (MiSide's
+        // root has none). Checked before Mono, so a stray `Managed` folder cannot win.
+        (Engine::UnityIl2cpp, Confidence::High, 4)
     } else if csharp && player {
         (Engine::UnityMono, Confidence::High, 4)
     } else if csharp {
@@ -293,12 +297,19 @@ pub fn detect(game_dir: &Path) -> Result<Detection> {
     let entries = walk(game_dir)?;
     let anti_cheat = anti_cheat_of(&entries);
 
-    // Unity: a `<name>_Data` folder at the top or one level down.
-    let best = entries
-        .iter()
-        .filter(|e| e.is_dir && e.rel.len() <= 2 && e.name().ends_with("_Data"))
-        .filter_map(|e| unity_at(game_dir, &e.rel))
-        .max_by_key(|c| c.score);
+    // Unity: a `<name>_Data` folder at the top or one level down. A game at the TOP wins over
+    // anything in a subfolder, whatever the scores: a subfolder holds tools that ship beside
+    // the game (MiSide's `Voice Editor/` is a Mono program next to an IL2CPP game, and picking
+    // it placed the loader where nothing ever loads it). One level down is only a fallback for
+    // games whose root holds no Unity program at all.
+    let unity_at_depth = |depth: usize| {
+        entries
+            .iter()
+            .filter(|e| e.is_dir && e.rel.len() == depth && e.name().ends_with("_Data"))
+            .filter_map(|e| unity_at(game_dir, &e.rel))
+            .max_by_key(|c| c.score)
+    };
+    let best = unity_at_depth(1).or_else(|| unity_at_depth(2));
     if let Some(c) = best {
         return Ok(Detection {
             engine: c.engine,

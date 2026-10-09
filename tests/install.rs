@@ -424,3 +424,26 @@ fn the_game_is_checked_before_anything() {
         (codes::GAME_MISMATCH, Some("exe"))
     );
 }
+
+/// Uninstall cleans the folder the files were PLACED in (the ledger's), even when today's
+/// target names another exe in the same game: a detection change must not strand our files.
+#[test]
+fn uninstall_follows_the_ledgers_exe_folder_not_todays_target() {
+    let w = World::new();
+    unity_game(&w.game.join("Tools"), "Tool");
+    let before = snapshot(w.game.path());
+    let pkg = runner();
+    let tool = target(w.game.path(), "Tools/Tool.exe", None, Platform::Windows);
+    let plan = plan_install(&pkg, &tool, &w.profile()).unwrap();
+    install(&pkg, &plan, &tool, &Ctx::silent()).unwrap();
+    assert!(w.game.join("Tools/winhttp.dll").exists());
+
+    // Today the root exe is detected instead.
+    let r = uninstall(&w.profile(), &w.target()).unwrap();
+    assert_eq!(r.removed, vec!["doorstop_config.ini", "winhttp.dll"]);
+    assert_eq!(
+        snapshot(w.game.path()),
+        before,
+        "the Tools folder is clean again"
+    );
+}
