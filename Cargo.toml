@@ -35,5 +35,9 @@ zip = { version = "8", default-features = false, features = ["deflate-flate2-zli
 ureq = { version = "3", optional = true, default-features = false, features = ["rustls"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Registry",
+] }
 

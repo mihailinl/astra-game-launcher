@@ -31,6 +31,7 @@ mod paths;
 mod plan;
 mod proton;
 mod running;
+pub mod steam_appinfo;
 
 pub use ctx::{Ctx, Progress};
 pub use detect::{Binary, Confidence, Detection, Engine, detect};
@@ -51,6 +52,7 @@ pub use manifest::{
 };
 pub use package::{GiPackage, Limits, PackageSummary, SummaryConfigWrite, SummaryGameFile};
 pub use plan::{GameAction, GameFileAction, InstallPlan, plan_install};
+pub use steam_appinfo::{launch_executable, steam_roots};
 
 /// The ledger's file name inside a profile.
 pub const LEDGER_FILE_NAME: &str = paths::LEDGER_FILE;
