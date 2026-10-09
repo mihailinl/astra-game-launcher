@@ -2,10 +2,29 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Which engine a game folder holds, which binary it ships, and whether it carries anti-cheat.
-//! Read-only. The walk is bounded (depth 4, 5000 entries) and never follows a link.
+//! Which engine a game folder holds, which program is the game, and whether it carries
+//! anti-cheat. Read-only. The walk is bounded (depth 4, 5000 entries) and never follows a link.
+//!
+//! A program is the game by what sits beside it, never by its name or by which game it is:
+//!
+//! 1. **Steam's launch config.** The program Steam launches
+//!    ([`crate::steam_appinfo::launch_executable`], passed to [`detect_with`]) wins outright
+//!    when it passes rule 2 or 5.
+//! 2. **Unity.** `<stem>_Data/` and `UnityPlayer.dll` (or `UnityPlayer.so`) in the program's own
+//!    folder: `MiSideFull.exe` ↔ `MiSideFull_Data`.
+//! 3. **Unity's flavour, from that same folder.** `GameAssembly.dll`/`.so` beside the program is
+//!    IL2CPP; `<stem>_Data/Managed/Assembly-CSharp.dll` is Mono.
+//! 4. **Several pass.** The shallowest (by where its evidence sits), then the one Steam
+//!    launches, then the largest evidence (a bounded walk).
+//! 5. **The same idea per engine.** Unreal: `<Project>/Binaries/Win64/<Name>-Win64-Shipping.exe`
+//!    with `<Project>/Content/Paks/`. Godot: `<stem>.pck` beside the program.
+//!
+//! Weaker signs, each at Low confidence: a Unity game from before 2017.2 (its player linked into
+//! the program, so no `UnityPlayer`, but `<stem>_Data/Managed/Assembly-CSharp.dll`) ranks with
+//! the programs that pass, by depth, after them at the same depth. Only when no game is found at
+//! all do the rest speak: half an Unreal pairing, a Godot pck embedded in the program.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -13,6 +32,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{LauncherError, Result};
+use crate::paths::relative_components;
 
 const MAX_DEPTH: usize = 4;
 const MAX_ENTRIES: usize = 5000;
@@ -75,6 +95,15 @@ pub struct Detection {
     pub binary: Binary,
     /// Codes: "easy-anti-cheat", "battleye", "gameguard", "xigncode", "hoyo-protect".
     pub anti_cheat: Vec<String>,
+    /// What made the call, relative to the folder detected: the `<stem>_Data` folder (Unity),
+    /// the `<Project>` folder (Unreal), the `.pck` (Godot; the program itself when the pck is
+    /// embedded in it). `None` when nothing did. For support: it says WHY.
+    #[serde(default)]
+    pub evidence: Option<PathBuf>,
+    /// The launch hint given to [`detect_with`] passed the rules and is the program detected.
+    /// `false` when there was none or it was ignored (outside the folder, missing, a launcher).
+    #[serde(default)]
+    pub hint_used: bool,
 }
 
 struct Entry {
@@ -174,84 +203,479 @@ fn is_dir(p: &Path) -> bool {
     fs::symlink_metadata(p).is_ok_and(|m| m.is_dir())
 }
 
-/// What one `<stem>_Data` folder says about the Unity game beside it.
-struct UnityCandidate {
+/// Bounds of the walk that sizes one evidence folder, for the tie-break between two programs
+/// that both pass at the same depth.
+const SIZE_MAX_ENTRIES: usize = 50_000;
+const SIZE_MAX_DEPTH: usize = 16;
+
+/// The names in one folder, each with whether it is a folder. Links are left out.
+type Listing = [(String, bool)];
+
+/// What one program says about itself, by the files beside it.
+struct Candidate {
     engine: Engine,
     confidence: Confidence,
-    exe: Option<PathBuf>,
+    exe: Option<Vec<String>>,
     binary: Binary,
-    score: u8,
+    evidence: Option<Vec<String>>,
+    /// It passes rule 2 or 5. A weaker sign (a pre-2017.2 Unity game) ranks after one that
+    /// passes at the same depth, never before a deeper one.
+    passes: bool,
+    /// The program's name repeats its evidence's: Unreal's `<Project>-Win64-Shipping.exe` in
+    /// `<Project>/` (Palworld's `Pal/…/Palworld-Win64-Shipping.exe` does not). A tie-break only.
+    named_alike: bool,
 }
 
-fn unity_at(root: &Path, data_rel: &[String]) -> Option<UnityCandidate> {
-    let data_name = data_rel.last()?;
-    let stem = data_name.strip_suffix("_Data")?;
+impl Candidate {
+    fn into_detection(self, anti_cheat: Vec<String>, hint_used: bool) -> Detection {
+        Detection {
+            engine: self.engine,
+            confidence: self.confidence,
+            exe: self.exe.as_deref().map(rel_path),
+            binary: self.binary,
+            anti_cheat,
+            evidence: self.evidence.as_deref().map(rel_path),
+            hint_used,
+        }
+    }
+
+    /// How deep the game sits: its evidence's depth, so an Unreal project at the top
+    /// (`<Project>/Binaries/Win64/…`) counts as deep as a Unity game at the top.
+    fn depth(&self) -> usize {
+        self.evidence
+            .as_ref()
+            .or(self.exe.as_ref())
+            .map_or(usize::MAX, Vec::len)
+    }
+}
+
+fn joined(parent: &[String], name: &str) -> Vec<String> {
+    let mut v = parent.to_vec();
+    v.push(name.to_owned());
+    v
+}
+
+fn abs(root: &Path, rel: &[String]) -> PathBuf {
+    let mut p = root.to_path_buf();
+    p.extend(rel);
+    p
+}
+
+/// `name` in `listing`, of the kind asked for: the exact spelling first, else ignoring ASCII
+/// case (a game built on Windows may not match its own spelling on a Linux disk).
+fn find_in<'a>(listing: &'a Listing, name: &str, dir: bool) -> Option<&'a str> {
+    let mut it = listing.iter().filter(|(_, d)| *d == dir);
+    it.clone()
+        .find(|(n, _)| n == name)
+        .or_else(|| it.find(|(n, _)| n.eq_ignore_ascii_case(name)))
+        .map(|(n, _)| n.as_str())
+}
+
+/// One folder's listing, read from disk. `None` when it cannot be read.
+fn listing_of(dir: &Path) -> Option<Vec<(String, bool)>> {
+    let mut out = Vec::new();
+    for item in fs::read_dir(dir).ok()?.flatten() {
+        if out.len() >= MAX_ENTRIES {
+            break;
+        }
+        let Ok(ft) = item.file_type() else { continue };
+        if ft.is_symlink() {
+            continue;
+        }
+        out.push((item.file_name().to_string_lossy().into_owned(), ft.is_dir()));
+    }
+    out.sort();
+    Some(out)
+}
+
+/// The child of `dir` named `name` (exact spelling first, else ignoring ASCII case) that is a
+/// real folder or a real file as asked, never a link.
+fn child(dir: &Path, name: &str, want_dir: bool) -> Option<String> {
+    let kind = |p: &Path| if want_dir { is_dir(p) } else { is_file(p) };
+    if kind(&dir.join(name)) {
+        return Some(name.to_owned());
+    }
+    fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .take(MAX_ENTRIES)
+        .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+        .filter(|n| n.eq_ignore_ascii_case(name) && kind(&dir.join(n)))
+        .min()
+}
+
+/// The stem a program's `_Data` folder or `.pck` repeats: `Game.exe`, `Game.x86_64`,
+/// `Game.x86` → `Game`; any other name is its own stem (`Game` on Linux).
+fn program_stem(name: &str) -> &str {
+    match name.rsplit_once('.') {
+        Some((stem, _)) if is_program_name(name) => stem,
+        _ => name,
+    }
+}
+
+/// Rule 2 and 3, Unity: `<stem>_Data/` and `UnityPlayer.dll`/`.so` beside the program; the
+/// flavour from the same folder.
+fn unity(game_dir: &Path, parent: &[String], listing: &Listing, name: &str) -> Option<Candidate> {
+    let stem = program_stem(name);
     if stem.is_empty() {
         return None;
     }
-    let parent_rel = &data_rel[..data_rel.len() - 1];
-    let mut parent = root.to_path_buf();
-    parent.extend(parent_rel);
-    let data = parent.join(data_name);
-
-    let managed = data.join("Managed");
-    let csharp = is_file(&managed.join("Assembly-CSharp.dll"));
-    let il2cpp = is_dir(&data.join("il2cpp_data"));
-    let player_dll = is_file(&parent.join("UnityPlayer.dll"));
-    let player_so = is_file(&parent.join("UnityPlayer.so"));
-    let ga = is_file(&parent.join("GameAssembly.dll")) || is_file(&parent.join("GameAssembly.so"));
-
-    let rel_of = |name: &str| -> PathBuf {
-        let mut p = PathBuf::new();
-        p.extend(parent_rel);
-        p.push(name);
-        p
-    };
-    let win_exe = format!("{stem}.exe");
-    let (exe, binary) = if is_file(&parent.join(&win_exe)) {
-        (Some(rel_of(&win_exe)), Binary::Windows)
-    } else if let Some(n) = [
-        format!("{stem}.x86_64"),
-        format!("{stem}.x86"),
-        stem.to_owned(),
-    ]
-    .into_iter()
-    .find(|n| is_file(&parent.join(n)))
-    {
-        (Some(rel_of(&n)), Binary::Linux)
-    } else if player_so {
-        (None, Binary::Linux)
-    } else if player_dll {
-        (None, Binary::Windows)
-    } else {
-        (None, Binary::Unknown)
-    };
-
-    let player = player_dll || player_so;
-    let (engine, confidence, score) = if il2cpp && ga {
-        (Engine::UnityIl2cpp, Confidence::High, 4)
-    } else if ga && player {
-        // `GameAssembly` beside the player IS IL2CPP, with or without `il2cpp_data` (MiSide's
-        // root has none). Checked before Mono, so a stray `Managed` folder cannot win.
-        (Engine::UnityIl2cpp, Confidence::High, 4)
-    } else if csharp && player {
-        (Engine::UnityMono, Confidence::High, 4)
-    } else if csharp {
-        (Engine::UnityMono, Confidence::Low, 2)
-    } else if il2cpp {
-        (Engine::UnityIl2cpp, Confidence::Low, 2)
-    } else if player && is_dir(&managed) {
-        (Engine::UnityMono, Confidence::Low, 1)
-    } else {
+    let data = find_in(listing, &format!("{stem}_Data"), true)?;
+    let has = |n: &str| find_in(listing, n, false).is_some();
+    if !has("UnityPlayer.dll") && !has("UnityPlayer.so") {
         return None;
+    }
+    let data_rel = joined(parent, data);
+    let data_path = abs(game_dir, &data_rel);
+    let managed = data_path.join("Managed");
+    let (engine, confidence) = if has("GameAssembly.dll") || has("GameAssembly.so") {
+        (Engine::UnityIl2cpp, Confidence::High)
+    } else if is_file(&managed.join("Assembly-CSharp.dll")) {
+        (Engine::UnityMono, Confidence::High)
+    } else if is_dir(&data_path.join("il2cpp_data")) {
+        (Engine::UnityIl2cpp, Confidence::Low)
+    } else if is_dir(&managed) {
+        // Mono with all its code in other assemblies.
+        (Engine::UnityMono, Confidence::Low)
+    } else {
+        // A Unity player and its data, but neither flavour: the program still IS the game.
+        (Engine::Unknown, Confidence::Low)
     };
-    let score = score + u8::from(exe.is_some());
-    Some(UnityCandidate {
+    Some(Candidate {
         engine,
         confidence,
+        exe: Some(joined(parent, name)),
+        binary: if ext_lower(name) == "exe" {
+            Binary::Windows
+        } else {
+            Binary::Linux
+        },
+        evidence: Some(data_rel),
+        passes: true,
+        named_alike: true,
+    })
+}
+
+/// Before Unity 2017.2 the player was linked into the program, so there is no `UnityPlayer`
+/// and rule 2 cannot pass; `<stem>_Data/Managed/Assembly-CSharp.dll` still proves a Mono game.
+fn legacy_unity(
+    game_dir: &Path,
+    parent: &[String],
+    listing: &Listing,
+    name: &str,
+) -> Option<Candidate> {
+    let stem = program_stem(name);
+    if stem.is_empty() {
+        return None;
+    }
+    let data = find_in(listing, &format!("{stem}_Data"), true)?;
+    let data_rel = joined(parent, data);
+    let csharp = abs(game_dir, &data_rel)
+        .join("Managed")
+        .join("Assembly-CSharp.dll");
+    if !is_file(&csharp) {
+        return None;
+    }
+    Some(Candidate {
+        engine: Engine::UnityMono,
+        confidence: Confidence::Low,
+        exe: Some(joined(parent, name)),
+        binary: if ext_lower(name) == "exe" {
+            Binary::Windows
+        } else {
+            Binary::Linux
+        },
+        evidence: Some(data_rel),
+        passes: false,
+        named_alike: true,
+    })
+}
+
+/// Rule 5, Godot: `<stem>.pck` beside the program.
+fn godot(parent: &[String], listing: &Listing, name: &str) -> Option<Candidate> {
+    if !is_program_name(name) {
+        return None;
+    }
+    let pck = find_in(listing, &format!("{}.pck", program_stem(name)), false)?;
+    Some(Candidate {
+        engine: Engine::Godot,
+        confidence: Confidence::High,
+        exe: Some(joined(parent, name)),
+        binary: binary_of(name),
+        evidence: Some(joined(parent, pck)),
+        passes: true,
+        named_alike: true,
+    })
+}
+
+/// Rule 5, Unreal: `<Project>/Binaries/Win64/<Name>-Win64-Shipping.exe`. High with
+/// `<Project>/Content/Paks/`, Low without it. The name is not required to repeat the project's
+/// (Palworld ships `Pal/Binaries/Win64/Palworld-Win64-Shipping.exe`); the pairing is the folder.
+fn unreal(game_dir: &Path, parent: &[String], name: &str) -> Option<Candidate> {
+    let lower = name.to_ascii_lowercase();
+    let prefix = lower.strip_suffix("-win64-shipping.exe")?;
+    let n = parent.len();
+    if prefix.is_empty()
+        || n < 3
+        || !parent[n - 1].eq_ignore_ascii_case("Win64")
+        || !parent[n - 2].eq_ignore_ascii_case("Binaries")
+    {
+        return None;
+    }
+    let project = &parent[..n - 2];
+    let project_path = abs(game_dir, project);
+    let paks = child(&project_path, "Content", true)
+        .and_then(|c| child(&project_path.join(c), "Paks", true))
+        .is_some();
+    Some(Candidate {
+        engine: Engine::Unreal,
+        confidence: if paks {
+            Confidence::High
+        } else {
+            Confidence::Low
+        },
+        exe: Some(joined(parent, name)),
+        binary: Binary::Windows,
+        evidence: Some(project.to_vec()),
+        passes: paks,
+        named_alike: project
+            .last()
+            .is_some_and(|p| p.eq_ignore_ascii_case(prefix)),
+    })
+}
+
+/// Whether the program at `parent/name` passes rule 2 (Unity) or rule 5 (Unreal, Godot).
+fn passes(game_dir: &Path, parent: &[String], listing: &Listing, name: &str) -> Option<Candidate> {
+    unity(game_dir, parent, listing, name)
+        .or_else(|| godot(parent, listing, name))
+        .or_else(|| unreal(game_dir, parent, name).filter(|c| c.passes))
+}
+
+/// The bytes below `p`, by a bounded walk that never follows a link. A tie-break, so a walk cut
+/// short by its bounds still answers.
+fn evidence_size(p: &Path) -> u64 {
+    let Ok(m) = fs::symlink_metadata(p) else {
+        return 0;
+    };
+    if !m.is_dir() {
+        return if m.is_file() { m.len() } else { 0 };
+    }
+    let mut total = 0u64;
+    let mut seen = 0usize;
+    let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::from([(p.to_path_buf(), 0)]);
+    while let Some((dir, depth)) = queue.pop_front() {
+        let Ok(read) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for item in read.flatten() {
+            seen += 1;
+            if seen > SIZE_MAX_ENTRIES {
+                return total;
+            }
+            let Ok(ft) = item.file_type() else { continue };
+            if ft.is_dir() && depth + 1 < SIZE_MAX_DEPTH {
+                queue.push_back((item.path(), depth + 1));
+            } else if ft.is_file() {
+                total = total.saturating_add(item.metadata().map_or(0, |m| m.len()));
+            }
+        }
+    }
+    total
+}
+
+/// Rule 4: of several programs, the shallowest; then one that passes over a weaker sign; then
+/// the largest evidence; then the one whose name repeats its evidence's; then the first by path.
+/// (Steam's own pick sits before the size in the owner's order, but a launch hint that passes
+/// has already won outright by then.)
+fn best(game_dir: &Path, mut cands: Vec<Candidate>) -> Option<Candidate> {
+    let shallowest = cands.iter().map(Candidate::depth).min()?;
+    cands.retain(|c| c.depth() == shallowest);
+    if cands.iter().any(|c| c.passes) {
+        cands.retain(|c| c.passes);
+    }
+    if cands.len() < 2 {
+        return cands.pop();
+    }
+    // Two programs may share one `_Data` (`Game.exe` and `Game.x86_64`): size each folder once.
+    let mut sizes: Vec<(Vec<String>, u64)> = Vec::new();
+    let mut keyed: Vec<(u64, Candidate)> = Vec::new();
+    for c in cands {
+        let size = match &c.evidence {
+            None => 0,
+            Some(e) => match sizes.iter().find(|(k, _)| k == e) {
+                Some((_, s)) => *s,
+                None => {
+                    let s = evidence_size(&abs(game_dir, e));
+                    sizes.push((e.clone(), s));
+                    s
+                }
+            },
+        };
+        keyed.push((size, c));
+    }
+    keyed.sort_by(|(sa, a), (sb, b)| {
+        sb.cmp(sa)
+            .then(b.named_alike.cmp(&a.named_alike))
+            .then_with(|| a.exe.cmp(&b.exe))
+    });
+    keyed.into_iter().next().map(|(_, c)| c)
+}
+
+/// Rule 1: the program Steam launches, if it is inside the folder and passes rule 2 or 5.
+/// Jailed: relative, no `..`, no link on the way; matched ignoring ASCII case like Windows.
+fn hinted(game_dir: &Path, hint: &str) -> Option<Candidate> {
+    let mut h = hint.trim();
+    while let Some(rest) = h.strip_prefix("./").or_else(|| h.strip_prefix(".\\")) {
+        h = rest;
+    }
+    let wanted = relative_components(h)?;
+    let mut real: Vec<String> = Vec::with_capacity(wanted.len());
+    for (i, c) in wanted.iter().enumerate() {
+        let is_last = i + 1 == wanted.len();
+        real.push(child(&abs(game_dir, &real), c, !is_last)?);
+    }
+    let (name, parent) = real.split_last()?;
+    let listing = listing_of(&abs(game_dir, parent))?;
+    passes(game_dir, parent, &listing, name)
+}
+
+/// Detects the engine of a game folder. Read-only. The same as [`detect_with`] without a hint.
+pub fn detect(game_dir: &Path) -> Result<Detection> {
+    detect_with(game_dir, None)
+}
+
+/// Detects the engine of a game folder, given the program Steam launches for it when known
+/// (`launch_hint`, relative to `game_dir`, from [`crate::steam_appinfo::launch_executable`]).
+/// Read-only.
+///
+/// A hint inside the folder that passes the Unity, Unreal or Godot rule wins outright and
+/// [`Detection::hint_used`] says so. Any other hint (missing, outside the folder, a launcher)
+/// is ignored, and `hint_used` is `false`.
+pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detection> {
+    let entries = walk(game_dir)?;
+    let anti_cheat = anti_cheat_of(&entries);
+
+    if let Some(c) = launch_hint.and_then(|h| hinted(game_dir, h)) {
+        return Ok(c.into_detection(anti_cheat, true));
+    }
+
+    // Every folder's listing, as the walk saw it.
+    let mut folders: HashMap<&[String], Vec<(String, bool)>> = HashMap::new();
+    for e in &entries {
+        if let Some((name, parent)) = e.rel.split_last() {
+            folders
+                .entry(parent)
+                .or_default()
+                .push((name.clone(), e.is_dir));
+        }
+    }
+    // Each file with its folder's listing, for the rules to look beside it.
+    let files = || {
+        entries.iter().filter(|e| !e.is_dir).filter_map(|e| {
+            let (name, parent) = e.rel.split_last()?;
+            Some((parent, folders.get(parent)?.as_slice(), name.as_str()))
+        })
+    };
+
+    // Every program that passes, and every pre-2017.2 Unity game: ranked together by depth, so
+    // an old game at the top still beats a newer Unity tool in a subfolder.
+    let games: Vec<Candidate> = files()
+        .filter(|(_, listing, name)| {
+            is_program_name(name) || find_in(listing, &format!("{name}_Data"), true).is_some()
+        })
+        .filter_map(|(parent, listing, name)| {
+            passes(game_dir, parent, listing, name)
+                .or_else(|| legacy_unity(game_dir, parent, listing, name))
+        })
+        .collect();
+    if let Some(c) = best(game_dir, games) {
+        return Ok(c.into_detection(anti_cheat, false));
+    }
+
+    // No game found. The weaker signs, each Low.
+    // Unreal, half a pairing: the shipping program without `Content/Paks`, then any shipping
+    // program at all, then a `Content/Paks/*.pak` with no program.
+    let half: Vec<Candidate> = files()
+        .filter_map(|(parent, _, name)| unreal(game_dir, parent, name))
+        .collect();
+    if let Some(c) = best(game_dir, half) {
+        return Ok(c.into_detection(anti_cheat, false));
+    }
+    let shipping = entries.iter().find(|e| {
+        !e.is_dir
+            && e.name()
+                .to_ascii_lowercase()
+                .ends_with("-win64-shipping.exe")
+    });
+    let pak_project = entries.iter().find_map(|e| {
+        let n = e.rel.len();
+        (!e.is_dir
+            && n >= 4
+            && ext_lower(e.name()) == "pak"
+            && e.rel[n - 2].eq_ignore_ascii_case("Paks")
+            && e.rel[n - 3].eq_ignore_ascii_case("Content"))
+        .then(|| e.rel[..n - 3].to_vec())
+    });
+    if shipping.is_some() || pak_project.is_some() {
+        return Ok(Candidate {
+            engine: Engine::Unreal,
+            confidence: Confidence::Low,
+            exe: shipping.map(|e| e.rel.clone()),
+            binary: if shipping.is_some() {
+                Binary::Windows
+            } else {
+                Binary::Unknown
+            },
+            evidence: if shipping.is_some() {
+                None
+            } else {
+                pak_project
+            },
+            passes: false,
+            named_alike: false,
+        }
+        .into_detection(anti_cheat, false));
+    }
+
+    // Godot with the pck embedded in the program.
+    let top_programs: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| !e.is_dir && e.rel.len() == 1 && is_program_name(e.name()))
+        .collect();
+    if let Some(exe) = top_programs
+        .iter()
+        .take(8)
+        .find(|e| has_embedded_pck(&e.path(game_dir)))
+    {
+        return Ok(Candidate {
+            engine: Engine::Godot,
+            confidence: Confidence::Low,
+            exe: Some(exe.rel.clone()),
+            binary: binary_of(exe.name()),
+            evidence: Some(exe.rel.clone()),
+            passes: false,
+            named_alike: true,
+        }
+        .into_detection(anti_cheat, false));
+    }
+
+    // Unknown. Name the program when there is exactly one obvious one.
+    let main: Vec<&&Entry> = top_programs
+        .iter()
+        .filter(|e| !e.name().to_ascii_lowercase().contains("crashhandler"))
+        .collect();
+    let (exe, binary) = match main.as_slice() {
+        [one] => (Some(rel_path(&one.rel)), binary_of(one.name())),
+        _ => (None, Binary::Unknown),
+    };
+    Ok(Detection {
+        engine: Engine::Unknown,
+        confidence: Confidence::Low,
         exe,
         binary,
-        score,
+        anti_cheat,
+        evidence: None,
+        hint_used: false,
     })
 }
 
@@ -292,138 +716,28 @@ fn rel_path(rel: &[String]) -> PathBuf {
     rel.iter().collect()
 }
 
-/// Detects the engine of a game folder. Read-only.
-pub fn detect(game_dir: &Path) -> Result<Detection> {
-    let entries = walk(game_dir)?;
-    let anti_cheat = anti_cheat_of(&entries);
-
-    // Unity: a `<name>_Data` folder at the top or one level down. A game at the TOP wins over
-    // anything in a subfolder, whatever the scores: a subfolder holds tools that ship beside
-    // the game (MiSide's `Voice Editor/` is a Mono program next to an IL2CPP game, and picking
-    // it placed the loader where nothing ever loads it). One level down is only a fallback for
-    // games whose root holds no Unity program at all.
-    let unity_at_depth = |depth: usize| {
-        entries
-            .iter()
-            .filter(|e| e.is_dir && e.rel.len() == depth && e.name().ends_with("_Data"))
-            .filter_map(|e| unity_at(game_dir, &e.rel))
-            .max_by_key(|c| c.score)
-    };
-    let best = unity_at_depth(1).or_else(|| unity_at_depth(2));
-    if let Some(c) = best {
-        return Ok(Detection {
-            engine: c.engine,
-            confidence: c.confidence,
-            exe: c.exe,
-            binary: c.binary,
-            anti_cheat,
-        });
-    }
-
-    // Unreal: `<Project>-Win64-Shipping.exe` and `<Project>/Content/Paks/*.pak`.
-    let shipping = entries.iter().find(|e| {
-        !e.is_dir
-            && e.name()
-                .to_ascii_lowercase()
-                .ends_with("-win64-shipping.exe")
-    });
-    let pak = entries.iter().any(|e| {
-        let n = e.rel.len();
-        !e.is_dir
-            && n >= 3
-            && ext_lower(e.name()) == "pak"
-            && e.rel[n - 2].eq_ignore_ascii_case("Paks")
-            && e.rel[n - 3].eq_ignore_ascii_case("Content")
-    });
-    if shipping.is_some() || pak {
-        return Ok(Detection {
-            engine: Engine::Unreal,
-            confidence: if shipping.is_some() && pak {
-                Confidence::High
-            } else {
-                Confidence::Low
-            },
-            exe: shipping.map(|e| rel_path(&e.rel)),
-            binary: if shipping.is_some() {
-                Binary::Windows
-            } else {
-                Binary::Unknown
-            },
-            anti_cheat,
-        });
-    }
-
-    // Godot: a `.pck` beside a program, or a program with an embedded pck.
-    let top_programs: Vec<&Entry> = entries
-        .iter()
-        .filter(|e| !e.is_dir && e.rel.len() == 1 && is_program_name(e.name()))
-        .collect();
-    let top_pcks: Vec<&Entry> = entries
-        .iter()
-        .filter(|e| !e.is_dir && e.rel.len() == 1 && ext_lower(e.name()) == "pck")
-        .collect();
-    if !top_pcks.is_empty() && !top_programs.is_empty() {
-        let same_stem = top_programs.iter().find(|p| {
-            let stem = p.name().rsplit_once('.').map(|(s, _)| s).unwrap_or("");
-            top_pcks
-                .iter()
-                .any(|k| k.name().rsplit_once('.').map(|(s, _)| s) == Some(stem))
-        });
-        let exe = same_stem.copied().unwrap_or(top_programs[0]);
-        return Ok(Detection {
-            engine: Engine::Godot,
-            confidence: if same_stem.is_some() {
-                Confidence::High
-            } else {
-                Confidence::Low
-            },
-            exe: Some(rel_path(&exe.rel)),
-            binary: binary_of(exe.name()),
-            anti_cheat,
-        });
-    }
-    if let Some(exe) = top_programs
-        .iter()
-        .take(8)
-        .find(|e| has_embedded_pck(&e.path(game_dir)))
-    {
-        return Ok(Detection {
-            engine: Engine::Godot,
-            confidence: Confidence::Low,
-            exe: Some(rel_path(&exe.rel)),
-            binary: binary_of(exe.name()),
-            anti_cheat,
-        });
-    }
-
-    // Unknown. Name the program when there is exactly one obvious one.
-    let main: Vec<&&Entry> = top_programs
-        .iter()
-        .filter(|e| !e.name().to_ascii_lowercase().contains("crashhandler"))
-        .collect();
-    let (exe, binary) = match main.as_slice() {
-        [one] => (Some(rel_path(&one.rel)), binary_of(one.name())),
-        _ => (None, Binary::Unknown),
-    };
-    Ok(Detection {
-        engine: Engine::Unknown,
-        confidence: Confidence::Low,
-        exe,
-        binary,
-        anti_cheat,
-    })
-}
-
-/// The engine of the game whose program is `exe_rel`: its own `<stem>_Data` decides for Unity;
-/// otherwise the folder's detection.
+/// The engine of the game whose program is `exe_rel`, by that program's own folder: the rules
+/// above, then the weaker signs for that one program. `Unknown` when neither speaks: another
+/// program in the folder being a game says nothing about this one.
 pub(crate) fn engine_of_exe(game_dir: &Path, exe_rel: &[String]) -> Result<Engine> {
-    if let Some((exe, parents)) = exe_rel.split_last() {
-        let stem = exe.rsplit_once('.').map(|(s, _)| s).unwrap_or(exe);
-        let mut data_rel: Vec<String> = parents.to_vec();
-        data_rel.push(format!("{stem}_Data"));
-        if let Some(c) = unity_at(game_dir, &data_rel) {
-            return Ok(c.engine);
-        }
-    }
-    Ok(detect(game_dir)?.engine)
+    let Some((name, parent)) = exe_rel.split_last() else {
+        return Ok(Engine::Unknown);
+    };
+    let Some(listing) = listing_of(&abs(game_dir, parent)) else {
+        return Ok(Engine::Unknown);
+    };
+    let found = passes(game_dir, parent, &listing, name)
+        .or_else(|| legacy_unity(game_dir, parent, &listing, name))
+        .or_else(|| unreal(game_dir, parent, name))
+        .map(|c| c.engine)
+        .or_else(|| {
+            name.to_ascii_lowercase()
+                .ends_with("-win64-shipping.exe")
+                .then_some(Engine::Unreal)
+        })
+        .or_else(|| {
+            (is_program_name(name) && has_embedded_pck(&abs(game_dir, exe_rel)))
+                .then_some(Engine::Godot)
+        });
+    Ok(found.unwrap_or(Engine::Unknown))
 }

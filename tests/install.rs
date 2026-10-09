@@ -372,9 +372,10 @@ fn the_game_is_checked_before_anything() {
     let e = plan_install(&open(&runner_zip(&m)).unwrap(), &w.target(), &w.profile()).unwrap_err();
     assert_eq!(e.code, codes::ANTI_CHEAT);
 
-    // An IL2CPP game for a Mono runner.
+    // An IL2CPP game for a Mono runner. (`UnityPlayer.dll` makes it a Unity game at all.)
     let g = Tmp::new("il2cpp");
     write(&g.join("Game.exe"), b"MZ");
+    write(&g.join("UnityPlayer.dll"), b"MZ");
     write(&g.join("GameAssembly.dll"), b"MZ");
     write(&g.join("Game_Data/il2cpp_data/x"), b"x");
     let p = Tmp::new("p");
@@ -446,4 +447,25 @@ fn uninstall_follows_the_ledgers_exe_folder_not_todays_target() {
         before,
         "the Tools folder is clean again"
     );
+}
+
+/// The engine checked is the TARGET program's own, by the files beside it: a launcher next to a
+/// Unity Mono game is not a Unity Mono game, so the Mono runner refuses it instead of installing
+/// beside a program that never loads it.
+#[test]
+fn the_engine_is_the_target_programs_own() {
+    let w = World::new();
+    write(&w.game.join("Launcher.exe"), b"MZ launcher");
+    let e = plan_install(
+        &runner(),
+        &target(w.game.path(), "Launcher.exe", None, Platform::Windows),
+        &w.profile(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.param("got")),
+        (codes::ENGINE_MISMATCH, Some("unknown"))
+    );
+    // The game itself passes.
+    plan_install(&runner(), &w.target(), &w.profile()).unwrap();
 }
