@@ -103,11 +103,28 @@ pub fn launch_executables(
 /// in it, or its entry has no `common/category` object (Steam keeps sparse entries for apps it
 /// has not fetched). `Some(false)` is an app whose categories Steam has, none of them VAC.
 pub fn valve_anti_cheat(appinfo_path: &Path, appid: u32) -> Option<bool> {
-    let wanted = std::collections::BTreeSet::from([appid]);
-    let app = read_apps(appinfo_path, &wanted).remove(&appid)?;
+    valve_anti_cheat_of(appinfo_path, &[appid]).remove(&appid)
+}
+
+/// [`valve_anti_cheat`] for many apps in ONE pass over the file, for a frontend listing a whole
+/// library. An app whose flag is not known is absent from the map; a missing or corrupt file
+/// gives an empty map.
+pub fn valve_anti_cheat_of(
+    appinfo_path: &Path,
+    appids: &[u32],
+) -> std::collections::BTreeMap<u32, bool> {
+    let wanted: std::collections::BTreeSet<u32> = appids.iter().copied().collect();
+    read_apps(appinfo_path, &wanted)
+        .into_iter()
+        .filter_map(|(id, app)| vac_of(&app).map(|v| (id, v)))
+        .collect()
+}
+
+/// One app's VAC flag from its parsed KeyValues; `None` when its categories are not there.
+fn vac_of(app: &Kv) -> Option<bool> {
     let common = ["appinfo", "common"]
         .iter()
-        .try_fold(&app, |kv, key| kv.get(key))?;
+        .try_fold(app, |kv, key| kv.get(key))?;
     // No `category` object at all is NOT KNOWN: every real game lists some category, so its
     // absence says the entry is incomplete, not that VAC is off.
     let category = common.get("category")?;

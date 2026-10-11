@@ -11,7 +11,7 @@ use std::path::Path;
 
 use astra_game_launcher::{
     Accept, Ctx, Platform, VALVE_ANTI_CHEAT, codes, install, launch_executable, plan_install,
-    prepare_launch, uninstall, valve_anti_cheat,
+    prepare_launch, uninstall, valve_anti_cheat, valve_anti_cheat_of,
 };
 use common::*;
 
@@ -628,6 +628,13 @@ fn valve_anti_cheat_is_category_8_and_unknown_is_never_no() {
             "common without category: not known"
         );
         assert_eq!(valve_anti_cheat(&path, VAC), Some(true));
+        // One pass over many apps agrees with asking one at a time; unknown ones are absent.
+        let all = [NO_CATEGORY, VAC, VAC_INT, CLEAR, ZERO, SPARSE, ABSENT];
+        let many = valve_anti_cheat_of(&path, &all);
+        for id in all {
+            assert_eq!(many.get(&id).copied(), valve_anti_cheat(&path, id), "{id}");
+        }
+        assert_eq!(many.len(), 4);
         assert_eq!(
             valve_anti_cheat(&path, VAC_INT),
             Some(true),

@@ -53,7 +53,9 @@ pub use manifest::{
 pub use package::{GiPackage, Limits, PackageSummary, SummaryConfigWrite, SummaryGameFile};
 pub use plan::{Accept, GameAction, GameFileAction, InstallPlan, VALVE_ANTI_CHEAT, plan_install};
 pub use running::is_running;
-pub use steam_appinfo::{launch_executable, launch_executables, steam_roots, valve_anti_cheat};
+pub use steam_appinfo::{
+    launch_executable, launch_executables, steam_roots, valve_anti_cheat, valve_anti_cheat_of,
+};
 
 /// The ledger's file name inside a profile.
 pub const LEDGER_FILE_NAME: &str = paths::LEDGER_FILE;
