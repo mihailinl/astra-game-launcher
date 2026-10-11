@@ -39,7 +39,7 @@ pub use error::{LauncherError, Result, codes};
 #[cfg(feature = "cli")]
 pub use fetch::UreqFetch;
 pub use fetch::{Fetch, MAX_DOWNLOAD_BYTES, fetch_verified};
-pub use game::{GameTarget, Platform, proton_prefix_for, steam_appid_of_dir};
+pub use game::{GameTarget, Platform, proton_prefix_for, steam_appid_of_dir, steam_appids_of_dir};
 pub use install::{UninstallReport, install, installed, uninstall};
 pub use launch::{ProcessPlan, Spawn, StdSpawn, find_steam, launch, prepare_launch};
 pub use ledger::{

@@ -318,26 +318,50 @@ pub(crate) fn same_prefix(a: &Path, b: &Path) -> bool {
 /// prefix folder's device and inode). Read from `/proc`, not from `/tmp`, so a wineserver whose
 /// `/tmp` is private (Flatpak Steam, the Steam Linux Runtime) is seen too, and a directory a
 /// crashed server left behind blocks nothing.
+///
+/// It fails CLOSED: an unreadable `/proc`, an unreadable prefix, or a `wineserver*` of OUR user
+/// whose working directory cannot be read all count as alive, so the edit is refused rather
+/// than made under a server that would write the registry back. Another user's server is
+/// ignored (it cannot serve our prefix, and its cwd is not ours to read). A prefix that does not
+/// exist has no server.
 #[cfg(target_os = "linux")]
 pub(crate) fn wineserver_alive(prefix: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
-    let Ok(meta) = fs::metadata(prefix) else {
-        return false;
+    match fs::metadata("/proc/self") {
+        Ok(me) => wineserver_alive_in(Path::new("/proc"), me.uid(), prefix),
+        Err(_) => true,
+    }
+}
+
+/// [`wineserver_alive`] over a `/proc`-shaped tree `proc_root`, for the user `uid`.
+#[cfg(target_os = "linux")]
+fn wineserver_alive_in(proc_root: &Path, uid: u32, prefix: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let meta = match fs::metadata(prefix) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
     };
     let want = format!("server-{:x}-{:x}", meta.dev(), meta.ino());
-    let Ok(procs) = fs::read_dir("/proc") else {
-        return false;
+    let Ok(procs) = fs::read_dir(proc_root) else {
+        return true;
     };
     procs.flatten().any(|p| {
         let is_pid = p
             .file_name()
             .to_str()
             .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-        is_pid
+        // A process that is gone by the time we read it is not alive.
+        let ours_and_wineserver = is_pid
+            && fs::metadata(p.path()).is_ok_and(|m| m.uid() == uid)
             && fs::read_to_string(p.path().join("comm"))
-                .is_ok_and(|c| c.trim_end().starts_with("wineserver"))
-            && fs::read_link(p.path().join("cwd"))
-                .is_ok_and(|cwd| cwd.file_name().is_some_and(|n| n == want.as_str()))
+                .is_ok_and(|c| c.trim_end().starts_with("wineserver"));
+        ours_and_wineserver
+            && match fs::read_link(p.path().join("cwd")) {
+                Ok(cwd) => cwd.file_name().is_some_and(|n| n == want.as_str()),
+                // Ours and a wineserver, but where it works cannot be read: assume here.
+                Err(_) => fs::symlink_metadata(p.path()).is_ok(),
+            }
     })
 }
 
@@ -632,6 +656,41 @@ mod tests {
         assert_eq!(again, first, "the first records, kept");
         assert!(restore_prefix(&again).unwrap());
         assert_eq!(fs::read_to_string(real.join("user.reg")).unwrap(), REG);
+    }
+
+    #[test]
+    fn an_unreadable_proc_or_cwd_of_our_wineserver_counts_as_alive() {
+        use std::os::unix::fs::MetadataExt;
+        let p = prefix_with(REG);
+        let me = fs::metadata("/proc/self").unwrap().uid();
+        let fake = tmp("fake-proc");
+        // No /proc at all: refuse, never edit blind.
+        assert!(wineserver_alive_in(&fake.0.join("missing"), me, &p.0));
+        // A wineserver of ours whose cwd cannot be read (here: not a link).
+        let pid = fake.0.join("4242");
+        fs::create_dir_all(&pid).unwrap();
+        fs::write(pid.join("comm"), "wineserver\n").unwrap();
+        fs::write(pid.join("cwd"), "not a link").unwrap();
+        assert!(wineserver_alive_in(&fake.0, me, &p.0));
+        // The same process as another user's: ignored.
+        assert!(!wineserver_alive_in(&fake.0, me.wrapping_add(1), &p.0));
+        // Ours, readable, working elsewhere: not this prefix's.
+        fs::remove_file(pid.join("cwd")).unwrap();
+        let elsewhere = fake.0.join("server-0-0");
+        fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, pid.join("cwd")).unwrap();
+        assert!(!wineserver_alive_in(&fake.0, me, &p.0));
+        // Ours, in this prefix's server directory.
+        fs::remove_file(pid.join("cwd")).unwrap();
+        let meta = fs::metadata(&p.0).unwrap();
+        let here = fake
+            .0
+            .join(format!("server-{:x}-{:x}", meta.dev(), meta.ino()));
+        fs::create_dir_all(&here).unwrap();
+        std::os::unix::fs::symlink(&here, pid.join("cwd")).unwrap();
+        assert!(wineserver_alive_in(&fake.0, me, &p.0));
+        // A prefix that does not exist has no server.
+        assert!(!wineserver_alive_in(&fake.0, me, &p.0.join("gone")));
     }
 
     #[test]

@@ -108,16 +108,41 @@ pub fn proton_prefix_for(game_dir: &Path, appid: u32) -> Option<PathBuf> {
 /// The Steam appid that owns `game_dir`, read from the library itself: the
 /// `steamapps/appmanifest_<appid>.acf` whose `installdir` resolves to this very folder
 /// (canonical paths compared). `None` when the folder is not in a Steam library or no manifest
-/// names it. Several manifests naming it with different appids: `game-mismatch`.
+/// names it. Several apps sharing the folder: `game-mismatch` (the folder alone cannot say which;
+/// [`steam_appids_of_dir`] lists them for a caller that knows).
 ///
 /// This is the appid a game folder PROVES; a caller's `--appid` is the other trusted source, and
 /// an integration manifest's `steam_appid` never is (it may only cause a refusal).
 pub fn steam_appid_of_dir(game_dir: &Path) -> Result<Option<u32>> {
+    match steam_appids_of_dir(game_dir).as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some(*one)),
+        several => Err(several_apps(several, None)),
+    }
+}
+
+/// `game-mismatch` for a folder several Steam apps share and a caller that named none of them.
+pub(crate) fn several_apps(apps: &[u32], caller: Option<u32>) -> LauncherError {
+    let want = apps
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    LauncherError::new(codes::GAME_MISMATCH)
+        .with("field", "steam_appid")
+        .with("want", want)
+        .with("got", caller.map(|c| c.to_string()).unwrap_or_default())
+}
+
+/// Every Steam appid whose `appmanifest_*.acf` names `game_dir` as its install folder, sorted,
+/// each once: several for games that share one folder (the GoldSrc titles in
+/// `common/Half-Life`), none outside a Steam library.
+pub fn steam_appids_of_dir(game_dir: &Path) -> Vec<u32> {
     let Ok(dir) = std::fs::canonicalize(game_dir) else {
-        return Ok(None);
+        return Vec::new();
     };
     let Some(steamapps) = dir.parent().and_then(Path::parent) else {
-        return Ok(None);
+        return Vec::new();
     };
     let is = |p: Option<&std::ffi::OsStr>, name: &str| {
         p.and_then(|n| n.to_str())
@@ -126,12 +151,12 @@ pub fn steam_appid_of_dir(game_dir: &Path) -> Result<Option<u32>> {
     if !is(dir.parent().and_then(Path::file_name), "common")
         || !is(steamapps.file_name(), "steamapps")
     {
-        return Ok(None);
+        return Vec::new();
     }
     let Ok(entries) = std::fs::read_dir(steamapps) else {
-        return Ok(None);
+        return Vec::new();
     };
-    let mut found: Option<u32> = None;
+    let mut found = Vec::new();
     for e in entries.flatten() {
         let name = e.file_name();
         let Some(name) = name.to_str() else { continue };
@@ -154,23 +179,16 @@ pub fn steam_appid_of_dir(game_dir: &Path) -> Result<Option<u32>> {
         let Ok(appid) = appid.trim().parse::<u32>() else {
             continue;
         };
-        if installdir.is_empty()
-            || !std::fs::canonicalize(steamapps.join("common").join(&installdir))
+        if !installdir.is_empty()
+            && std::fs::canonicalize(steamapps.join("common").join(&installdir))
                 .is_ok_and(|p| p == dir)
         {
-            continue;
-        }
-        match found {
-            Some(other) if other != appid => {
-                return Err(LauncherError::new(codes::GAME_MISMATCH)
-                    .with("field", "steam_appid")
-                    .with("want", other.to_string())
-                    .with("got", appid.to_string()));
-            }
-            _ => found = Some(appid),
+            found.push(appid);
         }
     }
-    Ok(found)
+    found.sort_unstable();
+    found.dedup();
+    found
 }
 
 /// A top-level value of an `appmanifest_*.acf` (Valve's text KeyValues: `"AppState" { "key"

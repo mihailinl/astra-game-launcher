@@ -130,7 +130,8 @@ rules: a launcher beside a Unity game is not a Unity game.
   appinfo that answers is read (`GameTarget::steam_appinfo`, then every Steam install), and any
   one flagging VAC refuses. The game counts as checked only for a TRUSTED appid: the caller's, or
   the one the game folder proves through its library's `steamapps/appmanifest_*.acf` whose
-  `installdir` is this folder (both present and different: `game-mismatch`). The integration
+  `installdir` is this folder (both present and different: `game-mismatch`; for a folder several
+  apps share, such as GoldSrc's `common/Half-Life`, the caller's appid must be one of them). The integration
   manifest's `steam_appid` can only refuse (a mismatch, or that app is VAC), never clear. When no
   trusted appid is known or nothing answers, the plan is not refused on that ground alone, but
   `InstallPlan::vac_checked` is false, it warns `vac-unchecked`, and `install` refuses with
@@ -150,7 +151,8 @@ rules: a launcher beside a Unity game is not a Unity game.
   while a wineserver serves the prefix (`game-running`, reason `wineserver`: a `wineserver`
   process in `/proc` whose working directory is `server-<dev>-<ino>` of the prefix, which also
   finds one with a private `/tmp`), since Wine writes its registry back over the file when it
-  exits. A ledger with several records is written as schema 2, which
+  exits. It fails closed: an unreadable `/proc`, or a `wineserver` of this user whose working
+  directory cannot be read, counts as running. A ledger with several records is written as schema 2, which
   an older launcher refuses with `schema-too-new`. A Steam
   launch carries no environment, so the registry is the mechanism; the plan also shows the same
   set as one `WINEDLLOVERRIDES` value (`d3d11=n,b;dxgi=n,b`, same order) for anyone who has to

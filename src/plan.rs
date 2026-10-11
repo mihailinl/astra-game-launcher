@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::detect::{anti_cheat_scan, engine_of_exe};
 use crate::error::{LauncherError, Result, codes};
-use crate::game::steam_appid_of_dir;
 use crate::game::{GameTarget, Platform};
+use crate::game::{several_apps, steam_appids_of_dir};
 use crate::ledger::{self, Ledger};
 use crate::manifest::IntegrationInfo;
 use crate::package::GiPackage;
@@ -118,18 +118,19 @@ pub struct Accept {
 pub const VALVE_ANTI_CHEAT: &str = "valve-anti-cheat";
 
 /// The Steam appid this game is KNOWN to be: the caller's, or the one the game folder proves
-/// through its library's `appmanifest_*.acf` ([`crate::steam_appid_of_dir`]). Both present and
-/// different: `game-mismatch`. An integration manifest's `steam_appid` is never a source here.
+/// through its library's `appmanifest_*.acf` ([`crate::steam_appids_of_dir`]). The caller's must
+/// be among the folder's apps when the folder names any (several share GoldSrc's folder);
+/// otherwise, or with several and no caller, `game-mismatch`. An integration manifest's
+/// `steam_appid` is never a source here.
 pub(crate) fn trusted_appid(game: &GameTarget) -> Result<Option<u32>> {
-    let derived = steam_appid_of_dir(&game.dir)?;
-    match (game.steam_appid, derived) {
-        (Some(caller), Some(folder)) if caller != folder => {
-            Err(LauncherError::new(codes::GAME_MISMATCH)
-                .with("field", "steam_appid")
-                .with("want", folder.to_string())
-                .with("got", caller.to_string()))
-        }
-        (caller, folder) => Ok(caller.or(folder)),
+    let folder = steam_appids_of_dir(&game.dir);
+    match (game.steam_appid, folder.as_slice()) {
+        (caller, []) => Ok(caller),
+        // A folder several apps share (GoldSrc's `common/Half-Life`): the caller's, when it is
+        // one of them.
+        (Some(caller), apps) if apps.contains(&caller) => Ok(Some(caller)),
+        (None, [one]) => Ok(Some(*one)),
+        (caller, apps) => Err(several_apps(apps, caller)),
     }
 }
 

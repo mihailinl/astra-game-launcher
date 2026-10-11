@@ -790,6 +790,37 @@ fn the_game_folder_proves_its_appid_and_the_caller_must_agree() {
 }
 
 #[test]
+fn games_sharing_one_folder_take_the_callers_appid_when_it_is_one_of_them() {
+    let world = Tmp::new("vac-shared");
+    let path = world.join("appinfo.vdf");
+    std::fs::write(&path, vac_file(V29)).unwrap();
+    let profiles = Tmp::new("profiles");
+    // Two apps install into one folder, as GoldSrc games do into `common/Half-Life`.
+    let lib = Tmp::new("lib-shared");
+    let dir = library_game(lib.path(), CLEAR, "Some Game");
+    library_game(lib.path(), ZERO, "Some Game");
+    assert_eq!(
+        astra_game_launcher::steam_appids_of_dir(&dir),
+        vec![CLEAR, ZERO]
+    );
+    let at = |appid: Option<u32>| {
+        let mut t = target(&dir, "Some Game.exe", appid, Platform::Windows);
+        t.steam_appinfo = Some(path.clone());
+        t
+    };
+    let p = plan_install(&runner(), &at(Some(CLEAR)), &profiles.join("a")).unwrap();
+    assert!(p.vac_checked);
+    for caller in [None, Some(VAC)] {
+        let e = plan_install(&runner(), &at(caller), &profiles.join("a")).unwrap_err();
+        assert_eq!(
+            (e.code, e.param("field")),
+            (codes::GAME_MISMATCH, Some("steam_appid")),
+            "{caller:?}"
+        );
+    }
+}
+
+#[test]
 fn any_appinfo_flagging_vac_refuses_whatever_answers_first() {
     let world = Tmp::new("vac-many");
     let clear = world.join("clear.vdf");
