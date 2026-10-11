@@ -271,14 +271,16 @@ fn missing(prefix: &Path) -> LauncherError {
     LauncherError::new(codes::PROTON_PREFIX_MISSING).with("prefix", prefix.display().to_string())
 }
 
-/// Applies the override in `prefix/user.reg`. Keeps the first record's "before" across launches.
+/// Applies every override in `prefix/user.reg`, in the order given, with one atomic write. Keeps
+/// each DLL's first record of "before" across launches. Returns one record per override, in that
+/// order: the first one applied is the one that may have created the section, so restoring in
+/// reverse removes the section last.
 pub(crate) fn apply_prefix(
     prefix: &Path,
     exe_file: &str,
-    dll: &str,
-    value: &str,
-    existing: Option<&ProtonRecord>,
-) -> Result<ProtonRecord> {
+    overrides: &[(String, String)],
+    existing: &[ProtonRecord],
+) -> Result<Vec<ProtonRecord>> {
     let reg = prefix.join("user.reg");
     if !fs::symlink_metadata(prefix).is_ok_and(|m| m.is_dir()) {
         return Err(missing(prefix));
@@ -290,32 +292,36 @@ pub(crate) fn apply_prefix(
         Err(e) => return Err(LauncherError::io_at(&e, &reg)),
     };
     let section = section_for(exe_file);
-    let edit = apply(&text, &section, dll, value, now_secs());
-    if edit.changed {
-        write_atomic(&reg, edit.text.as_bytes())?;
-    }
-    let fresh = ProtonRecord {
-        prefix: prefix.to_path_buf(),
-        section: section.clone(),
-        dll: dll.to_owned(),
-        value: value.to_owned(),
-        previous: edit.previous,
-        section_created: edit.section_created,
-    };
-    Ok(match existing {
-        Some(old)
-            if edit.line_present
-                && old.prefix == fresh.prefix
-                && same_key(&old.section, &section)
-                && same_key(&old.dll, dll) =>
-        {
-            ProtonRecord {
+    let now = now_secs();
+    let mut text = text;
+    let mut changed = false;
+    let mut records = Vec::with_capacity(overrides.len());
+    for (dll, value) in overrides {
+        let edit = apply(&text, &section, dll, value, now);
+        changed |= edit.changed;
+        let old = existing.iter().find(|old| {
+            old.prefix == prefix && same_key(&old.section, &section) && same_key(&old.dll, dll)
+        });
+        records.push(match old {
+            Some(old) if edit.line_present => ProtonRecord {
                 value: value.to_owned(),
                 ..old.clone()
-            }
-        }
-        _ => fresh,
-    })
+            },
+            _ => ProtonRecord {
+                prefix: prefix.to_path_buf(),
+                section: section.clone(),
+                dll: dll.to_owned(),
+                value: value.to_owned(),
+                previous: edit.previous,
+                section_created: edit.section_created,
+            },
+        });
+        text = edit.text;
+    }
+    if changed {
+        write_atomic(&reg, text.as_bytes())?;
+    }
+    Ok(records)
 }
 
 /// Restores what [`apply_prefix`] recorded. A prefix or file that is gone is nothing to restore.

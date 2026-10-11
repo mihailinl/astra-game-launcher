@@ -239,9 +239,9 @@ pub fn prepare_launch(
     refuse_if_running(&exe_file)?;
 
     // A Proton override needs the prefix; refuse before writing anything.
-    let override_ = match &game.platform {
-        Platform::LinuxProton { prefix } => match m.proton_override() {
-            Some(o) => {
+    let overrides = match &game.platform {
+        Platform::LinuxProton { prefix } => match m.proton_overrides() {
+            o if !o.is_empty() => {
                 let ok = prefix.as_deref().is_some_and(|p| {
                     fs::symlink_metadata(p).is_ok_and(|m| m.is_dir())
                         && fs::symlink_metadata(p.join("user.reg")).is_ok_and(|m| m.is_file())
@@ -257,7 +257,7 @@ pub fn prepare_launch(
                 }
                 Some((prefix.clone().unwrap_or_default(), o))
             }
-            None => None,
+            _ => None,
         },
         _ => None,
     };
@@ -308,10 +308,10 @@ pub fn prepare_launch(
         }
     }
 
-    if let Some((prefix, (dll, value))) = override_ {
-        let rec = proton::apply_prefix(&prefix, &exe_file, &dll, &value, ledger.proton.as_ref())?;
-        if ledger.proton.as_ref() != Some(&rec) {
-            ledger.proton = Some(rec);
+    if let Some((prefix, overrides)) = overrides {
+        let recs = proton::apply_prefix(&prefix, &exe_file, &overrides, &ledger.proton)?;
+        if ledger.proton != recs {
+            ledger.proton = recs;
             ledger::write(&profile, &ledger)?;
         }
     }

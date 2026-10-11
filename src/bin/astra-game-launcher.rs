@@ -327,8 +327,11 @@ fn plan_text(p: &InstallPlan) -> String {
         "launch args: {}",
         serde_json::to_string(&p.launch_args).unwrap_or_default()
     );
-    if let Some((dll, v)) = &p.proton_override {
+    for (dll, v) in &p.proton_overrides {
         let _ = writeln!(s, "proton dll override: {dll}={v}");
+    }
+    if let Some(all) = gl::wine_dll_overrides(&p.proton_overrides) {
+        let _ = writeln!(s, "WINEDLLOVERRIDES={all}");
     }
     let _ = writeln!(s, "warnings: {}", p.warnings.join(", "));
     s

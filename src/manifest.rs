@@ -129,6 +129,43 @@ const OVERRIDE_VALUES: &[&str] = &[
     "",
 ];
 
+/// A DLL name an override may name: a bare file name, never a path, and nothing that could split
+/// a `WINEDLLOVERRIDES` value or a `user.reg` line (`;` `=` `,` `"` a space, a slash, `*`).
+fn is_dll_name(dll: &str) -> bool {
+    dll.len() <= 64
+        && dll
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && dll
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
+/// One override value in `WINEDLLOVERRIDES`' short form: `native,builtin` -> `n,b`.
+fn short_override(value: &str) -> String {
+    value
+        .split(',')
+        .map(|v| match v {
+            "native" => "n",
+            "builtin" => "b",
+            other => other,
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// `(dll, value)` pairs as one `WINEDLLOVERRIDES` value, in the order given: `a=n,b;c=n`.
+pub fn wine_dll_overrides(overrides: &[(String, String)]) -> Option<String> {
+    (!overrides.is_empty()).then(|| {
+        overrides
+            .iter()
+            .map(|(d, v)| format!("{d}={}", short_override(v)))
+            .collect::<Vec<_>>()
+            .join(";")
+    })
+}
+
 fn invalid(key: &str, detail: impl Into<String>) -> LauncherError {
     LauncherError::new(codes::MANIFEST_INVALID)
         .with("key", key)
@@ -385,28 +422,17 @@ impl Manifest {
             }
             collect_vars(v, &mut vars)?;
         }
-        if self.launch.proton_dll_overrides.len() > 1 {
-            return Err(invalid(
-                "launch.proton_dll_overrides",
-                "schema 1 supports one override",
-            ));
-        }
+        let mut dlls = BTreeSet::new();
         for (dll, value) in &self.launch.proton_dll_overrides {
-            if dll.is_empty()
-                || !dll
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
-            {
-                return Err(invalid(
-                    &format!("launch.proton_dll_overrides.{dll}"),
-                    "not a DLL name",
-                ));
+            let key = format!("launch.proton_dll_overrides.{dll}");
+            if !is_dll_name(dll) {
+                return Err(invalid(&key, "not a DLL name"));
+            }
+            if !dlls.insert(dll.to_ascii_lowercase()) {
+                return Err(invalid(&key, "named twice (Wine ignores letter case)"));
             }
             if !OVERRIDE_VALUES.contains(&value.as_str()) {
-                return Err(invalid(
-                    &format!("launch.proton_dll_overrides.{dll}"),
-                    "not a Wine override",
-                ));
+                return Err(invalid(&key, "not a Wine override"));
             }
         }
 
@@ -458,13 +484,22 @@ impl Manifest {
         vars
     }
 
-    /// The single Proton override, if any: (dll, value).
-    pub fn proton_override(&self) -> Option<(String, String)> {
+    /// Every Proton override, `(dll, value)`, in the manifest's key order (byte order, so the same
+    /// manifest always yields the same list).
+    pub fn proton_overrides(&self) -> Vec<(String, String)> {
         self.launch
             .proton_dll_overrides
             .iter()
-            .next()
             .map(|(d, v)| (d.clone(), v.clone()))
+            .collect()
+    }
+
+    /// The overrides as one `WINEDLLOVERRIDES` value, `a=n,b;c=n`, in the order of
+    /// [`Self::proton_overrides`]; `None` when there are none. The launcher itself writes the
+    /// overrides into the prefix's `user.reg` (a Steam launch carries no environment); this is the
+    /// same set for a person or a caller that has to show or paste it.
+    pub fn wine_dll_overrides(&self) -> Option<String> {
+        wine_dll_overrides(&self.proton_overrides())
     }
 
     /// The engine `[target]` asks for.

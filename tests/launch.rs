@@ -84,8 +84,15 @@ fn proton_override_is_applied_and_restored_leaving_other_sections_alone() {
     assert!(reg.contains("[Software\\\\Wine\\\\DllOverrides] 1784681205\n#time=1dcf9d1a3c4e000\n\"winhttp\"=\"builtin\"\n"));
 
     let ledger = installed(&w.profile()).unwrap().unwrap();
-    let rec = ledger.proton.unwrap();
+    let [rec] = ledger.proton.as_slice() else {
+        panic!("one record: {:?}", ledger.proton)
+    };
     assert!(rec.section_created && rec.previous.is_none());
+    // One record is written as the object a one-override launcher wrote and still reads.
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(w.profile().join("astra-launcher-ledger.json")).unwrap())
+            .unwrap();
+    assert!(on_disk["proton"].is_object(), "{}", on_disk["proton"]);
 
     // A second Play changes nothing and keeps the record of what was there first.
     let p2 = prepare_launch(&w.profile(), &game, &vars(), steam()).unwrap();
@@ -113,7 +120,7 @@ fn a_value_already_in_the_section_is_put_back() {
     prepare_launch(&w.profile(), &game, &vars(), steam()).unwrap();
     let reg = w.user_reg();
     assert!(reg.contains("\"d3d11\"=\"native\"\n\"winhttp\"=\"native,builtin\"\n"));
-    let rec = installed(&w.profile()).unwrap().unwrap().proton.unwrap();
+    let rec = installed(&w.profile()).unwrap().unwrap().proton.remove(0);
     assert_eq!(rec.previous.as_deref(), Some("\"builtin\""));
     uninstall(&w.profile(), &game).unwrap();
     assert_eq!(w.user_reg(), before);
@@ -306,4 +313,62 @@ fn a_damaged_install_is_not_launched() {
     let p = Tmp::new("empty");
     let e = prepare_launch(p.path(), &game, &vars(), steam()).unwrap_err();
     assert_eq!(e.code, codes::NOT_INSTALLED);
+}
+
+#[test]
+fn several_overrides_are_all_applied_and_all_restored_byte_exactly() {
+    let w = World::new();
+    let m = runner_manifest("").replacen(
+        "proton_dll_overrides = { winhttp = \"native,builtin\" }",
+        "proton_dll_overrides = { winhttp = \"native,builtin\", dxgi = \"n,b\", d3d11 = \"native\" }",
+        1,
+    );
+    let pkg = open(&runner_zip(&m)).unwrap();
+    let game = w.proton();
+    let plan = plan_and_install(&pkg, &game, &w.profile());
+    let want: Vec<(String, String)> = vec![
+        ("d3d11".into(), "native".into()),
+        ("dxgi".into(), "n,b".into()),
+        ("winhttp".into(), "native,builtin".into()),
+    ];
+    assert_eq!(plan.proton_overrides, want);
+
+    let p = prepare_launch(&w.profile(), &game, &vars(), steam()).unwrap();
+    let reg = w.user_reg();
+    let section = format!("[Software\\\\Wine\\\\AppDefaults\\\\{GAME}.exe\\\\DllOverrides] ");
+    let at = reg.find(&section).expect("our section");
+    assert!(
+        reg[at..]
+            .contains("\n\"d3d11\"=\"native\"\n\"dxgi\"=\"n,b\"\n\"winhttp\"=\"native,builtin\"\n"),
+        "{reg}"
+    );
+    assert!(reg.starts_with(USER_REG.trim_end_matches('\n')));
+
+    let ledger = installed(&w.profile()).unwrap().unwrap();
+    let dlls: Vec<_> = ledger.proton.iter().map(|r| r.dll.as_str()).collect();
+    assert_eq!(dlls, ["d3d11", "dxgi", "winhttp"]);
+    assert!(ledger.proton[0].section_created);
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(w.profile().join("astra-launcher-ledger.json")).unwrap())
+            .unwrap();
+    assert_eq!(on_disk["proton"].as_array().map(Vec::len), Some(3));
+
+    // Play again: nothing changes, and the records of what was there first are kept.
+    assert_eq!(
+        prepare_launch(&w.profile(), &game, &vars(), steam()).unwrap(),
+        p
+    );
+    assert_eq!(w.user_reg(), reg);
+    assert_eq!(
+        installed(&w.profile()).unwrap().unwrap().proton,
+        ledger.proton
+    );
+
+    let r = uninstall(&w.profile(), &game).unwrap();
+    assert!(r.proton_restored);
+    assert_eq!(
+        w.user_reg(),
+        USER_REG,
+        "user.reg is byte-for-byte what it was"
+    );
 }

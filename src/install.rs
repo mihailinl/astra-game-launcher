@@ -116,7 +116,7 @@ pub fn install(
                 }),
             })
             .collect(),
-        proton: None,
+        proton: Vec::new(),
     };
     ledger::write(&profile, &ledger)?;
 
@@ -272,8 +272,9 @@ pub(crate) fn uninstall_ledger(
         }
     }
 
-    if let Some(rec) = &ledger.proton {
-        report.proton_restored = proton::restore_prefix(rec)?;
+    // Backwards: the record that created the section is the first, and removes it last.
+    for rec in ledger.proton.iter().rev() {
+        report.proton_restored |= proton::restore_prefix(rec)?;
     }
 
     for f in &ledger.files {

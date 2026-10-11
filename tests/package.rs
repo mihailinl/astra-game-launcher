@@ -26,9 +26,83 @@ fn the_runner_shape_opens_and_names_its_files() {
     assert!(s.game_files[0].pinned && !s.game_files[1].pinned);
     assert_eq!(s.variables, vec!["bridge_port", "bridge_token"]);
     assert_eq!(
-        s.proton_override,
-        Some(("winhttp".into(), "native,builtin".into()))
+        s.proton_overrides,
+        vec![("winhttp".into(), "native,builtin".into())]
     );
+}
+
+fn with_overrides(table: &str) -> String {
+    runner_manifest("").replacen(
+        "proton_dll_overrides = { winhttp = \"native,builtin\" }",
+        &format!("proton_dll_overrides = {{ {table} }}"),
+        1,
+    )
+}
+
+#[test]
+fn several_proton_overrides_are_one_wine_value_in_key_order() {
+    let m = Manifest::parse(&with_overrides(
+        "winhttp = \"native,builtin\", dxgi = \"n,b\", d3d11 = \"native\", xinput1_3 = \"\"",
+    ))
+    .unwrap();
+    assert_eq!(
+        m.proton_overrides(),
+        vec![
+            ("d3d11".into(), "native".into()),
+            ("dxgi".into(), "n,b".into()),
+            ("winhttp".into(), "native,builtin".into()),
+            ("xinput1_3".into(), "".into()),
+        ]
+    );
+    assert_eq!(
+        m.wine_dll_overrides().as_deref(),
+        Some("d3d11=n;dxgi=n,b;winhttp=n,b;xinput1_3=")
+    );
+    let none = Manifest::parse(&with_overrides("")).unwrap();
+    assert_eq!(none.wine_dll_overrides(), None);
+}
+
+#[test]
+fn an_override_that_could_split_the_wine_value_or_name_a_path_is_refused() {
+    let names = [
+        "\"a;b\"",
+        "\"a=b\"",
+        "\"a,b\"",
+        "'a\"b'",
+        "\"a b\"",
+        "\" dxgi\"",
+        "\"../dxgi\"",
+        "\"..\"",
+        "\"a/dxgi\"",
+        "'C:\\dxgi'",
+        "\"*dxgi\"",
+        "\".dxgi\"",
+        "\"\"",
+    ];
+    for name in names {
+        let e = parse_err(&with_overrides(&format!("{name} = \"native\"")));
+        assert_eq!(e.code, codes::MANIFEST_INVALID, "{name}");
+        assert_eq!(e.param("detail"), Some("not a DLL name"), "{name}");
+    }
+    let long = format!("{} = \"native\"", "a".repeat(65));
+    assert_eq!(
+        parse_err(&with_overrides(&long)).param("detail"),
+        Some("not a DLL name")
+    );
+    assert!(Manifest::parse(&with_overrides(&format!("{} = \"native\"", "a".repeat(64)))).is_ok());
+    for value in [
+        "\"n;b\"",
+        "\"n=b\"",
+        "\"native builtin\"",
+        "'n\"'",
+        "\"disabled\"",
+    ] {
+        let e = parse_err(&with_overrides(&format!("dxgi = {value}")));
+        assert_eq!(e.param("detail"), Some("not a Wine override"), "{value}");
+    }
+    let e = parse_err(&with_overrides("dxgi = \"native\", DXGI = \"builtin\""));
+    assert_eq!(e.code, codes::MANIFEST_INVALID);
+    assert!(e.param("detail").unwrap().starts_with("named twice"));
 }
 
 #[test]
@@ -314,9 +388,9 @@ fn the_manifest_s_anti_cheat_and_overrides_are_checked() {
         1,
     );
     assert_eq!(
-        parse_err(&text).code,
-        codes::MANIFEST_INVALID,
-        "schema 1: one override"
+        Manifest::parse(&text).unwrap().proton_overrides().len(),
+        2,
+        "schema 1 carries several overrides"
     );
     let text = base.replacen("engine = \"unity-mono\"", "engine = \"source2\"", 1);
     assert_eq!(parse_err(&text).code, codes::MANIFEST_INVALID);

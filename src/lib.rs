@@ -48,7 +48,7 @@ pub use ledger::{
 };
 pub use manifest::{
     ConfigWrite, FileRule, GameFileRule, IntegrationInfo, Launch, MANIFEST_FILE, Manifest, SCHEMA,
-    Target,
+    Target, wine_dll_overrides,
 };
 pub use package::{GiPackage, Limits, PackageSummary, SummaryConfigWrite, SummaryGameFile};
 pub use plan::{GameAction, GameFileAction, InstallPlan, plan_install};

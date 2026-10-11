@@ -88,8 +88,40 @@ pub struct Ledger {
     pub manifest: String,
     pub files: Vec<LedgerFile>,
     pub game_files: Vec<LedgerGameFile>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proton: Option<ProtonRecord>,
+    /// One record per DLL override, in the order they were applied. On disk one record is an
+    /// object, exactly as a launcher that knew one override wrote it, and several are an array.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "one_or_many")]
+    pub proton: Vec<ProtonRecord>,
+}
+
+/// `proton` is an object when there is one record (every ledger written before several overrides
+/// existed) and an array when there are more.
+mod one_or_many {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::ProtonRecord;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(ProtonRecord),
+        Many(Vec<ProtonRecord>),
+    }
+
+    pub fn serialize<S: Serializer>(v: &[ProtonRecord], s: S) -> Result<S::Ok, S::Error> {
+        match v {
+            [one] => one.serialize(s),
+            many => many.serialize(s),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<ProtonRecord>, D::Error> {
+        Ok(match Option::<OneOrMany>::deserialize(d)? {
+            None => Vec::new(),
+            Some(OneOrMany::One(r)) => vec![r],
+            Some(OneOrMany::Many(v)) => v,
+        })
+    }
 }
 
 pub(crate) fn ledger_path(profile: &Path) -> PathBuf {

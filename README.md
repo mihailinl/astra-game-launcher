@@ -125,9 +125,16 @@ rules: a launcher beside a Unity game is not a Unity game.
   detection checks against the folder (relative, no `..`, no link on the way).
 - **Anti-cheat.** A game folder carrying EasyAntiCheat, BattlEye, GameGuard, XIGNCODE or HoYoverse protection is
   refused, and so is a manifest whose `anti_cheat` is not `"none"`.
-- **Proton.** The Wine DLL override goes into `<prefix>/user.reg`, in the game's own
-  `AppDefaults\<exe>\DllOverrides` section only, written atomically with every other byte kept;
-  what was there before is recorded and put back on uninstall. Nothing is installed, launched
+- **Proton.** Every Wine DLL override in `[launch].proton_dll_overrides` (as many as the game
+  needs, e.g. `{ dxgi = "n,b", d3d11 = "n,b" }`) goes into `<prefix>/user.reg`, in the game's own
+  `AppDefaults\<exe>\DllOverrides` section only, in key order, in one atomic write with every
+  other byte kept; what was there before is recorded per DLL and put back on uninstall. A Steam
+  launch carries no environment, so the registry is the mechanism; the plan also shows the same
+  set as one `WINEDLLOVERRIDES` value (`d3d11=n,b;dxgi=n,b`, same order) for anyone who has to
+  paste it. A DLL name is a bare name (letters, digits, `_ - .`, starting with a letter or digit,
+  at most 64), never a path, and a name may appear once whatever its letter case; a value is one
+  of `native`, `builtin`, `native,builtin`, `builtin,native`, their one-letter forms, or empty
+  (disabled). Nothing is installed, launched
   or uninstalled while a process with the game's exe name runs (a best-effort check).
 - **The ledger.** `<profile>/astra-launcher-ledger.json` records every file placed, its digest
   and what it replaced. It is written before the first file is placed, under a file lock; an

@@ -120,7 +120,8 @@ pub struct PackageSummary {
     pub game_files: Vec<SummaryGameFile>,
     pub launch_args: Vec<String>,
     pub env: Vec<String>,
-    pub proton_override: Option<(String, String)>,
+    /// Every Proton override, (dll, value), in the manifest's key order.
+    pub proton_overrides: Vec<(String, String)>,
     pub config_writes: Vec<SummaryConfigWrite>,
     pub variables: Vec<String>,
 }
@@ -385,7 +386,7 @@ impl GiPackage {
                 .collect(),
             launch_args: m.launch.args.clone(),
             env: m.launch.env.keys().cloned().collect(),
-            proton_override: m.proton_override(),
+            proton_overrides: m.proton_overrides(),
             config_writes: m
                 .config_writes
                 .iter()

@@ -69,8 +69,10 @@ pub struct InstallPlan {
     pub game_files: Vec<GameFileAction>,
     /// With placeholders still visible.
     pub launch_args: Vec<String>,
-    /// Written into the Proton prefix at launch (Proton only): (dll, value).
-    pub proton_override: Option<(String, String)>,
+    /// Written into the Proton prefix at launch (Proton only), every one: (dll, value), in the
+    /// manifest's key order.
+    #[serde(default)]
+    pub proton_overrides: Vec<(String, String)>,
     /// The integration installed in this profile now; install replaces it.
     pub replaces: Option<IntegrationInfo>,
     /// Codes: "experimental", "not-reviewed", "replaces-integration", "no-license".
@@ -228,9 +230,9 @@ pub fn plan_install(
         profile_bytes: pkg.profile_files.iter().map(|f| f.size).sum(),
         game_files,
         launch_args: m.launch.args.clone(),
-        proton_override: match game.platform {
-            Platform::LinuxProton { .. } => m.proton_override(),
-            _ => None,
+        proton_overrides: match game.platform {
+            Platform::LinuxProton { .. } => m.proton_overrides(),
+            _ => Vec::new(),
         },
         replaces: existing.map(|l| l.integration),
         warnings,

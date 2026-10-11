@@ -80,7 +80,7 @@ fn add_then_uninstall_leaves_the_game_as_it_was() {
         ]
     );
     assert_eq!(plan.warnings, vec!["experimental", "not-reviewed"]);
-    assert_eq!(plan.proton_override, None, "no Proton on Windows");
+    assert!(plan.proton_overrides.is_empty(), "no Proton on Windows");
 
     let ledger = install(&pkg, &plan, &w.target(), &Ctx::silent()).unwrap();
     assert_eq!(fs::read(w.game.join("winhttp.dll")).unwrap(), WINHTTP);
@@ -531,7 +531,9 @@ fn a_reshade_ini_reshade_rewrote_is_never_replaced_nor_restored() {
 
     let r = uninstall(&w.profile(), &w.target()).unwrap();
     assert!(
-        !r.restored.iter().any(|f| f.eq_ignore_ascii_case("ReShade.ini")),
+        !r.restored
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case("ReShade.ini")),
         "nothing to restore: {:?}",
         r.restored
     );
