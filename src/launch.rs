@@ -187,6 +187,22 @@ pub fn prepare_launch(
     }
     let m = Manifest::parse(&ledger.manifest)?;
 
+    // This profile's install is THIS game: the folder and the program the ledger recorded.
+    let dir = plain(&canonical_dir(&game.dir)?);
+    if dir != ledger.game.dir {
+        return Err(LauncherError::new(codes::GAME_MISMATCH)
+            .with("field", "dir")
+            .with("want", ledger.game.dir.display().to_string())
+            .with("got", dir.display().to_string()));
+    }
+    let exe_rel = game.exe_rel()?;
+    if !exe_rel.eq_ignore_ascii_case(&ledger.game.exe) {
+        return Err(LauncherError::new(codes::GAME_MISMATCH)
+            .with("field", "exe")
+            .with("want", ledger.game.exe.clone())
+            .with("got", exe_rel));
+    }
+
     // Every variable present, and safe where it goes.
     for name in m.variables() {
         match vars.get(&name) {
@@ -237,8 +253,13 @@ pub fn prepare_launch(
 
     let exe_file = game.exe_file_name()?;
     refuse_if_running(&exe_file)?;
-    // Steam can flag a game VAC after it was installed: check again at every Play.
-    crate::plan::vac_check(game, game.steam_appid.or(m.target.steam_appid))?;
+    // Steam can flag a game VAC after it was installed: check again at every Play. Still unread
+    // now: only an install the person accepted that for may start.
+    let trusted = crate::plan::trusted_appid(game)?;
+    let vac_checked = crate::plan::vac_check(game, trusted, m.target.steam_appid)?;
+    if !vac_checked && !ledger.vac_unchecked_accepted {
+        return Err(LauncherError::new(codes::VAC_UNCHECKED));
+    }
 
     // A Proton override needs the prefix; refuse before writing anything.
     let overrides = match &game.platform {

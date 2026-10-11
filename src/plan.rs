@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::detect::{anti_cheat_scan, engine_of_exe};
 use crate::error::{LauncherError, Result, codes};
+use crate::game::steam_appid_of_dir;
 use crate::game::{GameTarget, Platform};
 use crate::ledger::{self, Ledger};
 use crate::manifest::IntegrationInfo;
@@ -79,8 +80,9 @@ pub struct InstallPlan {
     /// Codes: "experimental", "not-reviewed", "replaces-integration", "no-license",
     /// "vac-unchecked" (the same fact as `vac_checked == false`, for a sheet that lists codes).
     pub warnings: Vec<String>,
-    /// Steam's Valve Anti-Cheat flag was READ for this app and is clear. `false`: no Steam appid
-    /// is known (neither the caller's nor the manifest's), or no `appinfo.vdf` answered — not
+    /// Steam's Valve Anti-Cheat flag was READ for this app and is clear. `false`: no TRUSTED Steam
+    /// appid (the caller's, or the one the folder's appmanifest proves; never the integration
+    /// manifest's), or no `appinfo.vdf` answered for it — not
     /// refused on that ground alone, but [`crate::install`] then needs
     /// [`Accept::vac_unchecked`] from the person, never a plain "yes". Absent in an older
     /// serialised plan: `false`.
@@ -115,29 +117,77 @@ pub struct Accept {
 /// The `kind` of an `anti-cheat` refusal for a game Steam flags as VAC-protected.
 pub const VALVE_ANTI_CHEAT: &str = "valve-anti-cheat";
 
-/// Whether Steam flags the app as VAC-protected: the caller's `appinfo.vdf` first, then every
-/// Steam install on this machine (a wrong path from the caller never switches those off).
-/// `None`: no appinfo could answer.
-fn steam_vac(game: &GameTarget, appid: u32) -> Option<bool> {
-    game.steam_appinfo
-        .iter()
-        .cloned()
-        .chain(
-            steam_roots()
-                .into_iter()
-                .map(|r| r.join("appcache").join("appinfo.vdf")),
-        )
-        .find_map(|p| valve_anti_cheat(&p, appid))
+/// The Steam appid this game is KNOWN to be: the caller's, or the one the game folder proves
+/// through its library's `appmanifest_*.acf` ([`crate::steam_appid_of_dir`]). Both present and
+/// different: `game-mismatch`. An integration manifest's `steam_appid` is never a source here.
+pub(crate) fn trusted_appid(game: &GameTarget) -> Result<Option<u32>> {
+    let derived = steam_appid_of_dir(&game.dir)?;
+    match (game.steam_appid, derived) {
+        (Some(caller), Some(folder)) if caller != folder => {
+            Err(LauncherError::new(codes::GAME_MISMATCH)
+                .with("field", "steam_appid")
+                .with("want", folder.to_string())
+                .with("got", caller.to_string()))
+        }
+        (caller, folder) => Ok(caller.or(folder)),
+    }
 }
 
-/// The VAC gate, shared by plan and launch: refuses a VAC-flagged app, and answers whether the
-/// flag was READ (`true`: read and clear; `false`: no appid, or no appinfo answered).
-pub(crate) fn vac_check(game: &GameTarget, appid: Option<u32>) -> Result<bool> {
-    match appid.and_then(|id| steam_vac(game, id)) {
-        Some(true) => Err(LauncherError::new(codes::ANTI_CHEAT).with("kind", VALVE_ANTI_CHEAT)),
-        Some(false) => Ok(true),
-        None => Ok(false),
+/// Every `appinfo.vdf` on this machine worth asking: the caller's, then every Steam install's
+/// (a wrong path from the caller never switches those off), each file once.
+fn appinfo_files(game: &GameTarget) -> Vec<std::path::PathBuf> {
+    let mut seen = Vec::new();
+    let mut out = Vec::new();
+    let all = game.steam_appinfo.iter().cloned().chain(
+        steam_roots()
+            .into_iter()
+            .map(|r| r.join("appcache").join("appinfo.vdf")),
+    );
+    for p in all {
+        let key = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+        if !seen.contains(&key) {
+            seen.push(key);
+            out.push(p);
+        }
     }
+    out
+}
+
+/// The VAC gate, shared by plan and launch. Every appinfo that answers is read, and ANY one
+/// flagging VAC refuses — for the trusted appid ([`trusted_appid`]) and for the manifest's own
+/// `steam_appid` alike (the manifest may cause a refusal, never a pass). Returns whether the flag
+/// was READ for the trusted appid (`false`: no trusted appid, or no appinfo answered for it).
+pub(crate) fn vac_check(
+    game: &GameTarget,
+    trusted: Option<u32>,
+    manifest: Option<u32>,
+) -> Result<bool> {
+    vac_verdict(&appinfo_files(game), trusted, manifest)
+}
+
+/// [`vac_check`] over an explicit list of `appinfo.vdf` files: refuses when ANY file flags the
+/// trusted appid or the manifest's appid as VAC (never the first answer alone), and returns
+/// whether some file answered for the trusted appid.
+pub fn vac_verdict(
+    files: &[std::path::PathBuf],
+    trusted: Option<u32>,
+    manifest: Option<u32>,
+) -> Result<bool> {
+    let answers = |id: u32| -> Vec<bool> {
+        files
+            .iter()
+            .filter_map(|p| valve_anti_cheat(p, id))
+            .collect()
+    };
+    let for_trusted = trusted.map(answers).unwrap_or_default();
+    let for_manifest = manifest
+        .filter(|m| Some(*m) != trusted)
+        .map(answers)
+        .unwrap_or_default();
+    if for_trusted.iter().chain(&for_manifest).any(|vac| *vac) {
+        return Err(LauncherError::new(codes::ANTI_CHEAT).with("kind", VALVE_ANTI_CHEAT));
+    }
+    Ok(!for_trusted.is_empty())
 }
 
 /// What the game file at `path` will be once the current install (if any) is uninstalled:
@@ -187,7 +237,9 @@ pub fn plan_install(
             .with("want", m.target.exe.clone())
             .with("got", exe_rel));
     }
-    if let (Some(want), Some(got)) = (m.target.steam_appid, game.steam_appid)
+    // The appid this game is known to be; the manifest's may only refuse against it.
+    let trusted = trusted_appid(game)?;
+    if let (Some(want), Some(got)) = (m.target.steam_appid, trusted)
         && want != got
     {
         return Err(LauncherError::new(codes::GAME_MISMATCH)
@@ -204,9 +256,9 @@ pub fn plan_install(
     if let Some(kind) = anti_cheat_scan(&game_dir)?.into_iter().next() {
         return Err(LauncherError::new(codes::ANTI_CHEAT).with("kind", kind));
     }
-    // The caller's appid, else the one the manifest names: a caller that did not say which Steam
-    // app this is must not turn the check off. No appid at all is UNCHECKED, never clear.
-    let vac = vac_check(game, game.steam_appid.or(m.target.steam_appid))?;
+    // Cleared only for an appid the caller gave or the folder proves; the manifest's appid can
+    // only add a refusal. No trusted appid is UNCHECKED, never clear.
+    let vac = vac_check(game, trusted, m.target.steam_appid)?;
     if let Some(want) = m.engine() {
         let got = engine_of_exe(&game_dir, &exe)?;
         if got != want {

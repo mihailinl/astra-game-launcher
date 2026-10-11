@@ -39,7 +39,7 @@ pub use error::{LauncherError, Result, codes};
 #[cfg(feature = "cli")]
 pub use fetch::UreqFetch;
 pub use fetch::{Fetch, MAX_DOWNLOAD_BYTES, fetch_verified};
-pub use game::{GameTarget, Platform, proton_prefix_for};
+pub use game::{GameTarget, Platform, proton_prefix_for, steam_appid_of_dir};
 pub use install::{UninstallReport, install, installed, uninstall};
 pub use launch::{ProcessPlan, Spawn, StdSpawn, find_steam, launch, prepare_launch};
 pub use ledger::{
@@ -51,7 +51,9 @@ pub use manifest::{
     Target, wine_dll_overrides,
 };
 pub use package::{GiPackage, Limits, PackageSummary, SummaryConfigWrite, SummaryGameFile};
-pub use plan::{Accept, GameAction, GameFileAction, InstallPlan, VALVE_ANTI_CHEAT, plan_install};
+pub use plan::{
+    Accept, GameAction, GameFileAction, InstallPlan, VALVE_ANTI_CHEAT, plan_install, vac_verdict,
+};
 pub use running::is_running;
 pub use steam_appinfo::{
     launch_executable, launch_executables, steam_roots, valve_anti_cheat, valve_anti_cheat_of,

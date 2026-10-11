@@ -104,3 +104,136 @@ pub fn proton_prefix_for(game_dir: &Path, appid: u32) -> Option<PathBuf> {
             .join("pfx"),
     )
 }
+
+/// The Steam appid that owns `game_dir`, read from the library itself: the
+/// `steamapps/appmanifest_<appid>.acf` whose `installdir` resolves to this very folder
+/// (canonical paths compared). `None` when the folder is not in a Steam library or no manifest
+/// names it. Several manifests naming it with different appids: `game-mismatch`.
+///
+/// This is the appid a game folder PROVES; a caller's `--appid` is the other trusted source, and
+/// an integration manifest's `steam_appid` never is (it may only cause a refusal).
+pub fn steam_appid_of_dir(game_dir: &Path) -> Result<Option<u32>> {
+    let Ok(dir) = std::fs::canonicalize(game_dir) else {
+        return Ok(None);
+    };
+    let Some(steamapps) = dir.parent().and_then(Path::parent) else {
+        return Ok(None);
+    };
+    let is = |p: Option<&std::ffi::OsStr>, name: &str| {
+        p.and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case(name))
+    };
+    if !is(dir.parent().and_then(Path::file_name), "common")
+        || !is(steamapps.file_name(), "steamapps")
+    {
+        return Ok(None);
+    }
+    let Ok(entries) = std::fs::read_dir(steamapps) else {
+        return Ok(None);
+    };
+    let mut found: Option<u32> = None;
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let lower = name.to_ascii_lowercase();
+        if !(lower.starts_with("appmanifest_") && lower.ends_with(".acf")) {
+            continue;
+        }
+        // A manifest is a few KB; a huge one is not Steam's.
+        if e.metadata().map(|m| m.len()).unwrap_or(u64::MAX) > 1 << 20 {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(e.path()) else {
+            continue;
+        };
+        let (Some(appid), Some(installdir)) =
+            (acf_value(&text, "appid"), acf_value(&text, "installdir"))
+        else {
+            continue;
+        };
+        let Ok(appid) = appid.trim().parse::<u32>() else {
+            continue;
+        };
+        if installdir.is_empty()
+            || !std::fs::canonicalize(steamapps.join("common").join(&installdir))
+                .is_ok_and(|p| p == dir)
+        {
+            continue;
+        }
+        match found {
+            Some(other) if other != appid => {
+                return Err(LauncherError::new(codes::GAME_MISMATCH)
+                    .with("field", "steam_appid")
+                    .with("want", other.to_string())
+                    .with("got", appid.to_string()));
+            }
+            _ => found = Some(appid),
+        }
+    }
+    Ok(found)
+}
+
+/// A top-level value of an `appmanifest_*.acf` (Valve's text KeyValues: `"AppState" { "key"
+/// "value" ... }`): the first `"key" "value"` pair directly inside the root object, key compared
+/// ignoring ASCII case. Nested objects are skipped.
+fn acf_value(text: &str, key: &str) -> Option<String> {
+    enum Tok {
+        Str(String),
+        Open,
+        Close,
+    }
+    let mut toks = Vec::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                let mut s = String::new();
+                loop {
+                    match chars.next()? {
+                        '\\' => s.push(chars.next()?),
+                        '"' => break,
+                        c => s.push(c),
+                    }
+                }
+                toks.push(Tok::Str(s));
+            }
+            '{' => toks.push(Tok::Open),
+            '}' => toks.push(Tok::Close),
+            _ => {}
+        }
+    }
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < toks.len() {
+        match (&toks[i], toks.get(i + 1)) {
+            (Tok::Open, _) => depth += 1,
+            (Tok::Close, _) => depth = depth.saturating_sub(1),
+            (Tok::Str(k), Some(Tok::Str(v))) => {
+                if depth == 1 && k.eq_ignore_ascii_case(key) {
+                    return Some(v.clone());
+                }
+                i += 1;
+            }
+            (Tok::Str(_), _) => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn acf_values_are_read_at_the_top_level_only() {
+        let acf = "\"AppState\"\n{\n\t\"appid\"\t\t\"1850570\"\n\t\"name\"\t\t\"DEATH {STRANDING}\"\n\t\"UserConfig\"\n\t{\n\t\t\"installdir\"\t\t\"nested\"\n\t}\n\t\"installdir\"\t\t\"DS \\\"DC\\\"\"\n}\n";
+        assert_eq!(acf_value(acf, "appid").as_deref(), Some("1850570"));
+        assert_eq!(acf_value(acf, "INSTALLDIR").as_deref(), Some("DS \"DC\""));
+        assert_eq!(acf_value(acf, "missing"), None);
+        assert_eq!(
+            acf_value("\"AppState\" { \"appid\" \"unterminated", "appid"),
+            None
+        );
+    }
+}

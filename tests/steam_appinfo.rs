@@ -10,8 +10,8 @@ mod common;
 use std::path::Path;
 
 use astra_game_launcher::{
-    Accept, Ctx, Platform, VALVE_ANTI_CHEAT, codes, install, launch_executable, plan_install,
-    prepare_launch, uninstall, valve_anti_cheat, valve_anti_cheat_of,
+    Accept, Ctx, Platform, VALVE_ANTI_CHEAT, codes, install, installed, launch_executable,
+    plan_install, prepare_launch, uninstall, vac_verdict, valve_anti_cheat, valve_anti_cheat_of,
 };
 use common::*;
 
@@ -716,7 +716,7 @@ fn with_manifest_appid(appid: u32) -> astra_game_launcher::GiPackage {
 }
 
 #[test]
-fn the_manifests_appid_is_checked_when_the_caller_names_none() {
+fn the_manifests_appid_may_refuse_but_never_clears() {
     let world = Tmp::new("vac-manifest");
     let path = world.join("appinfo.vdf");
     std::fs::write(&path, vac_file(V28)).unwrap();
@@ -731,8 +731,94 @@ fn the_manifests_appid_is_checked_when_the_caller_names_none() {
         (e.code, e.param("kind")),
         (codes::ANTI_CHEAT, Some(VALVE_ANTI_CHEAT))
     );
+    // A manifest naming a clear app does not make an unknown game clear.
     let p = plan_install(&with_manifest_appid(CLEAR), &t, &profiles.join("p")).unwrap();
+    assert!(!p.vac_checked);
+}
+
+/// `<lib>/steamapps/common/Some Game` with an `appmanifest_<appid>.acf` naming it.
+fn library_game(lib: &Path, appid: u32, installdir_named: &str) -> std::path::PathBuf {
+    let dir = lib.join("steamapps/common/Some Game");
+    unity_game(&dir, "Some Game");
+    std::fs::write(
+        lib.join(format!("steamapps/appmanifest_{appid}.acf")),
+        format!("\"AppState\"\n{{\n\t\"appid\"\t\t\"{appid}\"\n\t\"installdir\"\t\t\"{installdir_named}\"\n}}\n"),
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn the_game_folder_proves_its_appid_and_the_caller_must_agree() {
+    let world = Tmp::new("vac-folder");
+    let path = world.join("appinfo.vdf");
+    std::fs::write(&path, vac_file(V29)).unwrap();
+    let profiles = Tmp::new("profiles");
+    let at = |dir: &Path, appid: Option<u32>| {
+        let mut t = target(dir, "Some Game.exe", appid, Platform::Windows);
+        t.steam_appinfo = Some(path.clone());
+        t
+    };
+
+    let lib = Tmp::new("lib");
+    let dir = library_game(lib.path(), CLEAR, "Some Game");
+    assert_eq!(
+        astra_game_launcher::steam_appid_of_dir(&dir).unwrap(),
+        Some(CLEAR)
+    );
+    // No --appid: the folder's appmanifest makes it a checked, clear Steam app.
+    let p = plan_install(&runner(), &at(&dir, None), &profiles.join("a")).unwrap();
     assert!(p.vac_checked);
+    // A caller naming another app is refused, VAC or not.
+    let e = plan_install(&runner(), &at(&dir, Some(VAC)), &profiles.join("a")).unwrap_err();
+    assert_eq!(
+        (e.code, e.param("field")),
+        (codes::GAME_MISMATCH, Some("steam_appid"))
+    );
+
+    // An appmanifest whose installdir is another folder proves nothing.
+    let lib2 = Tmp::new("lib2");
+    let dir2 = library_game(lib2.path(), CLEAR, "Another Game");
+    let p = plan_install(&runner(), &at(&dir2, None), &profiles.join("b")).unwrap();
+    assert!(!p.vac_checked);
+
+    // The folder proves a VAC app: refused with no --appid at all.
+    let lib3 = Tmp::new("lib3");
+    let dir3 = library_game(lib3.path(), VAC, "Some Game");
+    let e = plan_install(&runner(), &at(&dir3, None), &profiles.join("c")).unwrap_err();
+    assert_eq!(e.param("kind"), Some(VALVE_ANTI_CHEAT));
+}
+
+#[test]
+fn any_appinfo_flagging_vac_refuses_whatever_answers_first() {
+    let world = Tmp::new("vac-many");
+    let clear = world.join("clear.vdf");
+    let flagged = world.join("flagged.vdf");
+    std::fs::write(&clear, vac_file(V28)).unwrap();
+    std::fs::write(
+        &flagged,
+        file(
+            V29,
+            &[(
+                CLEAR,
+                app_with_categories(CLEAR, vec![("category_8", Str("1"))]),
+            )],
+        )
+        .0,
+    )
+    .unwrap();
+    for files in [
+        vec![clear.clone(), flagged.clone()],
+        vec![flagged.clone(), clear.clone()],
+    ] {
+        let e = vac_verdict(&files, Some(CLEAR), None).unwrap_err();
+        assert_eq!(e.param("kind"), Some(VALVE_ANTI_CHEAT));
+        // The manifest's appid refuses the same way, and only refuses.
+        assert!(vac_verdict(&files, None, Some(CLEAR)).is_err());
+    }
+    assert!(vac_verdict(&[clear.clone(), clear.clone()], Some(CLEAR), None).unwrap());
+    assert!(!vac_verdict(std::slice::from_ref(&clear), None, Some(CLEAR)).unwrap());
+    assert!(!vac_verdict(&[clear], Some(ABSENT), None).unwrap());
 }
 
 #[test]
@@ -767,6 +853,20 @@ fn an_unchecked_plan_needs_its_own_accept_and_play_checks_vac_again() {
         "nothing placed"
     );
     install(&pkg, &unread, &at(ABSENT), ACCEPT, &Ctx::silent()).unwrap();
+    assert!(
+        installed(&profiles.join("u"))
+            .unwrap()
+            .unwrap()
+            .vac_unchecked_accepted
+    );
+    // Accepted at install: an unread flag does not stop Play.
+    prepare_launch(
+        &profiles.join("u"),
+        &at(ABSENT),
+        &vars(),
+        Some(Path::new("/opt/fake/steam")),
+    )
+    .unwrap();
     uninstall(&profiles.join("u"), &at(ABSENT)).unwrap();
 
     // Read and clear: installs with no extra accept.
@@ -782,6 +882,47 @@ fn an_unchecked_plan_needs_its_own_accept_and_play_checks_vac_again() {
     .unwrap();
     let steam = Some(Path::new("/opt/fake/steam"));
     prepare_launch(&profiles.join("c"), &at(CLEAR), &vars(), steam).unwrap();
+
+    // The ledger keeps the person's acceptance only where one was given.
+    assert!(
+        !installed(&profiles.join("c"))
+            .unwrap()
+            .unwrap()
+            .vac_unchecked_accepted
+    );
+    // An accept passed with a CHECKED plan is not recorded: it promised nothing for later.
+    let checked2 = plan_install(&pkg, &at(CLEAR), &profiles.join("c2")).unwrap();
+    install(&pkg, &checked2, &at(CLEAR), ACCEPT, &Ctx::silent()).unwrap();
+    assert!(
+        !installed(&profiles.join("c2"))
+            .unwrap()
+            .unwrap()
+            .vac_unchecked_accepted
+    );
+    // Another folder or program than the ledger's: Play refuses.
+    let other = Tmp::new("other-game");
+    unity_game(other.path(), "Some Game");
+    let mut elsewhere = at(CLEAR);
+    elsewhere.dir = other.path().to_path_buf();
+    let e = prepare_launch(&profiles.join("c"), &elsewhere, &vars(), steam).unwrap_err();
+    assert_eq!(
+        (e.code, e.param("field")),
+        (codes::GAME_MISMATCH, Some("dir"))
+    );
+    std::fs::write(game.join("Other.exe"), b"MZ").unwrap();
+    let mut other_exe = at(CLEAR);
+    other_exe.exe = "Other.exe".into();
+    let e = prepare_launch(&profiles.join("c"), &other_exe, &vars(), steam).unwrap_err();
+    assert_eq!(
+        (e.code, e.param("field")),
+        (codes::GAME_MISMATCH, Some("exe"))
+    );
+
+    // Steam's appinfo cannot be read now, and nobody accepted an unread flag for this install.
+    std::fs::rename(&path, world.join("away.vdf")).unwrap();
+    let e = prepare_launch(&profiles.join("c"), &at(CLEAR), &vars(), steam).unwrap_err();
+    assert_eq!(e.code, codes::VAC_UNCHECKED);
+    std::fs::rename(world.join("away.vdf"), &path).unwrap();
 
     // Steam flags the game VAC afterwards: Play refuses.
     let flagged = file(

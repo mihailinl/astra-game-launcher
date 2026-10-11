@@ -123,6 +123,7 @@ pub fn install(
             })
             .collect(),
         proton: Vec::new(),
+        vac_unchecked_accepted: !plan.vac_checked && accept.vac_unchecked,
     };
     ledger::write(&profile, &ledger)?;
 

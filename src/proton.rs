@@ -313,40 +313,32 @@ pub(crate) fn same_prefix(a: &Path, b: &Path) -> bool {
     }
 }
 
-#[cfg(test)]
-thread_local! {
-    /// Where the unit tests put Wine's server directories instead of `/tmp/.wine-<uid>`.
-    static TEST_SERVER_ROOT: std::cell::RefCell<Option<std::path::PathBuf>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Wine's server directory root for this user: `/tmp/.wine-<uid>`.
-#[cfg(target_os = "linux")]
-fn server_root() -> Option<std::path::PathBuf> {
-    use std::os::unix::fs::MetadataExt;
-    #[cfg(test)]
-    if let Some(r) = TEST_SERVER_ROOT.with(|r| r.borrow().clone()) {
-        return Some(r);
-    }
-    // `/proc/self` belongs to this process's user: the uid without a libc call.
-    let uid = fs::metadata("/proc/self").ok()?.uid();
-    Some(std::path::PathBuf::from(format!("/tmp/.wine-{uid}")))
-}
-
-/// Whether a wineserver serves `prefix` right now. Wine names its socket after the prefix
-/// folder's device and inode, `<root>/server-<dev hex>-<ino hex>/socket`; the server is alive
-/// when that socket ACCEPTS a connection, so a directory a crashed server left behind never
-/// blocks anything.
+/// Whether a wineserver serves `prefix` right now: a process named `wineserver*` whose working
+/// directory is Wine's server directory for this prefix, `server-<dev hex>-<ino hex>` (the
+/// prefix folder's device and inode). Read from `/proc`, not from `/tmp`, so a wineserver whose
+/// `/tmp` is private (Flatpak Steam, the Steam Linux Runtime) is seen too, and a directory a
+/// crashed server left behind blocks nothing.
 #[cfg(target_os = "linux")]
 pub(crate) fn wineserver_alive(prefix: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
-    let (Some(root), Ok(meta)) = (server_root(), fs::metadata(prefix)) else {
+    let Ok(meta) = fs::metadata(prefix) else {
         return false;
     };
-    let socket = root
-        .join(format!("server-{:x}-{:x}", meta.dev(), meta.ino()))
-        .join("socket");
-    std::os::unix::net::UnixStream::connect(socket).is_ok()
+    let want = format!("server-{:x}-{:x}", meta.dev(), meta.ino());
+    let Ok(procs) = fs::read_dir("/proc") else {
+        return false;
+    };
+    procs.flatten().any(|p| {
+        let is_pid = p
+            .file_name()
+            .to_str()
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        is_pid
+            && fs::read_to_string(p.path().join("comm"))
+                .is_ok_and(|c| c.trim_end().starts_with("wineserver"))
+            && fs::read_link(p.path().join("cwd"))
+                .is_ok_and(|cwd| cwd.file_name().is_some_and(|n| n == want.as_str()))
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -379,8 +371,9 @@ fn current_value(text: &str, section: &str, dll: &str) -> Option<String> {
 /// The records come back as: every record of `existing` this call does not replace (another
 /// prefix, another section, a DLL no longer asked for — all still to be restored on uninstall),
 /// then one record per override in order. A record is replaced only by one for the same DLL in
-/// the same section of the same prefix (canonical path), and keeps its first "before". A value
-/// we wrote is never recorded as the user's `previous`.
+/// the same section of the same prefix (canonical path), and keeps its first "before". Without
+/// such a record, what is there is the user's, even when it equals our value: it is recorded as
+/// `previous` and restored as theirs.
 ///
 /// `persist` receives the records BEFORE `user.reg` is touched (it writes the ledger), so a crash
 /// in between leaves a ledger that knows about a change not yet made, which restoring skips,
@@ -421,13 +414,6 @@ pub(crate) fn apply_prefix(
         if let Some(i) = old {
             replaced[i] = true;
         }
-        // Our own value, from this record or any other of this DLL, is not "what was there".
-        let ours = |text: &String| {
-            *text == format!("\"{value}\"")
-                || existing
-                    .iter()
-                    .any(|o| same_key(&o.dll, dll) && *text == format!("\"{}\"", o.value))
-        };
         fresh.push(match old.map(|i| &existing[i]) {
             Some(o) if edit.line_present => ProtonRecord {
                 value: value.to_owned(),
@@ -438,7 +424,9 @@ pub(crate) fn apply_prefix(
                 section: section.clone(),
                 dll: dll.to_owned(),
                 value: value.to_owned(),
-                previous: edit.previous.filter(|p| !ours(p)),
+                // A value is ours only through a record of this prefix, section and DLL (the
+                // arm above). Anything else there, even our very value, is the user's.
+                previous: edit.previous,
                 section_created: edit.section_created || o.is_some_and(|o| o.section_created),
             },
         });
@@ -647,33 +635,35 @@ mod tests {
     }
 
     #[test]
-    fn our_own_value_is_never_recorded_as_the_users() {
-        // Our value is already there and nothing records it (a lost ledger, another spelling).
+    fn a_users_identical_value_is_theirs_and_survives_uninstall() {
+        // The user already set exactly our value, and no record of ours names it.
         let key = section_for("Game.exe");
-        let with_ours = apply(REG, &key, "dxgi", "native,builtin", 1).text;
-        let p = prefix_with(&with_ours);
+        let theirs = apply(REG, &key, "dxgi", "native,builtin", 1).text;
+        let p = prefix_with(&theirs);
+        let o = ov(&[("dxgi", "native,builtin")]);
+        let recs = apply_prefix(&p.0, "Game.exe", &o, &[], keep).unwrap();
+        assert_eq!(recs[0].previous.as_deref(), Some("\"native,builtin\""));
+        restore_prefix(&recs).unwrap();
+        assert_eq!(
+            reg_of(&p),
+            theirs,
+            "uninstall leaves the user's own override"
+        );
+        // A record of ANOTHER prefix for that DLL does not make this value ours.
+        let elsewhere = ProtonRecord {
+            prefix: "/elsewhere/pfx".into(),
+            ..recs[0].clone()
+        };
         let recs = apply_prefix(
             &p.0,
             "Game.exe",
-            &ov(&[("dxgi", "native,builtin")]),
-            &[],
+            &ov(&[("dxgi", "native")]),
+            &[elsewhere],
             keep,
         )
         .unwrap();
-        assert_eq!(recs[0].previous, None, "{recs:?}");
-        // A value an older record wrote for that DLL is ours too.
-        let older = ProtonRecord {
-            prefix: "/elsewhere/pfx".into(),
-            section: key.clone(),
-            dll: "dxgi".into(),
-            value: "native,builtin".into(),
-            previous: None,
-            section_created: true,
-        };
-        let recs =
-            apply_prefix(&p.0, "Game.exe", &ov(&[("dxgi", "native")]), &[older], keep).unwrap();
-        let new = recs.iter().find(|r| r.prefix == p.0).unwrap();
-        assert_eq!(new.previous, None, "{recs:?}");
+        let here = recs.iter().find(|r| r.prefix == p.0).unwrap();
+        assert_eq!(here.previous.as_deref(), Some("\"native,builtin\""));
     }
 
     #[test]
@@ -724,36 +714,59 @@ mod tests {
         assert_eq!(restore_all(&b.text, &[&ra, &rb]).unwrap(), REG);
     }
 
+    /// A process named `wineserver` (a copy of `sleep`) whose working directory is `dir`.
+    fn fake_wineserver(dir: &std::path::Path, bin: &std::path::Path) -> std::process::Child {
+        let sleep = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|d| d.join("sleep"))
+            .find(|p| p.is_file())
+            .expect("sleep on PATH");
+        fs::copy(&sleep, bin).unwrap();
+        std::process::Command::new(bin)
+            .arg("30")
+            .current_dir(dir)
+            .spawn()
+            .unwrap()
+    }
+
     #[test]
-    fn a_live_wineserver_blocks_apply_and_restore_and_a_stale_one_does_not() {
+    fn a_live_wineserver_blocks_apply_and_restore_and_a_left_directory_does_not() {
         use std::os::unix::fs::MetadataExt;
         let p = prefix_with(REG);
-        let root = tmp("wine-root");
-        TEST_SERVER_ROOT.with(|r| *r.borrow_mut() = Some(root.0.clone()));
         let meta = fs::metadata(&p.0).unwrap();
+        // Anywhere at all: a private /tmp (Flatpak) is the point.
+        let root = tmp("private-tmp");
         let dir = root
             .0
             .join(format!("server-{:x}-{:x}", meta.dev(), meta.ino()));
         fs::create_dir_all(&dir).unwrap();
         let o = ov(&[("dxgi", "native")]);
 
-        let listener = std::os::unix::net::UnixListener::bind(dir.join("socket")).unwrap();
-        let e = apply_prefix(&p.0, "Game.exe", &o, &[], keep).unwrap_err();
+        // Only the directory, no server: nothing blocks.
+        assert!(!wineserver_alive(&p.0));
+        let recs = apply_prefix(&p.0, "Game.exe", &o, &[], keep).unwrap();
+
+        let mut server = fake_wineserver(&dir, &root.0.join("wineserver"));
+        let seen = (0..50).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            wineserver_alive(&p.0)
+        });
+        let refused_apply = apply_prefix(&p.0, "Game.exe", &o, &[], keep).err();
+        let refused_restore = restore_prefix(&recs).err();
+        server.kill().unwrap();
+        server.wait().unwrap();
+        assert!(
+            seen,
+            "a wineserver working in this prefix's server directory"
+        );
+        let e = refused_apply.expect("apply refused");
         assert_eq!(
             (e.code, e.param("reason")),
             (codes::GAME_RUNNING, Some("wineserver"))
         );
+        assert_eq!(refused_restore.map(|e| e.code), Some(codes::GAME_RUNNING));
+        assert!(!wineserver_alive(&p.0), "a reaped server is gone");
+        assert!(restore_prefix(&recs).unwrap());
         assert_eq!(reg_of(&p), REG);
-
-        // Stale: the server is gone, its directory and socket file are not.
-        drop(listener);
-        let recs = apply_prefix(&p.0, "Game.exe", &o, &[], keep).unwrap();
-        // Alive again: restore waits too.
-        fs::remove_file(dir.join("socket")).unwrap();
-        let _listener = std::os::unix::net::UnixListener::bind(dir.join("socket")).unwrap();
-        let e = restore_prefix(&recs).unwrap_err();
-        assert_eq!(e.code, codes::GAME_RUNNING);
-        TEST_SERVER_ROOT.with(|r| *r.borrow_mut() = None);
     }
 
     #[test]

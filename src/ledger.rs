@@ -95,6 +95,10 @@ pub struct Ledger {
     /// object, exactly as a launcher that knew one override wrote it, and several are an array.
     #[serde(default, skip_serializing_if = "Vec::is_empty", with = "one_or_many")]
     pub proton: Vec<ProtonRecord>,
+    /// The person installed although Steam's VAC flag could not be read (`Accept::vac_unchecked`
+    /// on an unchecked plan). Without it, a Play whose VAC check is still unread is refused.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vac_unchecked_accepted: bool,
 }
 
 /// `proton` is an object when there is one record (every ledger written before several overrides

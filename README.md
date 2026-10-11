@@ -126,24 +126,31 @@ rules: a launcher beside a Unity game is not a Unity game.
 - **Anti-cheat.** A game folder carrying EasyAntiCheat, BattlEye, GameGuard, XIGNCODE or HoYoverse protection is
   refused, and so is a manifest whose `anti_cheat` is not `"none"`. A Steam app is also refused
   (`anti-cheat`, kind `valve-anti-cheat`) when Steam's `appinfo.vdf` lists `category_8` ("Valve
-  Anti-Cheat enabled") in its `common/category`, at plan time and again at every launch. The appid
-  is the caller's, else the manifest's `steam_appid`; the file is `GameTarget::steam_appinfo` and
-  then every Steam install found (a wrong path never switches those off). When no appid is known
-  or nothing answers (missing file, app absent, no `category` object), the plan is not refused on
-  that ground alone, but `InstallPlan::vac_checked` is false, it warns `vac-unchecked`, and
-  `install` refuses with `vac-unchecked` unless the caller passes `Accept { vac_unchecked: true }`
-  (the CLI's `--accept-vac-unchecked`; `--yes` alone does not cover it).
+  Anti-Cheat enabled") in its `common/category`, at plan time and again at every launch. EVERY
+  appinfo that answers is read (`GameTarget::steam_appinfo`, then every Steam install), and any
+  one flagging VAC refuses. The game counts as checked only for a TRUSTED appid: the caller's, or
+  the one the game folder proves through its library's `steamapps/appmanifest_*.acf` whose
+  `installdir` is this folder (both present and different: `game-mismatch`). The integration
+  manifest's `steam_appid` can only refuse (a mismatch, or that app is VAC), never clear. When no
+  trusted appid is known or nothing answers, the plan is not refused on that ground alone, but
+  `InstallPlan::vac_checked` is false, it warns `vac-unchecked`, and `install` refuses with
+  `vac-unchecked` unless the caller passes `Accept { vac_unchecked: true }` (the CLI's
+  `--accept-vac-unchecked`; `--yes` alone does not cover it). The ledger records that acceptance;
+  a launch whose check is still unread is refused without it. A launch is also refused unless the
+  game folder and program are the ones the ledger recorded.
 - **Proton.** Every Wine DLL override in `[launch].proton_dll_overrides` (as many as the game
   needs, e.g. `{ dxgi = "n,b", d3d11 = "n,b" }`) goes into `<prefix>/user.reg`, in the game's own
   `AppDefaults\<exe>\DllOverrides` section only, in key order, in one atomic write with every
   other byte kept; what was there before is recorded per DLL and put back on uninstall. The
   ledger learns of the change before `user.reg` is written, and `user.reg` is read back after.
   Two spellings of one prefix (`~/.steam/steam/...`, `~/.local/share/Steam/...`) are one prefix
-  (canonical path); records of another prefix or section are kept and restored too, and a value
-  the launcher wrote is never recorded as the user's. Nothing is applied or restored while a
-  wineserver serves the prefix (`game-running`, reason `wineserver`: its socket under
-  `/tmp/.wine-<uid>/server-<dev>-<ino>/` accepts a connection), since Wine writes its registry
-  back over the file when it exits. A ledger with several records is written as schema 2, which
+  (canonical path); records of another prefix or section are kept and restored too, and
+  a value counts as the launcher's only through its own record of that prefix, section and DLL:
+  a user's identical value is recorded and restored as theirs. Nothing is applied or restored
+  while a wineserver serves the prefix (`game-running`, reason `wineserver`: a `wineserver`
+  process in `/proc` whose working directory is `server-<dev>-<ino>` of the prefix, which also
+  finds one with a private `/tmp`), since Wine writes its registry back over the file when it
+  exits. A ledger with several records is written as schema 2, which
   an older launcher refuses with `schema-too-new`. A Steam
   launch carries no environment, so the registry is the mechanism; the plan also shows the same
   set as one `WINEDLLOVERRIDES` value (`d3d11=n,b;dxgi=n,b`, same order) for anyone who has to
