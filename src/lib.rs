@@ -51,7 +51,7 @@ pub use manifest::{
     Target, wine_dll_overrides,
 };
 pub use package::{GiPackage, Limits, PackageSummary, SummaryConfigWrite, SummaryGameFile};
-pub use plan::{GameAction, GameFileAction, InstallPlan, VALVE_ANTI_CHEAT, plan_install};
+pub use plan::{Accept, GameAction, GameFileAction, InstallPlan, VALVE_ANTI_CHEAT, plan_install};
 pub use running::is_running;
 pub use steam_appinfo::{launch_executable, launch_executables, steam_roots, valve_anti_cheat};
 

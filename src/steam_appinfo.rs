@@ -100,25 +100,23 @@ pub fn launch_executables(
 /// holds `category_8` ("Valve Anti-Cheat enabled") with a value other than `0`.
 ///
 /// `None` means NOT KNOWN, never "no": the file is missing, unreadable or corrupt, the app is not
-/// in it, or its entry has no `common` section (Steam keeps sparse entries for apps it has not
-/// fetched). `Some(false)` is an app whose `common` Steam has and which carries no such category.
+/// in it, or its entry has no `common/category` object (Steam keeps sparse entries for apps it
+/// has not fetched). `Some(false)` is an app whose categories Steam has, none of them VAC.
 pub fn valve_anti_cheat(appinfo_path: &Path, appid: u32) -> Option<bool> {
     let wanted = std::collections::BTreeSet::from([appid]);
     let app = read_apps(appinfo_path, &wanted).remove(&appid)?;
     let common = ["appinfo", "common"]
         .iter()
         .try_fold(&app, |kv, key| kv.get(key))?;
-    common.object()?;
-    Some(
-        common
-            .get("category")
-            .and_then(|c| c.get(VAC_CATEGORY))
-            .is_some_and(|v| match v {
-                Kv::String(s) => s.trim() != "0",
-                Kv::Int(n) => *n != 0,
-                Kv::Object(_) => true,
-            }),
-    )
+    // No `category` object at all is NOT KNOWN: every real game lists some category, so its
+    // absence says the entry is incomplete, not that VAC is off.
+    let category = common.get("category")?;
+    category.object()?;
+    Some(category.get(VAC_CATEGORY).is_some_and(|v| match v {
+        Kv::String(s) => s.trim() != "0",
+        Kv::Int(n) => *n != 0,
+        Kv::Object(_) => true,
+    }))
 }
 
 /// The launch entry [`launch_executable`] picks, from one app's parsed KeyValues.

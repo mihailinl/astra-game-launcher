@@ -77,9 +77,15 @@ pub struct InstallPlan {
     /// The integration installed in this profile now; install replaces it.
     pub replaces: Option<IntegrationInfo>,
     /// Codes: "experimental", "not-reviewed", "replaces-integration", "no-license",
-    /// "vac-unchecked" (a Steam app whose Valve Anti-Cheat flag could not be read from Steam's
-    /// appinfo: not refused on that ground, but not known to be clear either).
+    /// "vac-unchecked" (the same fact as `vac_checked == false`, for a sheet that lists codes).
     pub warnings: Vec<String>,
+    /// Steam's Valve Anti-Cheat flag was READ for this app and is clear. `false`: no Steam appid
+    /// is known (neither the caller's nor the manifest's), or no `appinfo.vdf` answered — not
+    /// refused on that ground alone, but [`crate::install`] then needs
+    /// [`Accept::vac_unchecked`] from the person, never a plain "yes". Absent in an older
+    /// serialised plan: `false`.
+    #[serde(default)]
+    pub vac_checked: bool,
 }
 
 /// Names a mod loader's proxy DLL goes by. A foreign one is another loader: never replaced.
@@ -98,17 +104,39 @@ fn keep_if_present(name: &str) -> bool {
     KEEP_IF_PRESENT.iter().any(|k| k.eq_ignore_ascii_case(name))
 }
 
+/// What the person accepted beyond the plan itself, passed to [`crate::install`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Accept {
+    /// The plan could not read Steam's VAC flag (`InstallPlan::vac_checked` is false) and the
+    /// person installs anyway, having been told. Install refuses such a plan without it.
+    pub vac_unchecked: bool,
+}
+
 /// The `kind` of an `anti-cheat` refusal for a game Steam flags as VAC-protected.
 pub const VALVE_ANTI_CHEAT: &str = "valve-anti-cheat";
 
-/// Whether Steam flags the app as VAC-protected, from the caller's `appinfo.vdf` or, failing
-/// that, from every Steam install on this machine. `None`: no appinfo could answer.
+/// Whether Steam flags the app as VAC-protected: the caller's `appinfo.vdf` first, then every
+/// Steam install on this machine (a wrong path from the caller never switches those off).
+/// `None`: no appinfo could answer.
 fn steam_vac(game: &GameTarget, appid: u32) -> Option<bool> {
-    match &game.steam_appinfo {
-        Some(p) => valve_anti_cheat(p, appid),
-        None => steam_roots()
-            .into_iter()
-            .find_map(|r| valve_anti_cheat(&r.join("appcache").join("appinfo.vdf"), appid)),
+    game.steam_appinfo
+        .iter()
+        .cloned()
+        .chain(
+            steam_roots()
+                .into_iter()
+                .map(|r| r.join("appcache").join("appinfo.vdf")),
+        )
+        .find_map(|p| valve_anti_cheat(&p, appid))
+}
+
+/// The VAC gate, shared by plan and launch: refuses a VAC-flagged app, and answers whether the
+/// flag was READ (`true`: read and clear; `false`: no appid, or no appinfo answered).
+pub(crate) fn vac_check(game: &GameTarget, appid: Option<u32>) -> Result<bool> {
+    match appid.and_then(|id| steam_vac(game, id)) {
+        Some(true) => Err(LauncherError::new(codes::ANTI_CHEAT).with("kind", VALVE_ANTI_CHEAT)),
+        Some(false) => Ok(true),
+        None => Ok(false),
     }
 }
 
@@ -176,13 +204,9 @@ pub fn plan_install(
     if let Some(kind) = anti_cheat_scan(&game_dir)?.into_iter().next() {
         return Err(LauncherError::new(codes::ANTI_CHEAT).with("kind", kind));
     }
-    let vac = match game.steam_appid {
-        Some(appid) => steam_vac(game, appid),
-        None => Some(false),
-    };
-    if vac == Some(true) {
-        return Err(LauncherError::new(codes::ANTI_CHEAT).with("kind", VALVE_ANTI_CHEAT));
-    }
+    // The caller's appid, else the one the manifest names: a caller that did not say which Steam
+    // app this is must not turn the check off. No appid at all is UNCHECKED, never clear.
+    let vac = vac_check(game, game.steam_appid.or(m.target.steam_appid))?;
     if let Some(want) = m.engine() {
         let got = engine_of_exe(&game_dir, &exe)?;
         if got != want {
@@ -244,7 +268,7 @@ pub fn plan_install(
     if m.integration.license.trim().is_empty() {
         warnings.push("no-license".to_owned());
     }
-    if vac.is_none() {
+    if !vac {
         warnings.push("vac-unchecked".to_owned());
     }
 
@@ -263,5 +287,6 @@ pub fn plan_install(
         },
         replaces: existing.map(|l| l.integration),
         warnings,
+        vac_checked: vac,
     })
 }

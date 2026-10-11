@@ -126,9 +126,13 @@ rules: a launcher beside a Unity game is not a Unity game.
 - **Anti-cheat.** A game folder carrying EasyAntiCheat, BattlEye, GameGuard, XIGNCODE or HoYoverse protection is
   refused, and so is a manifest whose `anti_cheat` is not `"none"`. A Steam app is also refused
   (`anti-cheat`, kind `valve-anti-cheat`) when Steam's `appinfo.vdf` lists `category_8` ("Valve
-  Anti-Cheat enabled") in its `common/category`; the file is `GameTarget::steam_appinfo`, or the
-  first Steam install that answers. When no appinfo answers (missing file, app not in it, a sparse
-  entry), the plan is not refused on that ground alone and carries the warning `vac-unchecked`.
+  Anti-Cheat enabled") in its `common/category`, at plan time and again at every launch. The appid
+  is the caller's, else the manifest's `steam_appid`; the file is `GameTarget::steam_appinfo` and
+  then every Steam install found (a wrong path never switches those off). When no appid is known
+  or nothing answers (missing file, app absent, no `category` object), the plan is not refused on
+  that ground alone, but `InstallPlan::vac_checked` is false, it warns `vac-unchecked`, and
+  `install` refuses with `vac-unchecked` unless the caller passes `Accept { vac_unchecked: true }`
+  (the CLI's `--accept-vac-unchecked`; `--yes` alone does not cover it).
 - **Proton.** Every Wine DLL override in `[launch].proton_dll_overrides` (as many as the game
   needs, e.g. `{ dxgi = "n,b", d3d11 = "n,b" }`) goes into `<prefix>/user.reg`, in the game's own
   `AppDefaults\<exe>\DllOverrides` section only, in key order, in one atomic write with every

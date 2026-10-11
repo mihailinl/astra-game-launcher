@@ -199,9 +199,14 @@ pub fn snapshot(dir: &Path) -> BTreeMap<String, Vec<u8>> {
     out
 }
 
+/// Every test that is not about VAC installs a plan whose VAC flag no appinfo could read.
+pub const ACCEPT: astra_game_launcher::Accept = astra_game_launcher::Accept {
+    vac_unchecked: true,
+};
+
 pub fn plan_and_install(pkg: &GiPackage, game: &GameTarget, profile: &Path) -> InstallPlan {
     let plan = plan_install(pkg, game, profile).unwrap();
-    install(pkg, &plan, game, &Ctx::silent()).unwrap();
+    install(pkg, &plan, game, ACCEPT, &Ctx::silent()).unwrap();
     plan
 }
 

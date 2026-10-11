@@ -26,7 +26,7 @@ use crate::paths::{
     BACKUP_DIR, FileState, LOCK_FILE, canonical_dir, checked_rel, existing_target, file_state,
     plain, prepare_target, prune_empty_dirs, write_atomic,
 };
-use crate::plan::{GameAction, InstallPlan, plan_install};
+use crate::plan::{Accept, GameAction, InstallPlan, plan_install};
 use crate::proton;
 use crate::running::refuse_if_running;
 
@@ -57,9 +57,14 @@ pub fn install(
     pkg: &GiPackage,
     plan: &InstallPlan,
     game: &GameTarget,
+    accept: Accept,
     ctx: &Ctx,
 ) -> Result<Ledger> {
     ctx.check()?;
+    // Unread VAC is never covered by a plain "yes": the caller says the person was told.
+    if !plan.vac_checked && !accept.vac_unchecked {
+        return Err(LauncherError::new(codes::VAC_UNCHECKED));
+    }
     fs::create_dir_all(&plan.profile_dir)
         .map_err(|e| LauncherError::io_at(&e, &plan.profile_dir))?;
     let profile = canonical_dir(&plan.profile_dir)?;

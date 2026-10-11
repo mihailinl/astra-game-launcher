@@ -79,10 +79,15 @@ fn add_then_uninstall_leaves_the_game_as_it_was() {
             ("doorstop_config.ini", GameAction::Add)
         ]
     );
-    assert_eq!(plan.warnings, vec!["experimental", "not-reviewed"]);
+    // No Steam appid anywhere: VAC could not be read, and the plan says so.
+    assert_eq!(
+        plan.warnings,
+        vec!["experimental", "not-reviewed", "vac-unchecked"]
+    );
+    assert!(!plan.vac_checked);
     assert!(plan.proton_overrides.is_empty(), "no Proton on Windows");
 
-    let ledger = install(&pkg, &plan, &w.target(), &Ctx::silent()).unwrap();
+    let ledger = install(&pkg, &plan, &w.target(), ACCEPT, &Ctx::silent()).unwrap();
     assert_eq!(fs::read(w.game.join("winhttp.dll")).unwrap(), WINHTTP);
     assert_eq!(
         fs::read(w.profile().join("BepInEx/core/BepInEx.Preloader.dll")).unwrap(),
@@ -123,7 +128,7 @@ fn replace_backs_up_and_uninstall_restores() {
         Some(sha(b"{\"game\":\"original\"}").as_str())
     );
 
-    let ledger = install(&pkg, &plan, &w.target(), &Ctx::silent()).unwrap();
+    let ledger = install(&pkg, &plan, &w.target(), ACCEPT, &Ctx::silent()).unwrap();
     assert_eq!(
         fs::read(w.game.join("settings.json")).unwrap(),
         b"{\"ours\":true}"
@@ -240,7 +245,7 @@ fn a_changed_game_folder_makes_the_plan_stale() {
     let pkg = runner();
     let plan = plan_install(&pkg, &w.target(), &w.profile()).unwrap();
     write(&w.game.join("doorstop_config.ini"), b"appeared");
-    let e = install(&pkg, &plan, &w.target(), &Ctx::silent()).unwrap_err();
+    let e = install(&pkg, &plan, &w.target(), ACCEPT, &Ctx::silent()).unwrap_err();
     assert_eq!(e.code, codes::PLAN_STALE);
     assert!(!w.game.join("winhttp.dll").exists());
 }
@@ -263,6 +268,7 @@ fn a_cancelled_install_rolls_back() {
         &pkg,
         &plan,
         &w.target(),
+        ACCEPT,
         &Ctx {
             cancel: &cancel,
             progress: &progress,
@@ -294,7 +300,7 @@ fn installing_again_replaces_the_previous_install_cleanly() {
         vec![GameAction::Add, GameAction::Add, GameAction::Replace],
         "as if uninstalled first"
     );
-    install(&pkg, &plan, &w.target(), &Ctx::silent()).unwrap();
+    install(&pkg, &plan, &w.target(), ACCEPT, &Ctx::silent()).unwrap();
     uninstall(&w.profile(), &w.target()).unwrap();
     assert_eq!(
         snapshot(w.game.path()),
@@ -315,7 +321,7 @@ fn the_jail_holds_on_disk_through_links() {
         symlink(outside.path(), w.profile().join("BepInEx")).unwrap();
         let pkg = runner();
         let plan = plan_install(&pkg, &w.target(), &w.profile()).unwrap();
-        let e = install(&pkg, &plan, &w.target(), &Ctx::silent()).unwrap_err();
+        let e = install(&pkg, &plan, &w.target(), ACCEPT, &Ctx::silent()).unwrap_err();
         assert_eq!(e.code, codes::PATH_ESCAPES);
         assert!(
             fs::read_dir(outside.path()).unwrap().next().is_none(),
@@ -436,7 +442,7 @@ fn uninstall_follows_the_ledgers_exe_folder_not_todays_target() {
     let pkg = runner();
     let tool = target(w.game.path(), "Tools/Tool.exe", None, Platform::Windows);
     let plan = plan_install(&pkg, &tool, &w.profile()).unwrap();
-    install(&pkg, &plan, &tool, &Ctx::silent()).unwrap();
+    install(&pkg, &plan, &tool, ACCEPT, &Ctx::silent()).unwrap();
     assert!(w.game.join("Tools/winhttp.dll").exists());
 
     // Today the root exe is detected instead.

@@ -26,7 +26,7 @@ USAGE
   astra-game-launcher plan <zip> --sha256 <hex> --game <dir> --exe <rel> [--appid N]
                            [--proton-prefix P] [--platform windows|linux-proton|linux-native]
                            [--steam-root <dir>] --profile <dir> [--json]
-  astra-game-launcher install <same as plan> --yes [--json]
+  astra-game-launcher install <same as plan> --yes [--accept-vac-unchecked] [--json]
   astra-game-launcher launch --profile <dir> --game <dir> --exe <rel> [--appid N]
                              [--proton-prefix P] [--platform …] [--steam <path>]
                              [--var k=v]… [--vars-stdin] [--dry-run] [--json]
@@ -42,7 +42,9 @@ NOTES
   <library>/steamapps/compatdata/<appid>/pfx.
   `plan`/`install` with `--appid N` refuse a game Steam flags as Valve Anti-Cheat protected
   (appinfo's `common/category` holds `category_8`), read from --steam-root or Steam's usual
-  places; when no appinfo answers, the plan says `vac-unchecked` and does not refuse on that.
+  places (both: a wrong --steam-root does not switch Steam's usual places off). The appid is
+  --appid, else the manifest's. When nothing answers, the plan says `vac-unchecked` and
+  `install` needs --accept-vac-unchecked besides --yes. `launch` checks VAC again.
   `launch --dry-run` prepares everything (INI keys, the Proton overrides, which uninstall
   reverts) and prints the command without starting it.
   `--vars-stdin` reads `k=v` lines or a JSON object from stdin, so a token stays out of `ps`.
@@ -340,6 +342,15 @@ fn plan_text(p: &InstallPlan) -> String {
     if let Some(all) = gl::wine_dll_overrides(&p.proton_overrides) {
         let _ = writeln!(s, "WINEDLLOVERRIDES={all}");
     }
+    let _ = writeln!(
+        s,
+        "valve anti-cheat: {}",
+        if p.vac_checked {
+            "checked, clear"
+        } else {
+            "NOT CHECKED (install needs --accept-vac-unchecked)"
+        }
+    );
     let _ = writeln!(s, "warnings: {}", p.warnings.join(", "));
     s
 }
@@ -422,7 +433,7 @@ fn run(argv: &[String]) -> Result<Output, LauncherError> {
         "plan" | "install" => {
             let mut opts = vec!["--sha256", "--profile"];
             opts.extend_from_slice(GAME_OPTS);
-            let a = Args::parse(argv, &opts, &["--json", "--yes"])?;
+            let a = Args::parse(argv, &opts, &["--json", "--yes", "--accept-vac-unchecked"])?;
             let pkg = open_package(&a)?;
             let game = game_target(&a)?;
             let plan = gl::plan_install(&pkg, &game, Path::new(a.need("--profile")?))?;
@@ -449,7 +460,10 @@ fn run(argv: &[String]) -> Result<Output, LauncherError> {
                 cancel: &never,
                 progress: &progress,
             };
-            let ledger = gl::install(&pkg, &plan, &game, &ctx)?;
+            let accept = gl::Accept {
+                vac_unchecked: a.flag("--accept-vac-unchecked"),
+            };
+            let ledger = gl::install(&pkg, &plan, &game, accept, &ctx)?;
             let text = format!(
                 "{}installed: {} profile files, {} game files\n",
                 plan_text(&plan),

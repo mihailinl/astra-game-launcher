@@ -10,7 +10,8 @@ mod common;
 use std::path::Path;
 
 use astra_game_launcher::{
-    Platform, VALVE_ANTI_CHEAT, codes, launch_executable, plan_install, valve_anti_cheat,
+    Accept, Ctx, Platform, VALVE_ANTI_CHEAT, codes, install, launch_executable, plan_install,
+    prepare_launch, uninstall, valve_anti_cheat,
 };
 use common::*;
 
@@ -566,18 +567,20 @@ fn app_with_categories(appid: u32, cats: Vec<(&'static str, V)>) -> Vec<(&'stati
     )]
 }
 
-const VAC: u32 = 11;
-const VAC_INT: u32 = 12;
-const CLEAR: u32 = 13;
-const ZERO: u32 = 14;
-const SPARSE: u32 = 15;
-const ABSENT: u32 = 16;
+const VAC: u32 = 4_000_011;
+const VAC_INT: u32 = 4_000_012;
+const CLEAR: u32 = 4_000_013;
+const ZERO: u32 = 4_000_014;
+const SPARSE: u32 = 4_000_015;
+const ABSENT: u32 = 4_000_016;
+/// `common` with no `category` object at all.
+const NO_CATEGORY: u32 = 4_000_010;
 
 fn vac_file(magic: u32) -> Vec<u8> {
     file(
         magic,
         &[
-            (10, app(10, None)),
+            (NO_CATEGORY, app(NO_CATEGORY, None)),
             (
                 VAC,
                 app_with_categories(
@@ -620,9 +623,9 @@ fn valve_anti_cheat_is_category_8_and_unknown_is_never_no() {
         let path = dir.join("appinfo.vdf");
         std::fs::write(&path, vac_file(magic)).unwrap();
         assert_eq!(
-            valve_anti_cheat(&path, 10),
-            Some(false),
-            "common, no category"
+            valve_anti_cheat(&path, NO_CATEGORY),
+            None,
+            "common without category: not known"
         );
         assert_eq!(valve_anti_cheat(&path, VAC), Some(true));
         assert_eq!(
@@ -690,6 +693,102 @@ fn the_plan_refuses_a_vac_game_and_says_when_it_could_not_check() {
         let p = plan(Some(appid), appinfo).unwrap();
         assert!(unchecked(&p), "{appid}: {:?}", p.warnings);
     }
-    // Not a Steam app: there is no VAC flag to read.
-    assert!(!unchecked(&plan(None, &path).unwrap()));
+    // No appid from the caller nor the manifest: unchecked, never clear.
+    let none = plan(None, &path).unwrap();
+    assert!(unchecked(&none) && !none.vac_checked);
+    assert!(clear.vac_checked);
+}
+
+fn with_manifest_appid(appid: u32) -> astra_game_launcher::GiPackage {
+    let m = runner_manifest("").replacen(
+        "[target]\n",
+        &format!("[target]\nsteam_appid = {appid}\n"),
+        1,
+    );
+    open(&runner_zip(&m)).unwrap()
+}
+
+#[test]
+fn the_manifests_appid_is_checked_when_the_caller_names_none() {
+    let world = Tmp::new("vac-manifest");
+    let path = world.join("appinfo.vdf");
+    std::fs::write(&path, vac_file(V28)).unwrap();
+    let game = Tmp::new("game");
+    unity_game(game.path(), "Some Game");
+    let profiles = Tmp::new("profiles");
+    let mut t = target(game.path(), "Some Game.exe", None, Platform::Windows);
+    t.steam_appinfo = Some(path.clone());
+
+    let e = plan_install(&with_manifest_appid(VAC), &t, &profiles.join("p")).unwrap_err();
+    assert_eq!(
+        (e.code, e.param("kind")),
+        (codes::ANTI_CHEAT, Some(VALVE_ANTI_CHEAT))
+    );
+    let p = plan_install(&with_manifest_appid(CLEAR), &t, &profiles.join("p")).unwrap();
+    assert!(p.vac_checked);
+}
+
+#[test]
+fn an_unchecked_plan_needs_its_own_accept_and_play_checks_vac_again() {
+    let world = Tmp::new("vac-accept");
+    let path = world.join("appinfo.vdf");
+    std::fs::write(&path, vac_file(V29)).unwrap();
+    let game = Tmp::new("game");
+    unity_game(game.path(), "Some Game");
+    let profiles = Tmp::new("profiles");
+    let at = |appid: u32| {
+        let mut t = target(game.path(), "Some Game.exe", Some(appid), Platform::Windows);
+        t.steam_appinfo = Some(path.clone());
+        t
+    };
+
+    // Unread: a plain "yes" is not enough.
+    let pkg = runner();
+    let unread = plan_install(&pkg, &at(ABSENT), &profiles.join("u")).unwrap();
+    assert!(!unread.vac_checked);
+    let e = install(
+        &pkg,
+        &unread,
+        &at(ABSENT),
+        Accept::default(),
+        &Ctx::silent(),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, codes::VAC_UNCHECKED);
+    assert!(
+        !profiles.join("u").join("BepInEx").exists(),
+        "nothing placed"
+    );
+    install(&pkg, &unread, &at(ABSENT), ACCEPT, &Ctx::silent()).unwrap();
+    uninstall(&profiles.join("u"), &at(ABSENT)).unwrap();
+
+    // Read and clear: installs with no extra accept.
+    let checked = plan_install(&pkg, &at(CLEAR), &profiles.join("c")).unwrap();
+    assert!(checked.vac_checked);
+    install(
+        &pkg,
+        &checked,
+        &at(CLEAR),
+        Accept::default(),
+        &Ctx::silent(),
+    )
+    .unwrap();
+    let steam = Some(Path::new("/opt/fake/steam"));
+    prepare_launch(&profiles.join("c"), &at(CLEAR), &vars(), steam).unwrap();
+
+    // Steam flags the game VAC afterwards: Play refuses.
+    let flagged = file(
+        V29,
+        &[(
+            CLEAR,
+            app_with_categories(CLEAR, vec![("category_8", Str("1"))]),
+        )],
+    )
+    .0;
+    std::fs::write(&path, flagged).unwrap();
+    let e = prepare_launch(&profiles.join("c"), &at(CLEAR), &vars(), steam).unwrap_err();
+    assert_eq!(
+        (e.code, e.param("kind")),
+        (codes::ANTI_CHEAT, Some(VALVE_ANTI_CHEAT))
+    );
 }

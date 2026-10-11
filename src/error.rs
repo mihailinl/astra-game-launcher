@@ -27,6 +27,8 @@ pub mod codes {
     pub const ENGINE_MISMATCH: &str = "engine-mismatch";
     pub const EXE_NOT_FOUND: &str = "exe-not-found";
     pub const ANTI_CHEAT: &str = "anti-cheat";
+    /// Steam's VAC flag could not be read and the caller did not pass `Accept::vac_unchecked`.
+    pub const VAC_UNCHECKED: &str = "vac-unchecked";
     pub const FOREIGN_LOADER: &str = "foreign-loader";
     /// The manifest names a different game (`field` = "exe" or "steam_appid").
     pub const GAME_MISMATCH: &str = "game-mismatch";
@@ -109,6 +111,9 @@ impl LauncherError {
             codes::ENGINE_MISMATCH => "the game is not made with the engine this integration needs",
             codes::EXE_NOT_FOUND => "the game's program was not found",
             codes::ANTI_CHEAT => "the game uses anti-cheat; mods there can get the account banned",
+            codes::VAC_UNCHECKED => {
+                "Steam's Valve Anti-Cheat flag for this game could not be read; accept that explicitly"
+            }
             codes::FOREIGN_LOADER => "another mod loader is installed beside the game",
             codes::GAME_MISMATCH => "this integration is for a different game",
             codes::PLATFORM_UNSUPPORTED => "this integration does not support the game's platform",

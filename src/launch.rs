@@ -237,6 +237,8 @@ pub fn prepare_launch(
 
     let exe_file = game.exe_file_name()?;
     refuse_if_running(&exe_file)?;
+    // Steam can flag a game VAC after it was installed: check again at every Play.
+    crate::plan::vac_check(game, game.steam_appid.or(m.target.steam_appid))?;
 
     // A Proton override needs the prefix; refuse before writing anything.
     let overrides = match &game.platform {
