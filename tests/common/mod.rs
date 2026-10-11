@@ -170,6 +170,8 @@ pub fn target(dir: &Path, exe: &str, appid: Option<u32>, platform: Platform) -> 
         exe: PathBuf::from(exe),
         steam_appid: appid,
         platform,
+        // Never this machine's Steam: a missing file, so the VAC check reads "unchecked".
+        steam_appinfo: Some(dir.join("no-appinfo.vdf")),
     }
 }
 

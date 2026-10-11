@@ -9,7 +9,9 @@ mod common;
 
 use std::path::Path;
 
-use astra_game_launcher::launch_executable;
+use astra_game_launcher::{
+    Platform, VALVE_ANTI_CHEAT, codes, launch_executable, plan_install, valve_anti_cheat,
+};
 use common::*;
 
 const V28: u32 = 0x0756_4428;
@@ -537,4 +539,157 @@ fn a_missing_file_gives_none() {
         launch_executable(Path::new("/nonexistent/appinfo.vdf"), APP, "windows"),
         None
     );
+}
+
+/// An app whose `common/category` is `cats`, with a launch entry beside it.
+fn app_with_categories(appid: u32, cats: Vec<(&'static str, V)>) -> Vec<(&'static str, V)> {
+    vec![(
+        "appinfo",
+        Obj(vec![
+            ("appid", I32(appid as i32)),
+            (
+                "common",
+                Obj(vec![
+                    ("name", Str("A game")),
+                    ("category", Obj(cats)),
+                    ("type", Str("Game")),
+                ]),
+            ),
+            (
+                "config",
+                Obj(vec![
+                    ("installdir", Str("Game")),
+                    ("launch", Obj(launch_config())),
+                ]),
+            ),
+        ]),
+    )]
+}
+
+const VAC: u32 = 11;
+const VAC_INT: u32 = 12;
+const CLEAR: u32 = 13;
+const ZERO: u32 = 14;
+const SPARSE: u32 = 15;
+const ABSENT: u32 = 16;
+
+fn vac_file(magic: u32) -> Vec<u8> {
+    file(
+        magic,
+        &[
+            (10, app(10, None)),
+            (
+                VAC,
+                app_with_categories(
+                    VAC,
+                    vec![
+                        ("category_1", Str("1")),
+                        ("category_8", Str("1")),
+                        ("category_22", Str("1")),
+                    ],
+                ),
+            ),
+            (
+                VAC_INT,
+                app_with_categories(VAC_INT, vec![("category_8", I32(1))]),
+            ),
+            (
+                CLEAR,
+                app_with_categories(
+                    CLEAR,
+                    vec![("category_1", Str("1")), ("category_29", Str("1"))],
+                ),
+            ),
+            (
+                ZERO,
+                app_with_categories(ZERO, vec![("CATEGORY_8", Str("0"))]),
+            ),
+            (
+                SPARSE,
+                vec![("appinfo", Obj(vec![("appid", I32(SPARSE as i32))]))],
+            ),
+        ],
+    )
+    .0
+}
+
+#[test]
+fn valve_anti_cheat_is_category_8_and_unknown_is_never_no() {
+    for magic in [V28, V29] {
+        let dir = Tmp::new("vac");
+        let path = dir.join("appinfo.vdf");
+        std::fs::write(&path, vac_file(magic)).unwrap();
+        assert_eq!(
+            valve_anti_cheat(&path, 10),
+            Some(false),
+            "common, no category"
+        );
+        assert_eq!(valve_anti_cheat(&path, VAC), Some(true));
+        assert_eq!(
+            valve_anti_cheat(&path, VAC_INT),
+            Some(true),
+            "an int flag counts"
+        );
+        assert_eq!(valve_anti_cheat(&path, CLEAR), Some(false));
+        assert_eq!(
+            valve_anti_cheat(&path, ZERO),
+            Some(false),
+            "a zero flag is off"
+        );
+        assert_eq!(
+            valve_anti_cheat(&path, SPARSE),
+            None,
+            "no common: not known"
+        );
+        assert_eq!(
+            valve_anti_cheat(&path, ABSENT),
+            None,
+            "not in the file: not known"
+        );
+        // The launch subtree is still read beside the categories.
+        assert_eq!(
+            launch_executable(&path, VAC, "windows").as_deref(),
+            Some("MiSideFull.exe")
+        );
+    }
+    assert_eq!(
+        valve_anti_cheat(Path::new("/nonexistent/appinfo.vdf"), VAC),
+        None
+    );
+}
+
+#[test]
+fn the_plan_refuses_a_vac_game_and_says_when_it_could_not_check() {
+    let world = Tmp::new("vac-world");
+    let path = world.join("appinfo.vdf");
+    std::fs::write(&path, vac_file(V29)).unwrap();
+    let game = Tmp::new("game");
+    unity_game(game.path(), "Some Game");
+    let profiles = Tmp::new("profiles");
+    let plan = |appid: Option<u32>, appinfo: &Path| {
+        let mut t = target(game.path(), "Some Game.exe", appid, Platform::Windows);
+        t.steam_appinfo = Some(appinfo.to_path_buf());
+        plan_install(&runner(), &t, &profiles.join("p"))
+    };
+    let unchecked =
+        |p: &astra_game_launcher::InstallPlan| p.warnings.iter().any(|w| w == "vac-unchecked");
+
+    for appid in [VAC, VAC_INT] {
+        let e = plan(Some(appid), &path).unwrap_err();
+        assert_eq!(e.code, codes::ANTI_CHEAT, "{appid}");
+        assert_eq!(e.param("kind"), Some(VALVE_ANTI_CHEAT), "{appid}");
+    }
+    let clear = plan(Some(CLEAR), &path).unwrap();
+    assert!(!unchecked(&clear), "{:?}", clear.warnings);
+    // Steam could not answer: not refused on that ground, and the plan says so.
+    for (appid, appinfo) in [
+        (ABSENT, path.as_path()),
+        (SPARSE, path.as_path()),
+        (VAC, Path::new("/nonexistent/appinfo.vdf")),
+    ] {
+        let p = plan(Some(appid), appinfo).unwrap();
+        assert!(unchecked(&p), "{appid}: {:?}", p.warnings);
+    }
+    // Not a Steam app: there is no VAC flag to read.
+    assert!(!unchecked(&plan(None, &path).unwrap()));
 }

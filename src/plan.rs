@@ -17,6 +17,7 @@ use crate::package::GiPackage;
 use crate::paths::{
     FileState, absolute, canonical_dir, existing_target, file_state, real_case, resolve_lenient,
 };
+use crate::steam_appinfo::{steam_roots, valve_anti_cheat};
 
 /// What happens to one file beside the game's exe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -75,7 +76,9 @@ pub struct InstallPlan {
     pub proton_overrides: Vec<(String, String)>,
     /// The integration installed in this profile now; install replaces it.
     pub replaces: Option<IntegrationInfo>,
-    /// Codes: "experimental", "not-reviewed", "replaces-integration", "no-license".
+    /// Codes: "experimental", "not-reviewed", "replaces-integration", "no-license",
+    /// "vac-unchecked" (a Steam app whose Valve Anti-Cheat flag could not be read from Steam's
+    /// appinfo: not refused on that ground, but not known to be clear either).
     pub warnings: Vec<String>,
 }
 
@@ -93,6 +96,20 @@ const KEEP_IF_PRESENT: &[&str] = &["doorstop_config.ini", "ReShade.ini"];
 
 fn keep_if_present(name: &str) -> bool {
     KEEP_IF_PRESENT.iter().any(|k| k.eq_ignore_ascii_case(name))
+}
+
+/// The `kind` of an `anti-cheat` refusal for a game Steam flags as VAC-protected.
+pub const VALVE_ANTI_CHEAT: &str = "valve-anti-cheat";
+
+/// Whether Steam flags the app as VAC-protected, from the caller's `appinfo.vdf` or, failing
+/// that, from every Steam install on this machine. `None`: no appinfo could answer.
+fn steam_vac(game: &GameTarget, appid: u32) -> Option<bool> {
+    match &game.steam_appinfo {
+        Some(p) => valve_anti_cheat(p, appid),
+        None => steam_roots()
+            .into_iter()
+            .find_map(|r| valve_anti_cheat(&r.join("appcache").join("appinfo.vdf"), appid)),
+    }
 }
 
 /// What the game file at `path` will be once the current install (if any) is uninstalled:
@@ -159,6 +176,13 @@ pub fn plan_install(
     if let Some(kind) = anti_cheat_scan(&game_dir)?.into_iter().next() {
         return Err(LauncherError::new(codes::ANTI_CHEAT).with("kind", kind));
     }
+    let vac = match game.steam_appid {
+        Some(appid) => steam_vac(game, appid),
+        None => Some(false),
+    };
+    if vac == Some(true) {
+        return Err(LauncherError::new(codes::ANTI_CHEAT).with("kind", VALVE_ANTI_CHEAT));
+    }
     if let Some(want) = m.engine() {
         let got = engine_of_exe(&game_dir, &exe)?;
         if got != want {
@@ -219,6 +243,9 @@ pub fn plan_install(
     }
     if m.integration.license.trim().is_empty() {
         warnings.push("no-license".to_owned());
+    }
+    if vac.is_none() {
+        warnings.push("vac-unchecked".to_owned());
     }
 
     Ok(InstallPlan {

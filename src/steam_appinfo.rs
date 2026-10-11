@@ -43,6 +43,12 @@ const MAX_TABLE_STRINGS: u32 = 1 << 20;
 /// The only part of an app that is kept; the rest is walked over without being stored, so a
 /// large or hostile app costs no memory beyond its bytes.
 const LAUNCH_PATH: &[&str] = &["appinfo", "config", "launch"];
+/// Where Steam lists an app's store categories (`category_8` is "Valve Anti-Cheat enabled").
+const CATEGORY_PATH: &[&str] = &["appinfo", "common", "category"];
+/// The subtrees of an app that are kept; everything else is walked over.
+const KEPT: &[&[&str]] = &[LAUNCH_PATH, CATEGORY_PATH];
+/// Steam's store category "Valve Anti-Cheat enabled".
+const VAC_CATEGORY: &str = "category_8";
 /// Nesting of KeyValues objects. Real apps nest about 8 deep.
 const MAX_DEPTH: usize = 64;
 
@@ -88,6 +94,31 @@ pub fn launch_executables(
         .into_iter()
         .filter_map(|(id, app)| pick(&app, os).map(|exe| (id, exe)))
         .collect()
+}
+
+/// Whether Steam marks `appid` as protected by Valve Anti-Cheat: its `appinfo/common/category`
+/// holds `category_8` ("Valve Anti-Cheat enabled") with a value other than `0`.
+///
+/// `None` means NOT KNOWN, never "no": the file is missing, unreadable or corrupt, the app is not
+/// in it, or its entry has no `common` section (Steam keeps sparse entries for apps it has not
+/// fetched). `Some(false)` is an app whose `common` Steam has and which carries no such category.
+pub fn valve_anti_cheat(appinfo_path: &Path, appid: u32) -> Option<bool> {
+    let wanted = std::collections::BTreeSet::from([appid]);
+    let app = read_apps(appinfo_path, &wanted).remove(&appid)?;
+    let common = ["appinfo", "common"]
+        .iter()
+        .try_fold(&app, |kv, key| kv.get(key))?;
+    common.object()?;
+    Some(
+        common
+            .get("category")
+            .and_then(|c| c.get(VAC_CATEGORY))
+            .is_some_and(|v| match v {
+                Kv::String(s) => s.trim() != "0",
+                Kv::Int(n) => *n != 0,
+                Kv::Object(_) => true,
+            }),
+    )
 }
 
 /// The launch entry [`launch_executable`] picks, from one app's parsed KeyValues.
@@ -237,11 +268,13 @@ fn normalise(exe: &str) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
-/// A KeyValues value that was kept. Numbers are walked over: nothing here reads one.
+/// A KeyValues value that was kept. Inside a kept subtree an integer is kept too (a category
+/// flag may be stored as one); floats, pointers, colours and UTF-16 strings are walked over.
 #[derive(Debug)]
 enum Kv {
     Object(Vec<(String, Kv)>),
     String(String),
+    Int(i64),
 }
 
 impl Kv {
@@ -298,7 +331,7 @@ fn read_apps(
     };
     for (id, blob) in blobs {
         let mut c = Cursor { b: &blob, at: 0 };
-        if let Some(obj) = object(&mut c, &keys, 0, Some(LAUNCH_PATH)) {
+        if let Some(obj) = object(&mut c, &keys, 0, KEPT) {
             out.insert(id, Kv::Object(obj));
         }
     }
@@ -469,34 +502,40 @@ fn text(b: &[u8]) -> String {
 /// One object's children, up to and including its end byte. Only what lies on `path` is kept:
 /// the child object named `path[0]` (with the rest of the path below it) and, once the path is
 /// spent, everything. Off the path (`None`) the bytes are checked and walked over, not stored.
+/// Parses one object. `paths` are the subtrees still wanted below it: an empty path keeps
+/// everything, a path `[k, rest..]` keeps the child `k` and looks for `rest` below it, and an
+/// object no path names is parsed (it must be walked) but not kept.
 fn object<'d>(
     c: &mut Cursor<'d>,
     keys: &Keys<'d>,
     depth: usize,
-    path: Option<&[&str]>,
+    paths: &[&[&str]],
 ) -> Option<Vec<(String, Kv)>> {
     let mut out = Vec::new();
+    let keep_all = paths.iter().any(|p| p.is_empty());
     loop {
         let ty = c.u8()?;
         if ty == T_END || ty == T_END_ALT {
             return Some(out);
         }
         let key = c.key(keys)?;
-        let keep_all = matches!(path, Some([]));
         match ty {
             T_OBJECT => {
                 if depth + 1 >= MAX_DEPTH {
                     return None;
                 }
-                let below = match path {
-                    Some([]) => Some(&[][..]),
-                    Some([first, rest @ ..]) if key.eq_ignore_ascii_case(first.as_bytes()) => {
-                        Some(rest)
-                    }
-                    _ => None,
-                };
-                let children = object(c, keys, depth + 1, below)?;
-                if below.is_some() {
+                let below: Vec<&[&str]> = paths
+                    .iter()
+                    .filter_map(|p| match p {
+                        [] => Some(&[][..]),
+                        [first, rest @ ..] if key.eq_ignore_ascii_case(first.as_bytes()) => {
+                            Some(rest)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let children = object(c, keys, depth + 1, &below)?;
+                if !below.is_empty() {
                     out.push((text(key), Kv::Object(children)));
                 }
             }
@@ -506,11 +545,23 @@ fn object<'d>(
                     out.push((text(key), Kv::String(text(s))));
                 }
             }
-            T_INT32 | T_FLOAT32 | T_POINTER | T_COLOR => {
+            T_INT32 => {
+                let b = c.take(4)?;
+                if keep_all {
+                    let n = i32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                    out.push((text(key), Kv::Int(i64::from(n))));
+                }
+            }
+            T_FLOAT32 | T_POINTER | T_COLOR => {
                 c.take(4)?;
             }
             T_UINT64 | T_INT64 => {
-                c.take(8)?;
+                let b = c.take(8)?;
+                if keep_all {
+                    let mut a = [0u8; 8];
+                    a.copy_from_slice(b);
+                    out.push((text(key), Kv::Int(i64::from_le_bytes(a))));
+                }
             }
             T_WSTRING => c.skip_wstr()?,
             _ => return None,
@@ -541,9 +592,10 @@ mod tests {
             b.extend_from_slice(&[T_OBJECT, b'k', 0]);
         }
         b.extend(std::iter::repeat_n(T_END, 100_001));
-        for path in [None, Some(&[][..]), Some(LAUNCH_PATH)] {
+        let keep_all: &[&[&str]] = &[&[]];
+        for paths in [&[][..], keep_all, KEPT] {
             let mut c = Cursor { b: &b, at: 0 };
-            assert!(object(&mut c, &Keys::Inline, 0, path).is_none());
+            assert!(object(&mut c, &Keys::Inline, 0, paths).is_none());
         }
     }
 }

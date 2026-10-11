@@ -124,7 +124,11 @@ rules: a launcher beside a Unity game is not a Unity game.
   bounded; anything corrupt answers `None`, never a panic. What it names is only a hint, which
   detection checks against the folder (relative, no `..`, no link on the way).
 - **Anti-cheat.** A game folder carrying EasyAntiCheat, BattlEye, GameGuard, XIGNCODE or HoYoverse protection is
-  refused, and so is a manifest whose `anti_cheat` is not `"none"`.
+  refused, and so is a manifest whose `anti_cheat` is not `"none"`. A Steam app is also refused
+  (`anti-cheat`, kind `valve-anti-cheat`) when Steam's `appinfo.vdf` lists `category_8` ("Valve
+  Anti-Cheat enabled") in its `common/category`; the file is `GameTarget::steam_appinfo`, or the
+  first Steam install that answers. When no appinfo answers (missing file, app not in it, a sparse
+  entry), the plan is not refused on that ground alone and carries the warning `vac-unchecked`.
 - **Proton.** Every Wine DLL override in `[launch].proton_dll_overrides` (as many as the game
   needs, e.g. `{ dxgi = "n,b", d3d11 = "n,b" }`) goes into `<prefix>/user.reg`, in the game's own
   `AppDefaults\<exe>\DllOverrides` section only, in key order, in one atomic write with every

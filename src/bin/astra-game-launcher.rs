@@ -25,7 +25,7 @@ USAGE
   astra-game-launcher inspect <zip> --sha256 <hex> [--json]
   astra-game-launcher plan <zip> --sha256 <hex> --game <dir> --exe <rel> [--appid N]
                            [--proton-prefix P] [--platform windows|linux-proton|linux-native]
-                           --profile <dir> [--json]
+                           [--steam-root <dir>] --profile <dir> [--json]
   astra-game-launcher install <same as plan> --yes [--json]
   astra-game-launcher launch --profile <dir> --game <dir> --exe <rel> [--appid N]
                              [--proton-prefix P] [--platform …] [--steam <path>]
@@ -40,7 +40,10 @@ NOTES
   `--hint` names that program directly.
   On Linux a game whose exe ends in .exe runs under Proton; its prefix defaults to
   <library>/steamapps/compatdata/<appid>/pfx.
-  `launch --dry-run` prepares everything (INI keys, the Proton override, which uninstall
+  `plan`/`install` with `--appid N` refuse a game Steam flags as Valve Anti-Cheat protected
+  (appinfo's `common/category` holds `category_8`), read from --steam-root or Steam's usual
+  places; when no appinfo answers, the plan says `vac-unchecked` and does not refuse on that.
+  `launch --dry-run` prepares everything (INI keys, the Proton overrides, which uninstall
   reverts) and prints the command without starting it.
   `--vars-stdin` reads `k=v` lines or a JSON object from stdin, so a token stays out of `ps`.
   Errors print {\"code\", \"params\"} as JSON on stdout and exit 1.
@@ -131,6 +134,7 @@ const GAME_OPTS: &[&str] = &[
     "--appid",
     "--proton-prefix",
     "--platform",
+    "--steam-root",
 ];
 
 fn game_target(a: &Args) -> Result<GameTarget, LauncherError> {
@@ -171,6 +175,9 @@ fn game_target(a: &Args) -> Result<GameTarget, LauncherError> {
         exe,
         steam_appid,
         platform,
+        steam_appinfo: a
+            .one("--steam-root")
+            .map(|r| PathBuf::from(r).join("appcache").join("appinfo.vdf")),
     })
 }
 

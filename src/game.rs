@@ -40,6 +40,11 @@ pub struct GameTarget {
     pub exe: PathBuf,
     pub steam_appid: Option<u32>,
     pub platform: Platform,
+    /// Steam's `appcache/appinfo.vdf`, read at plan time for the app's Valve Anti-Cheat flag
+    /// when `steam_appid` is set. `None`: every Steam install [`crate::steam_roots`] finds is
+    /// tried, so a caller that does not know where Steam is still gets the check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steam_appinfo: Option<PathBuf>,
 }
 
 impl GameTarget {
