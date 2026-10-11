@@ -469,3 +469,75 @@ fn the_engine_is_the_target_programs_own() {
     // The game itself passes.
     plan_install(&runner(), &w.target(), &w.profile()).unwrap();
 }
+
+const OUR_RESHADE_INI: &[u8] = b"[GENERAL]\nEffectSearchPaths=.\\\\reshade-shaders\\\\Shaders\n";
+
+/// The runner plus a `ReShade.ini` beside the exe, as a ReShade-family integration ships it.
+fn with_reshade_ini() -> GiPackage {
+    let m = runner_manifest(
+        "\n[[game_files]]\nfrom = \"extra/ReShade.ini\"\nto = \"${game}/ReShade.ini\"\n",
+    );
+    let z = zip(&[
+        E::File("astra-gi.toml", m.as_bytes()),
+        E::File("winhttp.dll", WINHTTP),
+        E::File("doorstop_config.ini", DOORSTOP_INI),
+        E::File("BepInEx/core/BepInEx.Preloader.dll", PRELOADER),
+        E::File("BepInEx/core/BepInEx.dll", CORE_DLL),
+        E::File("extra/ReShade.ini", OUR_RESHADE_INI),
+    ]);
+    open(&z).unwrap()
+}
+
+fn reshade_action(plan: &astra_game_launcher::InstallPlan) -> GameAction {
+    plan.game_files
+        .iter()
+        .find(|g| g.rel_path.eq_ignore_ascii_case("ReShade.ini"))
+        .expect("the plan names ReShade.ini")
+        .action
+}
+
+#[test]
+fn a_users_reshade_ini_is_kept_whatever_its_case() {
+    for name in ["ReShade.ini", "reshade.ini", "RESHADE.INI"] {
+        let w = World::new();
+        let theirs = b"[GENERAL]\nPresetPath=.\\\\their-preset.ini\n";
+        write(&w.game.join(name), theirs);
+        let plan = plan_and_install(&with_reshade_ini(), &w.target(), &w.profile());
+        assert_eq!(reshade_action(&plan), GameAction::KeepExisting, "{name}");
+        assert_eq!(fs::read(w.game.join(name)).unwrap(), theirs, "{name}");
+        uninstall(&w.profile(), &w.target()).unwrap();
+        assert_eq!(
+            fs::read(w.game.join(name)).unwrap(),
+            theirs,
+            "{name}: uninstall leaves the user's file"
+        );
+    }
+}
+
+#[test]
+fn a_reshade_ini_reshade_rewrote_is_never_replaced_nor_restored() {
+    let w = World::new();
+    let pkg = with_reshade_ini();
+    let first = plan_and_install(&pkg, &w.target(), &w.profile());
+    assert_eq!(reshade_action(&first), GameAction::Add);
+    // The game ran: ReShade saved the user's settings into the file we placed.
+    let rewritten = b"[GENERAL]\nEffectSearchPaths=.\\\\reshade-shaders\\\\Shaders\n[OVERLAY]\nTutorialProgress=4\n";
+    write(&w.game.join("ReShade.ini"), rewritten);
+
+    // An update over that install keeps the rewritten file instead of backing it up.
+    let again = plan_and_install(&pkg, &w.target(), &w.profile());
+    assert_eq!(reshade_action(&again), GameAction::KeepExisting);
+    assert_eq!(fs::read(w.game.join("ReShade.ini")).unwrap(), rewritten);
+
+    let r = uninstall(&w.profile(), &w.target()).unwrap();
+    assert!(
+        !r.restored.iter().any(|f| f.eq_ignore_ascii_case("ReShade.ini")),
+        "nothing to restore: {:?}",
+        r.restored
+    );
+    assert_eq!(
+        fs::read(w.game.join("ReShade.ini")).unwrap(),
+        rewritten,
+        "the user's settings survive uninstall"
+    );
+}

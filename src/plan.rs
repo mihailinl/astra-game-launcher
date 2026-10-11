@@ -29,7 +29,8 @@ pub enum GameAction {
     Replace,
     /// The very file we ship is already there. It is never rewritten, and never removed.
     ReuseKnownProxy,
-    /// A `doorstop_config.ini` we did not write is already there. It is left as it is.
+    /// A config file we did not write (`doorstop_config.ini`, `ReShade.ini`) is already there.
+    /// It is left as it is, and uninstall neither removes nor "restores" it.
     KeepExisting,
 }
 
@@ -79,8 +80,18 @@ pub struct InstallPlan {
 /// Names a mod loader's proxy DLL goes by. A foreign one is another loader: never replaced.
 const LOADER_PROXIES: &[&str] = &["winhttp.dll", "version.dll", "dxgi.dll", "d3d11.dll"];
 
-/// Files that, when present and not ours, are left alone.
-const KEEP_IF_PRESENT: &[&str] = &["doorstop_config.ini"];
+/// Files that, when present and not ours, are left alone. Matched case-insensitively: Wine and
+/// Windows see `ReShade.ini` and `reshade.ini` as one file.
+///
+/// `ReShade.ini` is here because ReShade REWRITES it while the game runs (the overlay saves the
+/// user's settings into it). A user's own file must survive install and uninstall, and ours, once
+/// ReShade has rewritten it, is the user's settings: an update must not back it up and replace it,
+/// and an uninstall must not "restore" an older copy over it.
+const KEEP_IF_PRESENT: &[&str] = &["doorstop_config.ini", "ReShade.ini"];
+
+fn keep_if_present(name: &str) -> bool {
+    KEEP_IF_PRESENT.iter().any(|k| k.eq_ignore_ascii_case(name))
+}
 
 /// What the game file at `path` will be once the current install (if any) is uninstalled:
 /// uninstall removes our `add`s and restores our `replace`s, while they still have our digest.
@@ -184,7 +195,7 @@ pub fn plan_install(
         let (action, existing_sha256) = match state {
             FileState::Absent => (GameAction::Add, None),
             FileState::File { sha256 } if sha256 == f.sha256 => (GameAction::ReuseKnownProxy, None),
-            FileState::File { sha256 } if KEEP_IF_PRESENT.contains(&name.as_str()) => {
+            FileState::File { sha256 } if keep_if_present(&name) => {
                 (GameAction::KeepExisting, Some(sha256))
             }
             FileState::File { .. } if LOADER_PROXIES.contains(&name.as_str()) => {

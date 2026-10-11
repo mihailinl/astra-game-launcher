@@ -113,7 +113,9 @@ rules: a launcher beside a Unity game is not a Unity game.
   rename. `[[config_writes]]` may only write inside the profile; a caller's variable can never
   choose a path.
 - **Beside the exe.** A file already there with our digest is reused and never rewritten. A
-  `doorstop_config.ini` we did not write is left as it is. A foreign `winhttp.dll`,
+  `doorstop_config.ini` or `ReShade.ini` (any letter case) we did not write is left as it is, and
+  uninstall neither removes nor restores it: ReShade rewrites its INI while the game runs, so
+  ours becomes the user's settings the first time it is saved. A foreign `winhttp.dll`,
   `version.dll`, `dxgi.dll` or `d3d11.dll` is another mod loader: the install is refused. Any
   other existing file is backed up into the profile and replaced. Uninstall removes or restores
   a file only while it still has our digest; a file the game updated since is the game's.
