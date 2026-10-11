@@ -93,6 +93,7 @@ fn proton_override_is_applied_and_restored_leaving_other_sections_alone() {
         serde_json::from_slice(&fs::read(w.profile().join("astra-launcher-ledger.json")).unwrap())
             .unwrap();
     assert!(on_disk["proton"].is_object(), "{}", on_disk["proton"]);
+    assert_eq!(on_disk["schema"], 1);
 
     // A second Play changes nothing and keeps the record of what was there first.
     let p2 = prepare_launch(&w.profile(), &game, &vars(), steam()).unwrap();
@@ -352,6 +353,10 @@ fn several_overrides_are_all_applied_and_all_restored_byte_exactly() {
         serde_json::from_slice(&fs::read(w.profile().join("astra-launcher-ledger.json")).unwrap())
             .unwrap();
     assert_eq!(on_disk["proton"].as_array().map(Vec::len), Some(3));
+    assert_eq!(
+        on_disk["schema"], 2,
+        "an array a schema-1 launcher cannot parse is schema 2"
+    );
 
     // Play again: nothing changes, and the records of what was there first are kept.
     assert_eq!(

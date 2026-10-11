@@ -136,7 +136,15 @@ rules: a launcher beside a Unity game is not a Unity game.
 - **Proton.** Every Wine DLL override in `[launch].proton_dll_overrides` (as many as the game
   needs, e.g. `{ dxgi = "n,b", d3d11 = "n,b" }`) goes into `<prefix>/user.reg`, in the game's own
   `AppDefaults\<exe>\DllOverrides` section only, in key order, in one atomic write with every
-  other byte kept; what was there before is recorded per DLL and put back on uninstall. A Steam
+  other byte kept; what was there before is recorded per DLL and put back on uninstall. The
+  ledger learns of the change before `user.reg` is written, and `user.reg` is read back after.
+  Two spellings of one prefix (`~/.steam/steam/...`, `~/.local/share/Steam/...`) are one prefix
+  (canonical path); records of another prefix or section are kept and restored too, and a value
+  the launcher wrote is never recorded as the user's. Nothing is applied or restored while a
+  wineserver serves the prefix (`game-running`, reason `wineserver`: its socket under
+  `/tmp/.wine-<uid>/server-<dev>-<ino>/` accepts a connection), since Wine writes its registry
+  back over the file when it exits. A ledger with several records is written as schema 2, which
+  an older launcher refuses with `schema-too-new`. A Steam
   launch carries no environment, so the registry is the mechanism; the plan also shows the same
   set as one `WINEDLLOVERRIDES` value (`d3d11=n,b;dxgi=n,b`, same order) for anyone who has to
   paste it. A DLL name is a bare name (letters, digits, `_ - .`, starting with a letter or digit,

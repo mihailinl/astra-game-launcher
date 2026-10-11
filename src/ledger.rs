@@ -17,7 +17,10 @@ use crate::manifest::IntegrationInfo;
 use crate::paths::{LEDGER_FILE, LOCK_FILE, check_regular_or_absent, write_atomic};
 use crate::plan::GameAction;
 
-pub const LEDGER_SCHEMA: u32 = 1;
+/// The newest ledger schema this launcher reads. A ledger is WRITTEN as schema 1 unless it needs
+/// 2: schema 2 is a `proton` array (several overrides), which a schema-1 launcher cannot parse,
+/// so it refuses with `schema-too-new` instead of failing on the shape.
+pub const LEDGER_SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -148,8 +151,15 @@ pub(crate) fn read(profile: &Path) -> Result<Option<Ledger>> {
     Ok(Some(ledger))
 }
 
+/// The schema a ledger is written as: the lowest that can carry it.
+fn schema_for(ledger: &Ledger) -> u32 {
+    if ledger.proton.len() > 1 { 2 } else { 1 }
+}
+
 pub(crate) fn write(profile: &Path, ledger: &Ledger) -> Result<()> {
-    let text = serde_json::to_string_pretty(ledger).map_err(LauncherError::io)?;
+    let mut on_disk = ledger.clone();
+    on_disk.schema = schema_for(ledger);
+    let text = serde_json::to_string_pretty(&on_disk).map_err(LauncherError::io)?;
     write_atomic(&ledger_path(profile), text.as_bytes())
 }
 

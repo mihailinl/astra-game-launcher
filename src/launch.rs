@@ -311,11 +311,12 @@ pub fn prepare_launch(
     }
 
     if let Some((prefix, overrides)) = overrides {
-        let recs = proton::apply_prefix(&prefix, &exe_file, &overrides, &ledger.proton)?;
-        if ledger.proton != recs {
-            ledger.proton = recs;
-            ledger::write(&profile, &ledger)?;
-        }
+        let existing = ledger.proton.clone();
+        // The ledger learns of the change BEFORE user.reg is written (see `apply_prefix`).
+        proton::apply_prefix(&prefix, &exe_file, &overrides, &existing, |recs| {
+            ledger.proton = recs.to_vec();
+            ledger::write(&profile, &ledger)
+        })?;
     }
 
     if let Some(appid) = game.steam_appid {

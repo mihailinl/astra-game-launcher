@@ -17,8 +17,8 @@ use crate::digest::sha256_hex;
 use crate::error::{LauncherError, Result, codes};
 use crate::game::GameTarget;
 use crate::ledger::{
-    self, LEDGER_SCHEMA, Ledger, LedgerBackup, LedgerFile, LedgerGame, LedgerGameFile,
-    LedgerSource, LedgerState, ProfileLock,
+    self, Ledger, LedgerBackup, LedgerFile, LedgerGame, LedgerGameFile, LedgerSource, LedgerState,
+    ProfileLock,
 };
 use crate::manifest::IntegrationInfo;
 use crate::package::GiPackage;
@@ -86,7 +86,8 @@ pub fn install(
     }
 
     let mut ledger = Ledger {
-        schema: LEDGER_SCHEMA,
+        // `ledger::write` stores the lowest schema that carries it; nothing is in `proton` yet.
+        schema: 1,
         state: LedgerState::Installing,
         integration: pkg.manifest().integration.clone(),
         source: LedgerSource {
@@ -219,6 +220,11 @@ pub(crate) fn uninstall_ledger(
     game_root: &Path,
     ledger: &Ledger,
 ) -> Result<UninstallReport> {
+    // Before anything is removed: a Wine still running in a prefix we wrote to would write its
+    // registry back over the restore, and the uninstall must not stop half done.
+    for rec in &ledger.proton {
+        proton::refuse_if_wineserver(&rec.prefix)?;
+    }
     let mut report = UninstallReport {
         integration: ledger.integration.clone(),
         removed: Vec::new(),
@@ -277,10 +283,7 @@ pub(crate) fn uninstall_ledger(
         }
     }
 
-    // Backwards: the record that created the section is the first, and removes it last.
-    for rec in ledger.proton.iter().rev() {
-        report.proton_restored |= proton::restore_prefix(rec)?;
-    }
+    report.proton_restored = proton::restore_prefix(&ledger.proton)?;
 
     for f in &ledger.files {
         let comps = checked_rel(&f.rel)?;
