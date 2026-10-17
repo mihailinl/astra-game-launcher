@@ -476,6 +476,47 @@ fn the_engine_is_the_target_programs_own() {
     plan_install(&runner(), &w.target(), &w.profile()).unwrap();
 }
 
+/// An Unreal project with no `-Win64-Shipping.exe` (GTA III – The Definitive Edition): its
+/// `Binaries/Win64/` program IS an Unreal game to the plan's engine check, and the bootstrapper
+/// at the top is not. The target is the program named, even when it is not the largest there.
+#[test]
+fn an_unshipped_unreal_program_passes_the_engine_check() {
+    let g = Tmp::new("gta3-plan");
+    write(&g.join("PlayGTA3.exe"), b"MZ bootstrap");
+    write(
+        &g.join("Gameface/Binaries/Win64/LibertyCity.exe"),
+        b"MZ game",
+    );
+    write(
+        &g.join("Gameface/Binaries/Win64/Helper.exe"),
+        &[b'M'; 32 * 1024],
+    );
+    write(
+        &g.join("Gameface/Content/Paks/pakchunk0-WindowsNoEditor.pak"),
+        b"pak",
+    );
+    let m = runner_manifest("").replacen("engine = \"unity-mono\"", "engine = \"unreal\"", 1);
+    let pkg = open(&runner_zip(&m)).unwrap();
+    let p = Tmp::new("p");
+    let game = "Gameface/Binaries/Win64/LibertyCity.exe";
+    plan_install(
+        &pkg,
+        &target(g.path(), game, None, Platform::Windows),
+        &p.join("p"),
+    )
+    .unwrap();
+    let e = plan_install(
+        &pkg,
+        &target(g.path(), "PlayGTA3.exe", None, Platform::Windows),
+        &p.join("p"),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.param("got")),
+        (codes::ENGINE_MISMATCH, Some("unknown"))
+    );
+}
+
 const OUR_RESHADE_INI: &[u8] = b"[GENERAL]\nEffectSearchPaths=.\\\\reshade-shaders\\\\Shaders\n";
 
 /// The runner plus a `ReShade.ini` beside the exe, as a ReShade-family integration ships it.

@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use astra_game_launcher::{
-    self as gl, Ctx, Detection, GameTarget, GiPackage, InstallPlan, LauncherError, Platform, codes,
+    self as gl, Ctx, Detection, ExePick, GameTarget, GiPackage, InstallPlan, LauncherError,
+    Platform, codes,
 };
 use serde_json::{Value, json};
 
@@ -223,7 +224,14 @@ fn detection_text(d: &Detection, hints: &[String]) -> String {
     );
     let _ = writeln!(s, "binary:     {}", code_of(&d.binary));
     let _ = writeln!(s, "exe:        {exe}");
-    let _ = writeln!(s, "evidence:   {}", shown(&d.evidence));
+    // How the program was told from the others beside it, when the rule had to choose.
+    let pick = match d.exe_pick {
+        None => String::new(),
+        Some(ExePick::LaunchConfig) => " (exe: the one Steam launches)".into(),
+        Some(ExePick::Only) => " (exe: the only program in Binaries/Win64)".into(),
+        Some(ExePick::Largest) => " (exe: the largest program in Binaries/Win64)".into(),
+    };
+    let _ = writeln!(s, "evidence:   {}{pick}", shown(&d.evidence));
     let hint = match (hints, d.hint_used) {
         ([], _) => "-".to_owned(),
         (_, true) => format!(

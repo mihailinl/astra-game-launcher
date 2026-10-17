@@ -8,7 +8,9 @@ mod common;
 
 use std::path::PathBuf;
 
-use astra_game_launcher::{Binary, Confidence, Engine, detect, detect_with, unity_version_parts};
+use astra_game_launcher::{
+    Binary, Confidence, Engine, ExePick, detect, detect_with, unity_version_parts,
+};
 use common::*;
 
 #[test]
@@ -440,6 +442,182 @@ fn unreal_without_content_paks_is_low() {
     assert!(!d.hint_used);
 }
 
+/// GTA III – The Definitive Edition's real shape (Unreal 4, "Gameface"): no `-Win64-Shipping.exe`;
+/// the game is `Gameface/Binaries/Win64/LibertyCity.exe` beside `Gameface/Content/Paks/`. Steam
+/// launches `PlayGTA3.exe`, a bootstrapper at the top that starts the Rockstar Games Launcher,
+/// and `Redistributables/` holds installers. Both are made LARGER than the game here, so it is
+/// the folder that decides and not the size.
+fn gta3_definitive(t: &Tmp) {
+    write(&t.join("PlayGTA3.exe"), &[b'M'; 48 * 1024]);
+    write(&t.join("title.rgl"), b"rgl");
+    write(&t.join("installscript.vdf"), b"vdf");
+    write(
+        &t.join("Redistributables/vc_redist.x64.exe"),
+        &[b'M'; 64 * 1024],
+    );
+    write(
+        &t.join("Redistributables/Rockstar-Games-Launcher.exe"),
+        &[b'M'; 64 * 1024],
+    );
+    write(
+        &t.join("Gameface/Binaries/Win64/LibertyCity.exe"),
+        &[b'M'; 16 * 1024],
+    );
+    write(&t.join("Gameface/Binaries/Win64/MTLX.dll"), b"MZ");
+    write(&t.join("Gameface/Binaries/Win64/steam_api64.dll"), b"MZ");
+    write(
+        &t.join("Gameface/Content/Paks/pakchunk0-WindowsNoEditor.pak"),
+        b"pak",
+    );
+    write(
+        &t.join("Engine/Binaries/ThirdParty/DbgHelp/dbghelp.dll"),
+        b"MZ",
+    );
+}
+
+#[test]
+fn an_unreal_project_without_a_shipping_program_is_its_binaries_win64_program() {
+    let t = Tmp::new("gta3");
+    gta3_definitive(&t);
+    let game = p("Gameface/Binaries/Win64/LibertyCity.exe");
+
+    let d = detect(t.path()).unwrap();
+    assert_eq!(
+        (d.engine, d.confidence, d.binary),
+        (Engine::Unreal, Confidence::High, Binary::Windows)
+    );
+    assert_eq!(
+        (d.exe.clone(), d.evidence.clone(), d.exe_pick, d.hint_used),
+        (game.clone(), p("Gameface"), Some(ExePick::Only), false)
+    );
+
+    // What Steam launches is the bootstrapper: ignored, the game is the same.
+    for bad in ["PlayGTA3.exe", "Redistributables/vc_redist.x64.exe"] {
+        let d = detect_with(t.path(), Some(bad)).unwrap();
+        assert_eq!((d.exe.clone(), d.hint_used), (game.clone(), false), "{bad}");
+    }
+    // Steam naming the game itself is used, and said so.
+    let d = detect_with(t.path(), Some(r"Gameface\Binaries\Win64\LibertyCity.exe")).unwrap();
+    assert_eq!(
+        (d.exe, d.hint_used, d.exe_pick),
+        (game, true, Some(ExePick::LaunchConfig))
+    );
+}
+
+/// Several programs in one unshipped project's `Binaries/Win64/`: the largest, whichever its
+/// name; of equal sizes the first by name; and Steam's pick over the size when it names one.
+#[test]
+fn of_several_unshipped_programs_the_largest_wins_and_the_hint_over_it() {
+    for (big, small) in [("Zeta", "Alpha"), ("Alpha", "Zeta")] {
+        let t = Tmp::new("unshipped-two");
+        write(
+            &t.join(&format!("Game/Binaries/Win64/{big}.exe")),
+            &[b'M'; 32 * 1024],
+        );
+        write(
+            &t.join(&format!("Game/Binaries/Win64/{small}.exe")),
+            &[b'M'; 1024],
+        );
+        write(&t.join("Game/Content/Paks/Game-Windows.pak"), b"pak");
+        let d = detect(t.path()).unwrap();
+        assert_eq!(
+            (d.exe, d.exe_pick, d.confidence),
+            (
+                p(&format!("Game/Binaries/Win64/{big}.exe")),
+                Some(ExePick::Largest),
+                Confidence::High
+            ),
+            "{big} is larger"
+        );
+        let hint = format!("Game/Binaries/Win64/{small}.exe");
+        let d = detect_with(t.path(), Some(&hint)).unwrap();
+        assert_eq!(
+            (d.exe, d.hint_used, d.exe_pick),
+            (p(&hint), true, Some(ExePick::LaunchConfig))
+        );
+    }
+    let t = Tmp::new("unshipped-tie");
+    for name in ["Beta", "Alpha"] {
+        write(
+            &t.join(&format!("Game/Binaries/Win64/{name}.exe")),
+            &[b'M'; 1024],
+        );
+    }
+    write(&t.join("Game/Content/Paks/Game-Windows.pak"), b"pak");
+    for _ in 0..3 {
+        assert_eq!(
+            detect(t.path()).unwrap().exe,
+            p("Game/Binaries/Win64/Alpha.exe")
+        );
+    }
+}
+
+/// A shipping program is the game whenever there is one: a larger program beside it is not, not
+/// even when Steam names it.
+#[test]
+fn a_shipping_program_still_wins_over_a_larger_neighbour() {
+    let t = Tmp::new("shipping-and-big");
+    write(
+        &t.join("Game/Binaries/Win64/Game-Win64-Shipping.exe"),
+        b"MZ",
+    );
+    write(&t.join("Game/Binaries/Win64/Big.exe"), &[b'M'; 32 * 1024]);
+    write(&t.join("Game/Content/Paks/Game-Windows.pak"), b"pak");
+    let shipping = p("Game/Binaries/Win64/Game-Win64-Shipping.exe");
+    let d = detect(t.path()).unwrap();
+    assert_eq!((d.exe, d.exe_pick), (shipping.clone(), None));
+    let d = detect_with(t.path(), Some("Game/Binaries/Win64/Big.exe")).unwrap();
+    assert_eq!((d.exe, d.hint_used), (shipping, false));
+}
+
+/// The unshipped rule needs the whole pairing, and never takes the engine's own tools: a bare
+/// `Binaries/Win64/` names nothing, and `Engine/Binaries/Win64/` is not a project even with paks.
+#[test]
+fn an_unshipped_program_needs_content_paks_and_is_never_the_engines() {
+    let t = Tmp::new("unshipped-no-paks");
+    write(&t.join("Game/Binaries/Win64/Game.exe"), b"MZ");
+    let d = detect(t.path()).unwrap();
+    assert_eq!((d.engine, d.exe), (Engine::Unknown, None));
+    let d = detect_with(t.path(), Some("Game/Binaries/Win64/Game.exe")).unwrap();
+    assert!(!d.hint_used);
+
+    let t = Tmp::new("unshipped-engine");
+    write(
+        &t.join("Engine/Binaries/Win64/CrashReportClient.exe"),
+        &[b'M'; 32 * 1024],
+    );
+    write(&t.join("Engine/Content/Paks/Engine.pak"), &[0u8; 32 * 1024]);
+    write(&t.join("Game/Binaries/Win64/Game.exe"), b"MZ");
+    write(&t.join("Game/Content/Paks/Game-Windows.pak"), b"pak");
+    let d = detect(t.path()).unwrap();
+    assert_eq!(
+        (d.exe, d.evidence),
+        (p("Game/Binaries/Win64/Game.exe"), p("Game"))
+    );
+}
+
+/// Paks and no program at all: still Unreal at Low, and the paks' names say which build it is,
+/// so a Windows build run under Proton is never taken for a Linux one.
+#[test]
+fn unreal_paks_without_a_program_name_their_platform() {
+    for (pak, binary) in [
+        ("pakchunk0-WindowsNoEditor.pak", Binary::Windows),
+        ("pakchunk0-Windows.pak", Binary::Windows),
+        ("pakchunk0-WindowsNoEditor_0_P.pak", Binary::Windows),
+        ("pakchunk0-LinuxNoEditor.pak", Binary::Linux),
+        ("Game.pak", Binary::Unknown),
+    ] {
+        let t = Tmp::new("paks-only");
+        write(&t.join(&format!("Gameface/Content/Paks/{pak}")), b"pak");
+        let d = detect(t.path()).unwrap();
+        assert_eq!(
+            (d.engine, d.confidence, d.exe, d.evidence, d.binary),
+            (Engine::Unreal, Confidence::Low, None, p("Gameface"), binary),
+            "{pak}"
+        );
+    }
+}
+
 /// Godot: the program with `<stem>.pck` beside it, Windows or Linux.
 #[test]
 fn godot_pairs_a_program_with_its_pck() {
@@ -518,7 +696,7 @@ fn a_unity_game_without_a_flavour_is_named_but_unknown() {
 fn an_older_detection_still_deserialises() {
     let old = r#"{"engine":"unity-mono","confidence":"high","exe":"Game.exe","binary":"windows","anti_cheat":[]}"#;
     let d: astra_game_launcher::Detection = serde_json::from_str(old).unwrap();
-    assert_eq!((d.evidence, d.hint_used), (None, false));
+    assert_eq!((d.evidence, d.hint_used, d.exe_pick), (None, false, None));
 }
 
 /// At the same depth, a program that passes beats a pre-2017.2 Unity game, even a larger one.

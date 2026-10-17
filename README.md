@@ -84,10 +84,17 @@ program, never by which game it is. There is no per-game rule.
 4. **Several pass.** The shallowest, then the one Steam launches, then the largest evidence
    folder (a bounded walk).
 5. **The same idea per engine.** Unreal: `<Project>/Binaries/Win64/<Name>-Win64-Shipping.exe`
-   with `<Project>/Content/Paks/`. Godot: `<stem>.pck` beside the program.
+   with `<Project>/Content/Paks/`. A project that ships no `-Win64-Shipping.exe` (GTA III – The
+   Definitive Edition: `Gameface/Binaries/Win64/LibertyCity.exe`) has its program in that same
+   `Binaries/Win64/`: the one Steam launches when the hint names one, else the largest there
+   (`Detection::exe_pick` says which). Only that folder is weighed, so a bootstrapper at the top
+   (`PlayGTA3.exe`) or an installer in `Redistributables/` is never the game, and the engine's
+   own `Engine/Binaries/Win64/` never counts. Godot: `<stem>.pck` beside the program.
 
 Weaker signs answer at Low confidence: a pre-2017.2 Unity game (no `UnityPlayer`; ranked with
-the others by depth), half an Unreal pairing, a Godot pck embedded in the program.
+the others by depth), half an Unreal pairing (paks with no program take their build's flavour
+from the paks' names: `-WindowsNoEditor.pak` is Windows, `-LinuxNoEditor.pak` Linux), a Godot
+pck embedded in the program.
 `Detection::evidence` names what decided, relative to the folder: the `_Data` folder, the
 Unreal project folder, the `.pck`. [`docs/detection-survey.md`](docs/detection-survey.md) shows
 the rules on real Steam libraries (`cargo run --example detection_survey`).

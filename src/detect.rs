@@ -17,7 +17,12 @@
 //! 4. **Several pass.** The shallowest (by where its evidence sits), then the one Steam
 //!    launches, then the largest evidence (a bounded walk).
 //! 5. **The same idea per engine.** Unreal: `<Project>/Binaries/Win64/<Name>-Win64-Shipping.exe`
-//!    with `<Project>/Content/Paks/`. Godot: `<stem>.pck` beside the program.
+//!    with `<Project>/Content/Paks/`. A project that ships no `-Win64-Shipping.exe` (GTA III –
+//!    The Definitive Edition: `Gameface/Binaries/Win64/LibertyCity.exe`) has its program in that
+//!    same `Binaries/Win64/`: the one Steam launches when the hint names one, else the largest
+//!    there, and [`Detection::exe_pick`] says which. Only that folder is looked in, so a
+//!    bootstrapper at the top (`PlayGTA3.exe`) or an installer under `Redistributables/` is never
+//!    the game, however large. Godot: `<stem>.pck` beside the program.
 //!
 //! Weaker signs, each at Low confidence: a Unity game from before 2017.2 (its player linked into
 //! the program, so no `UnityPlayer`, but `<stem>_Data/Managed/Assembly-CSharp.dll`) ranks with
@@ -86,6 +91,30 @@ pub enum Binary {
     Unknown,
 }
 
+/// How [`Detection::exe`] was told apart from the other programs beside it, when the rule that
+/// found it had to choose: an Unreal project with no `-Win64-Shipping.exe`, whose
+/// `<Project>/Binaries/Win64/` may hold more than one program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExePick {
+    /// The program Steam launches (the hint given to [`detect_with`]) is one of them.
+    LaunchConfig,
+    /// It is the only program there.
+    Only,
+    /// It is the largest of several (the first by name of equal sizes).
+    Largest,
+}
+
+impl ExePick {
+    pub fn code(self) -> &'static str {
+        match self {
+            ExePick::LaunchConfig => "launch-config",
+            ExePick::Only => "only",
+            ExePick::Largest => "largest",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Detection {
     pub engine: Engine,
@@ -110,6 +139,11 @@ pub struct Detection {
     /// frontend tells them apart before anything is installed. See [`unity_version_parts`].
     #[serde(default)]
     pub unity_version: Option<String>,
+    /// How the program was chosen among several it could be, beside [`Detection::evidence`]:
+    /// `None` when the rule names one program by itself (Unity's `<stem>_Data`, Unreal's
+    /// `-Win64-Shipping.exe`, Godot's `.pck`). For support: it says which one and WHY.
+    #[serde(default)]
+    pub exe_pick: Option<ExePick>,
 }
 
 /// The `(major, minor)` of a Unity version string: `6000.3.1f1` → `(6000, 3)`.
@@ -301,6 +335,8 @@ struct Candidate {
     /// The program's name repeats its evidence's: Unreal's `<Project>-Win64-Shipping.exe` in
     /// `<Project>/` (Palworld's `Pal/…/Palworld-Win64-Shipping.exe` does not). A tie-break only.
     named_alike: bool,
+    /// How the program was chosen among the ones beside it; see [`Detection::exe_pick`].
+    exe_pick: Option<ExePick>,
 }
 
 impl Candidate {
@@ -326,6 +362,7 @@ impl Candidate {
             anti_cheat,
             evidence: self.evidence.as_deref().map(rel_path),
             hint_used,
+            exe_pick: self.exe_pick,
         }
     }
 
@@ -443,6 +480,7 @@ fn unity(game_dir: &Path, parent: &[String], listing: &Listing, name: &str) -> O
         evidence: Some(data_rel),
         passes: true,
         named_alike: true,
+        exe_pick: None,
     })
 }
 
@@ -478,6 +516,7 @@ fn legacy_unity(
         evidence: Some(data_rel),
         passes: false,
         named_alike: true,
+        exe_pick: None,
     })
 }
 
@@ -495,28 +534,53 @@ fn godot(parent: &[String], listing: &Listing, name: &str) -> Option<Candidate> 
         evidence: Some(joined(parent, pck)),
         passes: true,
         named_alike: true,
+        exe_pick: None,
     })
+}
+
+/// The `<Project>` of a program whose folder is `<Project>/Binaries/Win64/`.
+fn unreal_project(parent: &[String]) -> Option<&[String]> {
+    let n = parent.len();
+    (n >= 3
+        && parent[n - 1].eq_ignore_ascii_case("Win64")
+        && parent[n - 2].eq_ignore_ascii_case("Binaries"))
+    .then(|| &parent[..n - 2])
+}
+
+/// Whether `<Project>/Content/Paks/` is there.
+fn has_paks(game_dir: &Path, project: &[String]) -> bool {
+    let project_path = abs(game_dir, project);
+    child(&project_path, "Content", true)
+        .and_then(|c| child(&project_path.join(c), "Paks", true))
+        .is_some()
+}
+
+fn is_shipping_name(name: &str) -> bool {
+    name.to_ascii_lowercase().ends_with("-win64-shipping.exe")
 }
 
 /// Rule 5, Unreal: `<Project>/Binaries/Win64/<Name>-Win64-Shipping.exe`. High with
 /// `<Project>/Content/Paks/`, Low without it. The name is not required to repeat the project's
 /// (Palworld ships `Pal/Binaries/Win64/Palworld-Win64-Shipping.exe`); the pairing is the folder.
-fn unreal(game_dir: &Path, parent: &[String], name: &str) -> Option<Candidate> {
+///
+/// A folder with no shipping program: see [`unreal_unshipped`]. `named` is true when the caller
+/// names this program (Steam's launch hint, a plan's target) rather than asking which it is.
+fn unreal(
+    game_dir: &Path,
+    parent: &[String],
+    listing: &Listing,
+    name: &str,
+    named: bool,
+) -> Option<Candidate> {
     let lower = name.to_ascii_lowercase();
-    let prefix = lower.strip_suffix("-win64-shipping.exe")?;
-    let n = parent.len();
-    if prefix.is_empty()
-        || n < 3
-        || !parent[n - 1].eq_ignore_ascii_case("Win64")
-        || !parent[n - 2].eq_ignore_ascii_case("Binaries")
-    {
+    let Some(prefix) = lower.strip_suffix("-win64-shipping.exe") else {
+        return unreal_unshipped(game_dir, parent, listing, name, named);
+    };
+    let project = unreal_project(parent)?;
+    if prefix.is_empty() {
         return None;
     }
-    let project = &parent[..n - 2];
-    let project_path = abs(game_dir, project);
-    let paks = child(&project_path, "Content", true)
-        .and_then(|c| child(&project_path.join(c), "Paks", true))
-        .is_some();
+    let paks = has_paks(game_dir, project);
     Some(Candidate {
         engine: Engine::Unreal,
         confidence: if paks {
@@ -531,14 +595,90 @@ fn unreal(game_dir: &Path, parent: &[String], name: &str) -> Option<Candidate> {
         named_alike: project
             .last()
             .is_some_and(|p| p.eq_ignore_ascii_case(prefix)),
+        exe_pick: None,
+    })
+}
+
+/// Rule 5, Unreal, for a project that ships no `-Win64-Shipping.exe` (GTA III – The Definitive
+/// Edition: `Gameface/Binaries/Win64/LibertyCity.exe` beside `Gameface/Content/Paks/`). The
+/// program is a `.exe` in `<Project>/Binaries/Win64/`, and the pairing must be whole: without
+/// `Content/Paks/` a bare `Binaries/Win64/` says too little to name anything. The engine's own
+/// `Engine/Binaries/Win64/` holds its tools (`CrashReportClient.exe`), never the game.
+///
+/// Of several programs there, the one the caller names (`named`), else the largest (the first by
+/// name of equal sizes): asked of each program in turn, only that one answers. Nothing outside
+/// that folder is ever weighed, so a larger bootstrapper or installer elsewhere cannot win.
+fn unreal_unshipped(
+    game_dir: &Path,
+    parent: &[String],
+    listing: &Listing,
+    name: &str,
+    named: bool,
+) -> Option<Candidate> {
+    if ext_lower(name) != "exe" {
+        return None;
+    }
+    let project = unreal_project(parent)?;
+    if project.last()?.eq_ignore_ascii_case("Engine") {
+        return None;
+    }
+    let programs: Vec<&str> = listing
+        .iter()
+        .filter(|(n, d)| !*d && ext_lower(n) == "exe")
+        .map(|(n, _)| n.as_str())
+        .collect();
+    if programs.iter().any(|n| is_shipping_name(n)) || !has_paks(game_dir, project) {
+        return None;
+    }
+    let exe_pick = if named {
+        ExePick::LaunchConfig
+    } else {
+        let folder = abs(game_dir, parent);
+        let size = |n: &str| {
+            fs::symlink_metadata(folder.join(n))
+                .ok()
+                .filter(fs::Metadata::is_file)
+                .map_or(0, |m| m.len())
+        };
+        let largest = programs
+            .iter()
+            .map(|n| (size(n), *n))
+            .max_by(|(sa, a), (sb, b)| sa.cmp(sb).then_with(|| b.cmp(a)))?;
+        if largest.1 != name {
+            return None;
+        }
+        if programs.len() == 1 {
+            ExePick::Only
+        } else {
+            ExePick::Largest
+        }
+    };
+    Some(Candidate {
+        engine: Engine::Unreal,
+        confidence: Confidence::High,
+        exe: Some(joined(parent, name)),
+        binary: Binary::Windows,
+        evidence: Some(project.to_vec()),
+        passes: true,
+        named_alike: project
+            .last()
+            .is_some_and(|p| p.eq_ignore_ascii_case(program_stem(name))),
+        exe_pick: Some(exe_pick),
     })
 }
 
 /// Whether the program at `parent/name` passes rule 2 (Unity) or rule 5 (Unreal, Godot).
-fn passes(game_dir: &Path, parent: &[String], listing: &Listing, name: &str) -> Option<Candidate> {
+/// `named`: the caller names this program (see [`unreal`]).
+fn passes(
+    game_dir: &Path,
+    parent: &[String],
+    listing: &Listing,
+    name: &str,
+    named: bool,
+) -> Option<Candidate> {
     unity(game_dir, parent, listing, name)
         .or_else(|| godot(parent, listing, name))
-        .or_else(|| unreal(game_dir, parent, name).filter(|c| c.passes))
+        .or_else(|| unreal(game_dir, parent, listing, name, named).filter(|c| c.passes))
 }
 
 /// The bytes below `p`, by a bounded walk that never follows a link. A tie-break, so a walk cut
@@ -626,7 +766,7 @@ fn hinted(game_dir: &Path, hint: &str) -> Option<Candidate> {
     }
     let (name, parent) = real.split_last()?;
     let listing = listing_of(&abs(game_dir, parent))?;
-    passes(game_dir, parent, &listing, name)
+    passes(game_dir, parent, &listing, name, true)
 }
 
 /// Detects the engine of a game folder. Read-only. The same as [`detect_with`] without a hint.
@@ -674,7 +814,7 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
             is_program_name(name) || find_in(listing, &format!("{name}_Data"), true).is_some()
         })
         .filter_map(|(parent, listing, name)| {
-            passes(game_dir, parent, listing, name)
+            passes(game_dir, parent, listing, name, false)
                 .or_else(|| legacy_unity(game_dir, parent, listing, name))
         })
         .collect();
@@ -684,9 +824,10 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
 
     // No game found. The weaker signs, each Low.
     // Unreal, half a pairing: the shipping program without `Content/Paks`, then any shipping
-    // program at all, then a `Content/Paks/*.pak` with no program.
+    // program at all, then a `Content/Paks/*.pak` with no program (its flavour from the paks'
+    // names, see [`pak_binary`]).
     let half: Vec<Candidate> = files()
-        .filter_map(|(parent, _, name)| unreal(game_dir, parent, name))
+        .filter_map(|(parent, listing, name)| unreal(game_dir, parent, listing, name, false))
         .collect();
     if let Some(c) = best(game_dir, half) {
         return Ok(c.into_detection(game_dir, anti_cheat, false));
@@ -697,15 +838,20 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
                 .to_ascii_lowercase()
                 .ends_with("-win64-shipping.exe")
     });
-    let pak_project = entries.iter().find_map(|e| {
-        let n = e.rel.len();
-        (!e.is_dir
-            && n >= 4
-            && ext_lower(e.name()) == "pak"
-            && e.rel[n - 2].eq_ignore_ascii_case("Paks")
-            && e.rel[n - 3].eq_ignore_ascii_case("Content"))
-        .then(|| e.rel[..n - 3].to_vec())
-    });
+    // Each `<Project>/Content/Paks/*.pak` with its project; the first project is the evidence.
+    let paks: Vec<(&[String], &str)> = entries
+        .iter()
+        .filter_map(|e| {
+            let n = e.rel.len();
+            (!e.is_dir
+                && n >= 4
+                && ext_lower(e.name()) == "pak"
+                && e.rel[n - 2].eq_ignore_ascii_case("Paks")
+                && e.rel[n - 3].eq_ignore_ascii_case("Content"))
+            .then(|| (&e.rel[..n - 3], e.name()))
+        })
+        .collect();
+    let pak_project = paks.first().map(|(project, _)| project.to_vec());
     if shipping.is_some() || pak_project.is_some() {
         return Ok(Candidate {
             engine: Engine::Unreal,
@@ -714,7 +860,11 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
             binary: if shipping.is_some() {
                 Binary::Windows
             } else {
-                Binary::Unknown
+                paks.iter()
+                    .filter(|(project, _)| Some(*project) == pak_project.as_deref())
+                    .map(|(_, name)| pak_binary(name))
+                    .find(|b| *b != Binary::Unknown)
+                    .unwrap_or(Binary::Unknown)
             },
             evidence: if shipping.is_some() {
                 None
@@ -723,6 +873,7 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
             },
             passes: false,
             named_alike: false,
+            exe_pick: None,
         }
         .into_detection(game_dir, anti_cheat, false));
     }
@@ -745,6 +896,7 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
             evidence: Some(exe.rel.clone()),
             passes: false,
             named_alike: true,
+            exe_pick: None,
         }
         .into_detection(game_dir, anti_cheat, false));
     }
@@ -767,6 +919,7 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
         evidence: None,
         hint_used: false,
         unity_version: None,
+        exe_pick: None,
     })
 }
 
@@ -795,6 +948,24 @@ fn is_program_name(name: &str) -> bool {
     matches!(ext_lower(name).as_str(), "exe" | "x86_64" | "x86")
 }
 
+/// The platform an Unreal pak was cooked for, by the suffix its name carries:
+/// `pakchunk0-WindowsNoEditor.pak` and `Game-Windows.pak` (and `-WinGDK`, the Microsoft Store
+/// build) are Windows, `pakchunk0-LinuxNoEditor.pak` Linux; a patch's `_P` tail changes nothing.
+/// A name with no platform suffix (`Game.pak`) says nothing.
+fn pak_binary(name: &str) -> Binary {
+    let lower = name.to_ascii_lowercase();
+    let Some((_, platform)) = lower.rsplit_once('-') else {
+        return Binary::Unknown;
+    };
+    if platform.starts_with("windows") || platform.starts_with("wingdk") {
+        Binary::Windows
+    } else if platform.starts_with("linux") {
+        Binary::Linux
+    } else {
+        Binary::Unknown
+    }
+}
+
 fn binary_of(name: &str) -> Binary {
     match ext_lower(name).as_str() {
         "exe" => Binary::Windows,
@@ -817,9 +988,9 @@ pub(crate) fn engine_of_exe(game_dir: &Path, exe_rel: &[String]) -> Result<Engin
     let Some(listing) = listing_of(&abs(game_dir, parent)) else {
         return Ok(Engine::Unknown);
     };
-    let found = passes(game_dir, parent, &listing, name)
+    let found = passes(game_dir, parent, &listing, name, true)
         .or_else(|| legacy_unity(game_dir, parent, &listing, name))
-        .or_else(|| unreal(game_dir, parent, name))
+        .or_else(|| unreal(game_dir, parent, &listing, name, true))
         .map(|c| c.engine)
         .or_else(|| {
             name.to_ascii_lowercase()
