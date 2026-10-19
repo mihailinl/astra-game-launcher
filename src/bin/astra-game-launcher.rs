@@ -34,8 +34,12 @@ USAGE
   astra-game-launcher uninstall --profile <dir> --game <dir> --exe <rel> [--proton-prefix P]
                                 [--platform …] [--json]
   astra-game-launcher fetch <url> --sha256 <hex> -o <file> [--json]
+  astra-game-launcher --version
 
 NOTES
+  `--version` prints the crate version and this build's source tree sha256 — the same hash a
+  release tag publishes and the README's one-liner recomputes from a clone, so what Astra
+  compiled in can be checked against what GitHub built from source.
   `detect --appid N` reads what Steam launches for the app from Steam's appinfo.vdf (in
   --steam-root, or Steam's usual places) and uses it when it passes the engine rules;
   `--hint` names that program directly.
@@ -545,6 +549,20 @@ fn run(argv: &[String]) -> Result<Output, LauncherError> {
             );
             Ok(Output {
                 json: json!({ "path": out, "bytes": bytes.len() }),
+                text,
+            })
+        }
+        "version" | "--version" | "-V" => {
+            let text = format!(
+                "astra-game-launcher {} (source tree sha256 {})\n",
+                gl::VERSION,
+                gl::SOURCE_TREE_SHA256
+            );
+            Ok(Output {
+                json: json!({
+                    "version": gl::VERSION,
+                    "source_tree_sha256": gl::SOURCE_TREE_SHA256,
+                }),
                 text,
             })
         }

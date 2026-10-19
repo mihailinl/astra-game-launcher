@@ -64,3 +64,13 @@ pub use steam_appinfo::{
 
 /// The ledger's file name inside a profile.
 pub const LEDGER_FILE_NAME: &str = paths::LEDGER_FILE;
+
+/// This build's own version (`Cargo.toml`'s `[package].version`).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// SHA-256 of this crate's own source tree, computed by `build.rs` (see its doc comment for the
+/// exact algorithm). The CLI's `--version` prints it; a release tag's GitHub page publishes it;
+/// the README has a shell one-liner anyone can run against a clone to get the same hex back.
+/// This is what makes Astra's pinned git dependency on this crate verifiable: Astra compiles in
+/// a commit, that commit's tree hashes to this, and that hash is the one the release notes show.
+pub const SOURCE_TREE_SHA256: &str = env!("SOURCE_TREE_SHA256");

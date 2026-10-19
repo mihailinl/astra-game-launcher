@@ -197,6 +197,49 @@ cargo build
 cargo test        # no network; every fixture zip is built by the tests
 ```
 
+## Verifying a release against what Astra compiles in
+
+Astra does not bundle a binary of this crate: `astra-rs/astra-daemon/Cargo.toml` pins it as a
+git dependency by commit (`rev = "<sha>"`), and Cargo builds it into the daemon from source at
+that exact commit. So the comparable thing between "what Astra built" and "what GitHub built
+from source" is not a binary hash — it's a hash of the **source tree**, which anyone can
+recompute from a clone.
+
+Every build computes `SOURCE_TREE_SHA256` (`build.rs`, see its doc comment for the exact
+algorithm) and bakes it in:
+
+```
+astra-game-launcher --version
+# astra-game-launcher 0.3.0 (source tree sha256 <hex>)
+```
+
+Astra's own release notes / About screen show the same hash for the commit it pinned. A GitHub
+release of this repo (`scripts/release.sh`) publishes it too, alongside the commit SHA, so three
+things can be compared: the hash Astra shipped with, the hash the tagged release published, and
+a hash you compute yourself. Recompute it from a clone of a tag with one line (requires `git`
+and `sha256sum`; `scripts/tree-hash.sh` is this same command, runnable against any directory):
+
+```bash
+V=0.3.0 REPO=https://github.com/mihailinl/astra-game-launcher
+rm -rf /tmp/astra-gl-verify && mkdir -p /tmp/astra-gl-verify && \
+git clone --quiet --depth 1 --branch "v$V" "$REPO" /tmp/astra-gl-verify/src && \
+cd /tmp/astra-gl-verify/src && git archive "v$V" | tar -x -C /tmp/astra-gl-verify && \
+cd /tmp/astra-gl-verify && \
+find . -mindepth 1 \( -name .git -o -name .cargo-ok -o -name target \) -prune -o -type f -print \
+  | sed 's|^\./||' | LC_ALL=C sort \
+  | while IFS= read -r f; do sha256sum -- "$f"; done | sha256sum | cut -d' ' -f1
+```
+
+If that hex matches the `SOURCE_TREE_SHA256` the release published (and the one Astra's build
+shows for the commit it pinned), the three agree: what you cloned, what the tag names, and what
+got compiled in are the same bytes.
+
+**A local edit and the build not noticing:** `build.rs` watches every top-level file and
+directory that existed at the last build (so any edit inside `src/`, `tests/`, `docs/`,
+`examples/`, … is always picked up). The one case it cannot see is a brand-new file or directory
+dropped directly at the repo root — nothing was watching that spot before it existed. If
+`--version` still shows the old hash after adding one, run `cargo clean -p astra-game-launcher`.
+
 ## License
 
 [Mozilla Public License 2.0](LICENSE).

@@ -1,6 +1,6 @@
 [package]
 name = "astra-game-launcher"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MPL-2.0"
@@ -40,4 +40,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Registry",
 ] }
+
+[build-dependencies]
+sha2 = "0.10"
+hex = "0.4"
 
