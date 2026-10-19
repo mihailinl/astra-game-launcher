@@ -20,14 +20,27 @@
 //!    with `<Project>/Content/Paks/`. A project that ships no `-Win64-Shipping.exe` (GTA III –
 //!    The Definitive Edition: `Gameface/Binaries/Win64/LibertyCity.exe`) has its program in that
 //!    same `Binaries/Win64/`: the one Steam launches when the hint names one, else the largest
-//!    there, and [`Detection::exe_pick`] says which. Only that folder is looked in, so a
-//!    bootstrapper at the top (`PlayGTA3.exe`) or an installer under `Redistributables/` is never
-//!    the game, however large. Godot: `<stem>.pck` beside the program.
+//!    there, and [`Detection::exe_pick`] says which. `<Project>` itself may sit one package level
+//!    deeper (`<root>/<Package>/<Project>/Binaries/Win64/…`; Poppy Playtime's `WindowsNoEditor`,
+//!    or any other immediate folder) — the walk looks one level past its normal bound exactly
+//!    there, nowhere else, so this costs no unbounded recursion. Only `<Project>`'s own folder is
+//!    looked in, so a bootstrapper at the top (`PlayGTA3.exe`) or an installer under
+//!    `Redistributables/` is never the game, however large; neither is a wrapper beside it —
+//!    an installer, an anti-cheat setup or a publisher's own launcher (Poppy Playtime ships a
+//!    chapter launcher this way: `PlaytimeLauncher/PlaytimeLauncher/Binaries/Win64/…`, itself a
+//!    full Unreal pairing) — never chosen whatever its size or evidence. Godot: `<stem>.pck`
+//!    beside the program.
+//! 6. **Steam's hint may name a bootstrapper rather than the game itself** (rule 1 only fires
+//!    when the hint passes a rule directly). When it does not, and is not itself a wrapper, its
+//!    file stem still favours the matching project over an unrelated one of the same depth and
+//!    pairing — ahead of size, behind nothing size would have beaten anyway. [`detect_with`]
+//!    never trusts the hint by name alone: a project still needs its own engine evidence.
 //!
 //! Weaker signs, each at Low confidence: a Unity game from before 2017.2 (its player linked into
 //! the program, so no `UnityPlayer`, but `<stem>_Data/Managed/Assembly-CSharp.dll`) ranks with
 //! the programs that pass, by depth, after them at the same depth. Only when no game is found at
-//! all do the rest speak: half an Unreal pairing, a Godot pck embedded in the program.
+//! all do the rest speak: half an Unreal pairing, a Godot pck embedded in the program. A wrapper
+//! is excluded at every tier, not only the full pairing.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
@@ -235,7 +248,24 @@ impl Entry {
     }
 }
 
-/// Breadth first, sorted, bounded, links skipped.
+/// Whether `child` is a `Win64` folder directly inside a `Binaries` folder, sitting exactly at
+/// the walk's normal bound: an Unreal project one package level deeper than the flat layout
+/// (`<root>/<Package>/<Project>/Binaries/Win64`) ends here, one short of where its program sits.
+/// `rel` is `child`'s own parent (the `Binaries` folder, when this is true).
+fn is_boundary_win64(child: &[String], rel: &[String]) -> bool {
+    child.len() == MAX_DEPTH
+        && child
+            .last()
+            .is_some_and(|n| n.eq_ignore_ascii_case("Win64"))
+        && rel
+            .last()
+            .is_some_and(|p| p.eq_ignore_ascii_case("Binaries"))
+}
+
+/// Breadth first, sorted, bounded, links skipped. One exception to the depth bound: a `Win64`
+/// folder landing exactly on it ([`is_boundary_win64`]) is still listed — never recursed past
+/// that single extra hop — so an Unreal project nested one package folder deeper than the flat
+/// layout still has its program found.
 fn walk(root: &Path) -> Result<Vec<Entry>> {
     let mut out = Vec::new();
     let mut queue: VecDeque<(PathBuf, Vec<String>)> = VecDeque::new();
@@ -261,7 +291,7 @@ fn walk(root: &Path) -> Result<Vec<Entry>> {
             }
             let mut child = rel.clone();
             child.push(name);
-            if is_dir && child.len() < MAX_DEPTH {
+            if is_dir && (child.len() < MAX_DEPTH || is_boundary_win64(&child, &rel)) {
                 queue.push_back((dir.join(child.last().unwrap()), child.clone()));
             }
             out.push(Entry { rel: child, is_dir });
@@ -337,6 +367,12 @@ struct Candidate {
     named_alike: bool,
     /// How the program was chosen among the ones beside it; see [`Detection::exe_pick`].
     exe_pick: Option<ExePick>,
+    /// A bootstrapper named after this Unreal project sits directly beside its folder
+    /// (`<Package>/<Project>.exe` beside `<Package>/<Project>/`, or `<Project>.exe` at the root
+    /// for a flat layout) — found on disk, or because it is what a Steam launch hint named. Ranked
+    /// ahead of size: Poppy Playtime's chapter launcher ships its own full Unreal pairing and
+    /// could otherwise out-size the real game. `false` for every rule but Unreal's shipping one.
+    bootstrap_matched: bool,
 }
 
 impl Candidate {
@@ -481,6 +517,7 @@ fn unity(game_dir: &Path, parent: &[String], listing: &Listing, name: &str) -> O
         passes: true,
         named_alike: true,
         exe_pick: None,
+        bootstrap_matched: false,
     })
 }
 
@@ -492,6 +529,9 @@ fn legacy_unity(
     listing: &Listing,
     name: &str,
 ) -> Option<Candidate> {
+    if is_wrapper_name(name) || is_engine_or_wrapper_path(parent) {
+        return None;
+    }
     let stem = program_stem(name);
     if stem.is_empty() {
         return None;
@@ -517,6 +557,7 @@ fn legacy_unity(
         passes: false,
         named_alike: true,
         exe_pick: None,
+        bootstrap_matched: false,
     })
 }
 
@@ -535,6 +576,7 @@ fn godot(parent: &[String], listing: &Listing, name: &str) -> Option<Candidate> 
         passes: true,
         named_alike: true,
         exe_pick: None,
+        bootstrap_matched: false,
     })
 }
 
@@ -559,6 +601,36 @@ fn is_shipping_name(name: &str) -> bool {
     name.to_ascii_lowercase().ends_with("-win64-shipping.exe")
 }
 
+/// An installer, an anti-cheat bootstrapper, a crash reporter, or a publisher's own launcher
+/// (Poppy Playtime's chapter launcher, itself a full Unreal pairing — GTA III's
+/// `Rockstar-Games-Launcher.exe`): never the game, whatever evidence sits beside it, and never
+/// what a Steam launch hint is followed to. Matched loosely (a substring, lower-cased) because
+/// these ship under many exact names; a real game only collides with one by choosing the same
+/// word for itself, the trade-off this whole rule already accepts (see the module doc).
+fn is_wrapper_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("launcher")
+        || lower.contains("rockstar")
+        || lower.contains("prereq")
+        || lower.contains("vcredist")
+        || lower.contains("vc_redist")
+        || lower.contains("dxsetup")
+        || lower.contains("crashreportclient")
+        || lower.contains("crashhandler")
+        || lower.starts_with("easyanticheat")
+        || lower.starts_with("beservice")
+        || lower == "start_protected_game.exe"
+}
+
+/// Whether a project's path (root-relative) sits under the engine's own `Engine/`, or any
+/// component of it names a wrapper ([`is_wrapper_name`]) — a publisher's sub-launcher commonly
+/// lives in a folder that repeats its own name twice over (`PlaytimeLauncher/PlaytimeLauncher/`).
+fn is_engine_or_wrapper_path(components: &[String]) -> bool {
+    components
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case("Engine") || is_wrapper_name(c))
+}
+
 /// Rule 5, Unreal: `<Project>/Binaries/Win64/<Name>-Win64-Shipping.exe`. High with
 /// `<Project>/Content/Paks/`, Low without it. The name is not required to repeat the project's
 /// (Palworld ships `Pal/Binaries/Win64/Palworld-Win64-Shipping.exe`); the pairing is the folder.
@@ -580,6 +652,11 @@ fn unreal(
     if prefix.is_empty() {
         return None;
     }
+    // A wrapper, however fully it pairs with its own Content/Paks (Poppy Playtime's chapter
+    // launcher does): never the game, at any confidence.
+    if is_wrapper_name(name) || is_engine_or_wrapper_path(project) {
+        return None;
+    }
     let paks = has_paks(game_dir, project);
     Some(Candidate {
         engine: Engine::Unreal,
@@ -596,7 +673,21 @@ fn unreal(
             .last()
             .is_some_and(|p| p.eq_ignore_ascii_case(prefix)),
         exe_pick: None,
+        bootstrap_matched: project_bootstrap_matches(game_dir, project),
     })
+}
+
+/// Whether a bootstrapper named after `project`'s own leaf folder sits directly beside its
+/// parent: `<Package>/<Project>.exe` beside `<Package>/<Project>/` for a project one package
+/// level deep, or `<Project>.exe` at the root for a flat one. The common shape for an Unreal
+/// game's top-level launcher (Poppy Playtime's `WindowsNoEditor/Poppy_Playtime.exe`), so a
+/// project it names outranks an unrelated sibling of the same size — see [`best`].
+fn project_bootstrap_matches(game_dir: &Path, project: &[String]) -> bool {
+    let Some((leaf, pkg)) = project.split_last() else {
+        return false;
+    };
+    listing_of(&abs(game_dir, pkg))
+        .is_some_and(|listing| find_in(&listing, &format!("{leaf}.exe"), false).is_some())
 }
 
 /// Rule 5, Unreal, for a project that ships no `-Win64-Shipping.exe` (GTA III – The Definitive
@@ -619,12 +710,12 @@ fn unreal_unshipped(
         return None;
     }
     let project = unreal_project(parent)?;
-    if project.last()?.eq_ignore_ascii_case("Engine") {
+    if is_engine_or_wrapper_path(project) {
         return None;
     }
     let programs: Vec<&str> = listing
         .iter()
-        .filter(|(n, d)| !*d && ext_lower(n) == "exe")
+        .filter(|(n, d)| !*d && ext_lower(n) == "exe" && !is_wrapper_name(n))
         .map(|(n, _)| n.as_str())
         .collect();
     if programs.iter().any(|n| is_shipping_name(n)) || !has_paks(game_dir, project) {
@@ -664,10 +755,13 @@ fn unreal_unshipped(
             .last()
             .is_some_and(|p| p.eq_ignore_ascii_case(program_stem(name))),
         exe_pick: Some(exe_pick),
+        bootstrap_matched: false,
     })
 }
 
-/// Whether the program at `parent/name` passes rule 2 (Unity) or rule 5 (Unreal, Godot).
+/// Whether the program at `parent/name` passes rule 2 (Unity) or rule 5 (Unreal, Godot). Never a
+/// wrapper ([`is_wrapper_name`]) or anything under `Engine/`, whatever evidence happens to sit
+/// beside it — the one choke point both the generic candidate search and [`hinted`] share.
 /// `named`: the caller names this program (see [`unreal`]).
 fn passes(
     game_dir: &Path,
@@ -676,6 +770,9 @@ fn passes(
     name: &str,
     named: bool,
 ) -> Option<Candidate> {
+    if is_wrapper_name(name) || is_engine_or_wrapper_path(parent) {
+        return None;
+    }
     unity(game_dir, parent, listing, name)
         .or_else(|| godot(parent, listing, name))
         .or_else(|| unreal(game_dir, parent, listing, name, named).filter(|c| c.passes))
@@ -713,10 +810,12 @@ fn evidence_size(p: &Path) -> u64 {
     total
 }
 
-/// Rule 4: of several programs, the shallowest; then one that passes over a weaker sign; then
-/// the largest evidence; then the one whose name repeats its evidence's; then the first by path.
+/// Rule 4: of several programs, the shallowest; then one that passes over a weaker sign; then a
+/// bootstrapper (on disk, or Steam's own hint) naming the project over one it does not; then the
+/// largest evidence; then the one whose name repeats its evidence's; then the first by path.
 /// (Steam's own pick sits before the size in the owner's order, but a launch hint that passes
-/// has already won outright by then.)
+/// has already won outright by then; `bootstrap_matched` is the weaker, name-only echo of that
+/// same preference for a hint that does not.)
 fn best(game_dir: &Path, mut cands: Vec<Candidate>) -> Option<Candidate> {
     let shallowest = cands.iter().map(Candidate::depth).min()?;
     cands.retain(|c| c.depth() == shallowest);
@@ -744,15 +843,19 @@ fn best(game_dir: &Path, mut cands: Vec<Candidate>) -> Option<Candidate> {
         keyed.push((size, c));
     }
     keyed.sort_by(|(sa, a), (sb, b)| {
-        sb.cmp(sa)
+        b.bootstrap_matched
+            .cmp(&a.bootstrap_matched)
+            .then(sb.cmp(sa))
             .then(b.named_alike.cmp(&a.named_alike))
             .then_with(|| a.exe.cmp(&b.exe))
     });
     keyed.into_iter().next().map(|(_, c)| c)
 }
 
-/// Rule 1: the program Steam launches, if it is inside the folder and passes rule 2 or 5.
-/// Jailed: relative, no `..`, no link on the way; matched ignoring ASCII case like Windows.
+/// Rule 1: the program Steam launches, if it is inside the folder and passes rule 2 or 5. Never a
+/// wrapper ([`is_wrapper_name`]): an installer or anti-cheat bootstrapper Steam's own launch entry
+/// names is not trusted even if something beside it happens to look like evidence. Jailed:
+/// relative, no `..`, no link on the way; matched ignoring ASCII case like Windows.
 fn hinted(game_dir: &Path, hint: &str) -> Option<Candidate> {
     let mut h = hint.trim();
     while let Some(rest) = h.strip_prefix("./").or_else(|| h.strip_prefix(".\\")) {
@@ -765,8 +868,19 @@ fn hinted(game_dir: &Path, hint: &str) -> Option<Candidate> {
         real.push(child(&abs(game_dir, &real), c, !is_last)?);
     }
     let (name, parent) = real.split_last()?;
+    if is_wrapper_name(name) {
+        return None;
+    }
     let listing = listing_of(&abs(game_dir, parent))?;
     passes(game_dir, parent, &listing, name, true)
+}
+
+/// The file stem of a launch hint's last path component (`WindowsNoEditor\Poppy_Playtime.exe` →
+/// `Poppy_Playtime`), for matching it against a project's own name when the hint itself is a
+/// bootstrapper rather than evidence ([`hinted`] already tried, and failed, to use it directly).
+fn hint_stem(hint: &str) -> &str {
+    let name = hint.rsplit(['/', '\\']).next().unwrap_or(hint);
+    program_stem(name)
 }
 
 /// Detects the engine of a game folder. Read-only. The same as [`detect_with`] without a hint.
@@ -809,7 +923,7 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
 
     // Every program that passes, and every pre-2017.2 Unity game: ranked together by depth, so
     // an old game at the top still beats a newer Unity tool in a subfolder.
-    let games: Vec<Candidate> = files()
+    let mut games: Vec<Candidate> = files()
         .filter(|(_, listing, name)| {
             is_program_name(name) || find_in(listing, &format!("{name}_Data"), true).is_some()
         })
@@ -818,6 +932,28 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
                 .or_else(|| legacy_unity(game_dir, parent, listing, name))
         })
         .collect();
+    // The hint already failed to pass directly (`hinted` above): it may still name a
+    // bootstrapper whose stem repeats the real project's — Poppy Playtime's Steam entry is
+    // `WindowsNoEditor/Poppy_Playtime.exe`, which itself has no evidence beside it, but whose stem
+    // matches the project that does. Never trusted by name alone: this only reorders candidates
+    // [`best`] already built from real evidence, and a wrapper hint is never followed (`hinted`'s
+    // own guard already covers the direct case; this guards the indirect one).
+    if let Some(stem) = launch_hint
+        .map(|h| (h, hint_stem(h)))
+        .filter(|(h, _)| !is_wrapper_name(h.rsplit(['/', '\\']).next().unwrap_or(h)))
+        .map(|(_, stem)| stem)
+    {
+        for c in &mut games {
+            if c.engine == Engine::Unreal
+                && c.evidence
+                    .as_deref()
+                    .and_then(|e| e.last())
+                    .is_some_and(|p| p.eq_ignore_ascii_case(stem))
+            {
+                c.bootstrap_matched = true;
+            }
+        }
+    }
     if let Some(c) = best(game_dir, games) {
         return Ok(c.into_detection(game_dir, anti_cheat, false));
     }
@@ -837,8 +973,11 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
             && e.name()
                 .to_ascii_lowercase()
                 .ends_with("-win64-shipping.exe")
+            && !is_wrapper_name(e.name())
+            && !is_engine_or_wrapper_path(&e.rel[..e.rel.len() - 1])
     });
     // Each `<Project>/Content/Paks/*.pak` with its project; the first project is the evidence.
+    // Never a wrapper's own paks (Poppy Playtime's chapter launcher ships its own).
     let paks: Vec<(&[String], &str)> = entries
         .iter()
         .filter_map(|e| {
@@ -850,6 +989,7 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
                 && e.rel[n - 3].eq_ignore_ascii_case("Content"))
             .then(|| (&e.rel[..n - 3], e.name()))
         })
+        .filter(|(project, _)| !is_engine_or_wrapper_path(project))
         .collect();
     let pak_project = paks.first().map(|(project, _)| project.to_vec());
     if shipping.is_some() || pak_project.is_some() {
@@ -874,6 +1014,7 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
             passes: false,
             named_alike: false,
             exe_pick: None,
+            bootstrap_matched: false,
         }
         .into_detection(game_dir, anti_cheat, false));
     }
@@ -897,14 +1038,15 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
             passes: false,
             named_alike: true,
             exe_pick: None,
+            bootstrap_matched: false,
         }
         .into_detection(game_dir, anti_cheat, false));
     }
 
-    // Unknown. Name the program when there is exactly one obvious one.
+    // Unknown. Name the program when there is exactly one obvious one; never a wrapper.
     let main: Vec<&&Entry> = top_programs
         .iter()
-        .filter(|e| !e.name().to_ascii_lowercase().contains("crashhandler"))
+        .filter(|e| !is_wrapper_name(e.name()))
         .collect();
     let (exe, binary) = match main.as_slice() {
         [one] => (Some(rel_path(&one.rel)), binary_of(one.name())),

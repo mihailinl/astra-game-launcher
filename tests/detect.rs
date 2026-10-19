@@ -504,6 +504,172 @@ fn an_unreal_project_without_a_shipping_program_is_its_binaries_win64_program() 
     );
 }
 
+/// Poppy Playtime's real shape: an Unreal project one package folder deeper than the flat layout
+/// (`WindowsNoEditor/Poppy_Playtime/Binaries/Win64/…`), with a chapter launcher beside it that is
+/// itself a full Unreal pairing (`PlaytimeLauncher/PlaytimeLauncher/…`) and made the LARGER of the
+/// two here, so only its name — never its size — keeps it out. A prerequisite installer sits
+/// seven folders deep, far past anything either rule ever looks at.
+fn poppy_playtime(t: &Tmp) {
+    write(
+        &t.join("WindowsNoEditor/Poppy_Playtime.exe"),
+        b"MZ bootstrap",
+    );
+    write(
+        &t.join("WindowsNoEditor/Poppy_Playtime/Binaries/Win64/Poppy_Playtime-Win64-Shipping.exe"),
+        &[b'M'; 4096],
+    );
+    write(
+        &t.join("WindowsNoEditor/Poppy_Playtime/Content/Paks/pakchunk0-WindowsNoEditor.pak"),
+        &[0u8; 4096],
+    );
+    write(
+        &t.join("WindowsNoEditor/Poppy_Playtime/Engine/Extras/Redist/en-us/UE4PrereqSetup_x64.exe"),
+        &[b'M'; 8192],
+    );
+    write(
+        &t.join(
+            "PlaytimeLauncher/PlaytimeLauncher/Binaries/Win64/PlaytimeLauncher-Win64-Shipping.exe",
+        ),
+        &[b'M'; 1024],
+    );
+    write(
+        &t.join("PlaytimeLauncher/PlaytimeLauncher/Content/Paks/pakchunk0-WindowsNoEditor.pak"),
+        // Bigger than the whole of Poppy_Playtime's own evidence (exe + pak + the prereq the walk
+        // never even reaches): proves the exclusion is the launcher's NAME, never its size.
+        &[0u8; 64 * 1024],
+    );
+}
+
+#[test]
+fn poppy_playtimes_nested_package_finds_the_game_never_the_chapter_launcher() {
+    let t = Tmp::new("poppy");
+    poppy_playtime(&t);
+    let game = p("WindowsNoEditor/Poppy_Playtime/Binaries/Win64/Poppy_Playtime-Win64-Shipping.exe");
+
+    let d = detect(t.path()).unwrap();
+    assert_eq!(
+        (d.engine, d.confidence, d.binary),
+        (Engine::Unreal, Confidence::High, Binary::Windows)
+    );
+    assert_eq!(
+        (d.exe.clone(), d.evidence.clone(), d.hint_used),
+        (game.clone(), p("WindowsNoEditor/Poppy_Playtime"), false)
+    );
+
+    // Steam's own hint is the bootstrapper, which carries no evidence of its own and so cannot
+    // pass rule 1 directly — but its stem still favours the project it names.
+    let d = detect_with(t.path(), Some("WindowsNoEditor/Poppy_Playtime.exe")).unwrap();
+    assert_eq!((d.exe, d.hint_used), (game, false));
+}
+
+/// Only the chapter-launcher shape exists, nowhere else to fall back to: never the launcher, so
+/// `Engine::Unknown` rather than naming it anyway.
+#[test]
+fn a_package_holding_only_a_launcher_is_unknown() {
+    let t = Tmp::new("launcher-only");
+    write(
+        &t.join(
+            "PlaytimeLauncher/PlaytimeLauncher/Binaries/Win64/PlaytimeLauncher-Win64-Shipping.exe",
+        ),
+        b"MZ",
+    );
+    write(
+        &t.join("PlaytimeLauncher/PlaytimeLauncher/Content/Paks/pakchunk0-WindowsNoEditor.pak"),
+        b"pak",
+    );
+    let d = detect(t.path()).unwrap();
+    assert_eq!((d.engine, d.exe, d.evidence), (Engine::Unknown, None, None));
+}
+
+/// A launcher may ALSO have its own matching bootstrapper beside it (so `bootstrap_matched` ties
+/// with the real game's instead of telling them apart) and still never win: the name exclusion is
+/// independent of, and ranked ahead of, every other tie-break.
+#[test]
+fn a_launcher_is_excluded_even_when_its_own_bootstrapper_also_matches() {
+    let t = Tmp::new("launcher-bootstrap-tie");
+    write(&t.join("PackA/RealGame.exe"), b"MZ bootstrap");
+    write(
+        &t.join("PackA/RealGame/Binaries/Win64/RealGame-Win64-Shipping.exe"),
+        b"MZ",
+    );
+    write(
+        &t.join("PackA/RealGame/Content/Paks/x-Windows.pak"),
+        &[0u8; 1024],
+    );
+    write(&t.join("PackB/SomeLauncher.exe"), b"MZ bootstrap");
+    write(
+        &t.join("PackB/SomeLauncher/Binaries/Win64/SomeLauncher-Win64-Shipping.exe"),
+        b"MZ",
+    );
+    write(
+        &t.join("PackB/SomeLauncher/Content/Paks/x-Windows.pak"),
+        // Larger than RealGame's own evidence, and its own bootstrapper ALSO matches: only the
+        // name keeps it from winning.
+        &[0u8; 64 * 1024],
+    );
+    let game = p("PackA/RealGame/Binaries/Win64/RealGame-Win64-Shipping.exe");
+    assert_eq!(detect(t.path()).unwrap().exe, game);
+}
+
+/// Neither nested project has a bootstrapper sitting beside it on disk, so size alone would
+/// decide — until Steam's own hint names one by its stem, which outranks size even though the
+/// named bootstrapper itself does not exist to pass rule 1 directly.
+#[test]
+fn a_steam_hints_stem_outranks_a_larger_unrelated_project() {
+    let t = Tmp::new("stem-disambiguate");
+    write(
+        &t.join("PackA/GameOne/Binaries/Win64/GameOne-Win64-Shipping.exe"),
+        b"MZ",
+    );
+    write(
+        &t.join("PackA/GameOne/Content/Paks/x-Windows.pak"),
+        &[0u8; 1024],
+    );
+    write(
+        &t.join("PackB/GameTwo/Binaries/Win64/GameTwo-Win64-Shipping.exe"),
+        b"MZ",
+    );
+    write(
+        &t.join("PackB/GameTwo/Content/Paks/x-Windows.pak"),
+        &[0u8; 64 * 1024],
+    );
+    let one = p("PackA/GameOne/Binaries/Win64/GameOne-Win64-Shipping.exe");
+    let two = p("PackB/GameTwo/Binaries/Win64/GameTwo-Win64-Shipping.exe");
+
+    // Blind: the larger project wins, there being nothing else to go by.
+    assert_eq!(detect(t.path()).unwrap().exe, two);
+
+    // `PackA/GameOne.exe` does not exist (so it cannot pass rule 1 itself), but its stem repeats
+    // GameOne's own folder.
+    let d = detect_with(t.path(), Some("PackA/GameOne.exe")).unwrap();
+    assert_eq!((d.exe, d.hint_used), (one, false));
+}
+
+/// Steam's launch entry sometimes names an installer or an anti-cheat bootstrapper rather than
+/// the game. Even one built here to carry evidence that would otherwise pass rule 2 outright
+/// (real installers do not ship a `UnityPlayer.dll`, but the guard must not depend on that) is
+/// never trusted by its name — and the real game, found by the ordinary folder search, answers
+/// instead.
+#[test]
+fn a_steam_hint_naming_an_installer_or_anti_cheat_bootstrapper_is_never_chosen() {
+    let t = Tmp::new("hint-wrapper");
+    write(&t.join("EasyAntiCheat_Setup.exe"), b"MZ");
+    write(&t.join("UnityPlayer.dll"), b"MZ");
+    write(
+        &t.join("EasyAntiCheat_Setup_Data/Managed/Assembly-CSharp.dll"),
+        &[0u8; 64 * 1024],
+    );
+    write(
+        &t.join("Game/Binaries/Win64/Game-Win64-Shipping.exe"),
+        b"MZ",
+    );
+    write(&t.join("Game/Content/Paks/Game-Windows.pak"), b"pak");
+    let game = p("Game/Binaries/Win64/Game-Win64-Shipping.exe");
+
+    let d = detect_with(t.path(), Some("EasyAntiCheat_Setup.exe")).unwrap();
+    assert_eq!((d.exe, d.hint_used), (game, false));
+}
+
 /// Several programs in one unshipped project's `Binaries/Win64/`: the largest, whichever its
 /// name; of equal sizes the first by name; and Steam's pick over the size when it names one.
 #[test]
