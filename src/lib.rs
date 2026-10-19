@@ -18,6 +18,7 @@
 mod ctx;
 mod detect;
 mod digest;
+mod doorstop;
 mod error;
 mod fetch;
 mod game;

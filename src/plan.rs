@@ -9,12 +9,14 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::detect::{anti_cheat_scan, engine_of_exe};
+use crate::digest::sha256_hex;
+use crate::doorstop;
 use crate::error::{LauncherError, Result, codes};
 use crate::game::{GameTarget, Platform};
 use crate::game::{several_apps, steam_appids_of_dir};
 use crate::ledger::{self, Ledger};
 use crate::manifest::IntegrationInfo;
-use crate::package::GiPackage;
+use crate::package::{GiPackage, PackFile};
 use crate::paths::{
     FileState, absolute, canonical_dir, existing_target, file_state, real_case, resolve_lenient,
 };
@@ -34,6 +36,11 @@ pub enum GameAction {
     /// A config file we did not write (`doorstop_config.ini`, `ReShade.ini`) is already there.
     /// It is left as it is, and uninstall neither removes nor "restores" it.
     KeepExisting,
+    /// Another mod manager's loader proxy (r2modman's, Thunderstore Mod Manager's, a hand-made
+    /// BepInEx install's Doorstop) is already there, and it honours every option our launch
+    /// passes ([`crate::doorstop`]): the game runs through it. It is never written, backed up or
+    /// removed, and its digest is not pinned, since the manager that owns it may update it.
+    ShareLoader,
 }
 
 impl GameAction {
@@ -43,6 +50,7 @@ impl GameAction {
             GameAction::Replace => "replace",
             GameAction::ReuseKnownProxy => "reuse-known-proxy",
             GameAction::KeepExisting => "keep-existing",
+            GameAction::ShareLoader => "share-loader",
         }
     }
 }
@@ -54,7 +62,7 @@ pub struct GameFileAction {
     pub action: GameAction,
     /// The digest of the file we ship.
     pub sha256: String,
-    /// The digest of the file already there (`replace`, `keep-existing`).
+    /// The digest of the file already there (`replace`, `keep-existing`, `share-loader`).
     pub existing_sha256: Option<String>,
 }
 
@@ -90,8 +98,15 @@ pub struct InstallPlan {
     pub vac_checked: bool,
 }
 
-/// Names a mod loader's proxy DLL goes by. A foreign one is another loader: never replaced.
+/// Names a mod loader's proxy DLL goes by. A foreign one is another loader: never replaced. It is
+/// shared when it can do our proxy's job ([`GameAction::ShareLoader`]), and refused otherwise.
 const LOADER_PROXIES: &[&str] = &["winhttp.dll", "version.dll", "dxgi.dll", "d3d11.dll"];
+
+/// Whether the file at `rel` (`/`-separated) goes by a loader proxy's name, in any letter case.
+pub(crate) fn is_loader_proxy(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    LOADER_PROXIES.iter().any(|p| p.eq_ignore_ascii_case(name))
+}
 
 /// Files that, when present and not ours, are left alone. Matched case-insensitively: Wine and
 /// Windows see `ReShade.ini` and `reshade.ini` as one file.
@@ -211,10 +226,27 @@ fn state_before(path: &Path, rel: &str, existing: Option<&Ledger>) -> Result<Fil
                     });
                 }
             }
-            GameAction::ReuseKnownProxy | GameAction::KeepExisting => {}
+            GameAction::ReuseKnownProxy | GameAction::KeepExisting | GameAction::ShareLoader => {}
         }
     }
     Ok(actual)
+}
+
+/// The digest of the foreign loader proxy at `path` when our launch can run through it instead
+/// of ours (`f`), taken from the very bytes judged; `None` when it cannot.
+fn shared_loader(
+    pkg: &GiPackage,
+    f: &PackFile,
+    path: &Path,
+    exe_path: &Path,
+) -> Result<Option<String>> {
+    let Some(theirs) = doorstop::read_proxy(path) else {
+        return Ok(None);
+    };
+    let ours = pkg.read(&mut pkg.archive()?, f)?;
+    let machine = doorstop::pe_machine_of_file(exe_path);
+    let args = &pkg.manifest().launch.args;
+    Ok(doorstop::stands_in(&ours, &theirs, machine, args).then(|| sha256_hex(&theirs)))
 }
 
 /// Checks the package against the game and says exactly what an install would do.
@@ -282,12 +314,14 @@ pub fn plan_install(
         None
     };
 
+    let exe_path = game_root.join(game.exe_file_name()?);
     let mut game_files = Vec::new();
     for f in &pkg.game_files {
         let real = real_case(&game_root, &f.rel)?;
         let rel = real.join("/");
-        let state = match existing_target(&game_root, &real)? {
-            Some(path) => state_before(&path, &rel, existing.as_ref())?,
+        let path = existing_target(&game_root, &real)?;
+        let state = match &path {
+            Some(path) => state_before(path, &rel, existing.as_ref())?,
             None => FileState::Absent,
         };
         let name = f
@@ -301,8 +335,17 @@ pub fn plan_install(
             FileState::File { sha256 } if keep_if_present(&name) => {
                 (GameAction::KeepExisting, Some(sha256))
             }
-            FileState::File { .. } if LOADER_PROXIES.contains(&name.as_str()) => {
-                return Err(LauncherError::new(codes::FOREIGN_LOADER).with("file", rel));
+            FileState::File { .. } if is_loader_proxy(&name) => {
+                let shared = match &path {
+                    Some(path) => shared_loader(pkg, f, path, &exe_path)?,
+                    None => None,
+                };
+                match shared {
+                    Some(theirs) => (GameAction::ShareLoader, Some(theirs)),
+                    None => {
+                        return Err(LauncherError::new(codes::FOREIGN_LOADER).with("file", rel));
+                    }
+                }
             }
             FileState::File { sha256 } => (GameAction::Replace, Some(sha256)),
         };

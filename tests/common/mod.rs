@@ -146,6 +146,39 @@ pub fn runner_zip(manifest: &str) -> Vec<u8> {
     ])
 }
 
+pub const X64: u16 = 0x8664;
+pub const DOORSTOP_V4: &[&str] = &["--doorstop-enabled", "--doorstop-target-assembly"];
+
+/// A PE image for `machine` carrying `options` as NUL-terminated UTF-16LE strings, the way a
+/// Windows Doorstop build carries the command-line options it understands; `tag` tells two
+/// builds apart.
+pub fn pe_with_options(machine: u16, options: &[&str], tag: &[u8]) -> Vec<u8> {
+    let mut b = vec![0u8; 0x80];
+    b[..2].copy_from_slice(b"MZ");
+    b[0x3C..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+    b[0x40..0x44].copy_from_slice(b"PE\0\0");
+    b[0x44..0x46].copy_from_slice(&machine.to_le_bytes());
+    for o in options {
+        b.extend(o.encode_utf16().flat_map(u16::to_le_bytes));
+        b.extend([0, 0]);
+    }
+    b.extend_from_slice(tag);
+    b
+}
+
+/// The runner, shipping a proxy shaped like a real Doorstop 4 build (`ours`).
+pub fn doorstop_runner(ours: &[u8]) -> GiPackage {
+    let m = runner_manifest("").replace(&sha(WINHTTP), &sha(ours));
+    open(&zip(&[
+        E::File("astra-gi.toml", m.as_bytes()),
+        E::File("winhttp.dll", ours),
+        E::File("doorstop_config.ini", DOORSTOP_INI),
+        E::File("BepInEx/core/BepInEx.Preloader.dll", PRELOADER),
+        E::File("BepInEx/core/BepInEx.dll", CORE_DLL),
+    ]))
+    .unwrap()
+}
+
 pub fn open(zip: &[u8]) -> Result<GiPackage, astra_game_launcher::LauncherError> {
     GiPackage::open(zip, &sha(zip))
 }
