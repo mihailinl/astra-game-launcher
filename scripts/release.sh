@@ -143,8 +143,9 @@ say "recomputing the tree hash from a fresh HEAD extraction (shell algorithm)"
 hash_shell="$("$ROOT/scripts/tree-hash.sh" "$head_extract")"
 
 say "building that same extraction and reading its --version (compiled algorithm)"
-( cd "$head_extract" && cargo build --locked --quiet )
-version_out="$("$head_extract/target/debug/astra-game-launcher" --version)"
+extract_target="$head_extract/target"
+( cd "$head_extract" && CARGO_TARGET_DIR="$extract_target" cargo build --locked --quiet )
+version_out="$("$extract_target/debug/astra-game-launcher" --version)"
 hash_binary="$(printf '%s' "$version_out" | sed -n 's/.*sha256 \([0-9a-f]\{64\}\)).*/\1/p')"
 [[ -n "$hash_binary" ]] || die "could not parse a sha256 out of: $version_out"
 
