@@ -1,2 +1,4 @@
 /target
 Cargo.lock.bak
+# scripts/release.sh's own output: the source tarball + checksums for a cut release.
+/dist
