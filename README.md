@@ -123,9 +123,21 @@ rules: a launcher beside a Unity game is not a Unity game.
   `doorstop_config.ini` or `ReShade.ini` (any letter case) we did not write is left as it is, and
   uninstall neither removes nor restores it: ReShade rewrites its INI while the game runs, so
   ours becomes the user's settings the first time it is saved. A foreign `winhttp.dll`,
-  `version.dll`, `dxgi.dll` or `d3d11.dll` is another mod loader: the install is refused. Any
-  other existing file is backed up into the profile and replaced. Uninstall removes or restores
-  a file only while it still has our digest; a file the game updated since is the game's.
+  `version.dll`, `dxgi.dll` or `d3d11.dll` is another mod loader, and it is never replaced. When
+  it is a Unity Doorstop that loads into the game's process (same PE machine as the exe) and
+  understands every `--doorstop-*` option the manifest's launch passes — an option that switches
+  it on and one that names the target, so the command line alone decides what it loads — it is
+  **shared** (`share-loader`): the game runs through it, it is never written, backed up or
+  removed, and Play checks again that the one there then still does the job rather than pinning
+  its digest, since the mod manager that owns it (r2modman, Thunderstore Mod Manager) relinks it
+  whenever it likes (the same holds for a `reuse-known-proxy` loader, one that was there before
+  us with our very bytes). Gone: `needs-reinstall`, and installing again adds ours. Still there
+  and no longer able: `foreign-loader`, as installing again would answer. This is how those
+  managers run every profile through one proxy, and it puts no new code into the game: Windows
+  loads that DLL on every start of the game anyway. A foreign proxy that cannot do the job is
+  refused (`foreign-loader`). Any other existing file is backed up into the profile
+  and replaced. Uninstall removes or restores a file only while it still has our digest; a file
+  the game updated since is the game's.
 - **Steam's appinfo.** `appinfo.vdf` is someone else's binary file, often 100+ MB: it is read
   buffered, skipping to the one app by its size fields, with every length and the nesting depth
   bounded; anything corrupt answers `None`, never a panic. What it names is only a hint, which
@@ -171,7 +183,10 @@ rules: a launcher beside a Unity game is not a Unity game.
 - **The ledger.** `<profile>/astra-launcher-ledger.json` records every file placed, its digest
   and what it replaced. It is written before the first file is placed, under a file lock; an
   install that fails or is cancelled is rolled back. Install re-plans under the lock and refuses
-  with `plan-stale` when the game folder changed since the plan was shown.
+  with `plan-stale` when the game folder changed since the plan was shown. A ledger is written as
+  the lowest schema that carries it (3 when a loader is shared) and its schema is read before its
+  shape, so from this version on a ledger newer than the launcher is `schema-too-new` rather than
+  a parse failure.
 - **Nothing runs.** The launcher never elevates, never runs a program from a package, and passes
   launch arguments as an argv array, never through a shell.
 

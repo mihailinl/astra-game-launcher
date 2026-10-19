@@ -112,7 +112,9 @@ pub fn install(
             .map(|a| LedgerGameFile {
                 rel: a.rel_path.clone(),
                 sha256: match a.action {
-                    GameAction::KeepExisting => a.existing_sha256.clone().unwrap_or_default(),
+                    GameAction::KeepExisting | GameAction::ShareLoader => {
+                        a.existing_sha256.clone().unwrap_or_default()
+                    }
                     _ => a.sha256.clone(),
                 },
                 action: a.action,
@@ -199,7 +201,7 @@ fn place(
                     return Err(stale(&a.rel_path));
                 }
             }
-            GameAction::KeepExisting => {
+            GameAction::KeepExisting | GameAction::ShareLoader => {
                 if current
                     != (FileState::File {
                         sha256: a.existing_sha256.clone().unwrap_or_default(),
@@ -280,7 +282,7 @@ pub(crate) fn uninstall_ledger(
                     FileState::Absent => {}
                 }
             }
-            GameAction::ReuseKnownProxy | GameAction::KeepExisting => {}
+            GameAction::ReuseKnownProxy | GameAction::KeepExisting | GameAction::ShareLoader => {}
         }
     }
 

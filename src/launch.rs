@@ -13,6 +13,7 @@ use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 
+use crate::doorstop;
 use crate::error::{LauncherError, Result, codes};
 use crate::game::{GameTarget, Platform};
 use crate::ini;
@@ -22,7 +23,7 @@ use crate::paths::{
     FileState, canonical_dir, checked_rel, existing_target, file_state, parse_jailed, plain,
     prepare_target, write_atomic,
 };
-use crate::plan::GameAction;
+use crate::plan::{GameAction, is_loader_proxy};
 use crate::proton;
 use crate::running::refuse_if_running;
 
@@ -234,20 +235,39 @@ pub fn prepare_launch(
         }
     }
     let game_root = game.game_root()?;
+    let exe_machine = doorstop::pe_machine_of_file(&game_root.join(game.exe_file_name()?));
     for g in &ledger.game_files {
         if g.action == GameAction::KeepExisting {
             continue;
         }
-        let state = match existing_target(&game_root, &checked_rel(&g.rel)?)? {
-            Some(p) => file_state(&p)?,
+        let path = existing_target(&game_root, &checked_rel(&g.rel)?)?;
+        let state = match &path {
+            Some(p) => file_state(p)?,
             None => FileState::Absent,
         };
-        if state
-            != (FileState::File {
-                sha256: g.sha256.clone(),
-            })
-        {
+        let pinned = FileState::File {
+            sha256: g.sha256.clone(),
+        };
+        if g.action != GameAction::ShareLoader && state == pinned {
+            continue;
+        }
+        // A loader proxy another mod manager owns — shared, or there before us with our very
+        // bytes — is relinked by that manager whenever it likes: what matters is that the one
+        // there now still does the job, not that it is the same file.
+        let theirs = g.action == GameAction::ShareLoader
+            || (g.action == GameAction::ReuseKnownProxy && is_loader_proxy(&g.rel));
+        // Gone, or a file of ours that changed: Install again (which adds ours where theirs went).
+        if !theirs || state == FileState::Absent {
             return Err(needs_reinstall(&g.rel));
+        }
+        let serves = path
+            .as_deref()
+            .and_then(doorstop::read_proxy)
+            .is_some_and(|bytes| doorstop::serves(&bytes, exe_machine, &m.launch.args));
+        if !serves {
+            // Still there and no longer able (the other manager moved to a loader that does not
+            // take our options): installing again would be refused the same way, so say so.
+            return Err(LauncherError::new(codes::FOREIGN_LOADER).with("file", g.rel.clone()));
         }
     }
 

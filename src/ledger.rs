@@ -17,10 +17,13 @@ use crate::manifest::IntegrationInfo;
 use crate::paths::{LEDGER_FILE, LOCK_FILE, check_regular_or_absent, write_atomic};
 use crate::plan::GameAction;
 
-/// The newest ledger schema this launcher reads. A ledger is WRITTEN as schema 1 unless it needs
-/// 2: schema 2 is a `proton` array (several overrides), which a schema-1 launcher cannot parse,
-/// so it refuses with `schema-too-new` instead of failing on the shape.
-pub const LEDGER_SCHEMA: u32 = 2;
+/// The newest ledger schema this launcher reads. A ledger is WRITTEN as the lowest schema that
+/// carries it: 1, or 2 for a `proton` array (several overrides), or 3 for a game file shared with
+/// another mod manager (`share-loader`) — shapes an older launcher cannot parse. [`read`] judges
+/// the schema before the shape, so from this launcher on a newer ledger is `schema-too-new`
+/// rather than a parse failure; a launcher from before schema 3 parsed the shape first and fails
+/// on a schema-3 ledger with an `io` error naming the unknown action.
+pub const LEDGER_SCHEMA: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -59,7 +62,8 @@ pub struct LedgerBackup {
 pub struct LedgerGameFile {
     /// Below the exe's folder, `/`-separated.
     pub rel: String,
-    /// Ours, or (for `keep-existing`) the file that was left alone.
+    /// Ours, or (for `keep-existing` and `share-loader`) the file that was left alone, as it was
+    /// at install.
     pub sha256: String,
     pub action: GameAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -144,20 +148,38 @@ pub(crate) fn read(profile: &Path) -> Result<Option<Ledger>> {
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(LauncherError::io_at(&e, &p)),
     };
-    let ledger: Ledger = serde_json::from_str(&text).map_err(|e| {
+    let malformed = |e: serde_json::Error| {
         LauncherError::io(format!("ledger: {e}")).with("path", p.display().to_string())
-    })?;
-    if ledger.schema > LEDGER_SCHEMA {
+    };
+    // The schema first, on its own: a newer ledger's shape is exactly what this launcher cannot
+    // parse, so judging it after the whole parse would report the shape instead of the schema.
+    #[derive(Deserialize)]
+    struct Schema {
+        schema: u32,
+    }
+    let Schema { schema } = serde_json::from_str(&text).map_err(malformed)?;
+    if schema > LEDGER_SCHEMA {
         return Err(LauncherError::new(codes::SCHEMA_TOO_NEW)
-            .with("schema", ledger.schema.to_string())
+            .with("schema", schema.to_string())
             .with("file", LEDGER_FILE));
     }
+    let ledger: Ledger = serde_json::from_str(&text).map_err(malformed)?;
     Ok(Some(ledger))
 }
 
 /// The schema a ledger is written as: the lowest that can carry it.
 fn schema_for(ledger: &Ledger) -> u32 {
-    if ledger.proton.len() > 1 { 2 } else { 1 }
+    if ledger
+        .game_files
+        .iter()
+        .any(|g| g.action == GameAction::ShareLoader)
+    {
+        3
+    } else if ledger.proton.len() > 1 {
+        2
+    } else {
+        1
+    }
 }
 
 pub(crate) fn write(profile: &Path, ledger: &Ledger) -> Result<()> {
