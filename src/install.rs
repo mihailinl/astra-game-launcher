@@ -26,7 +26,7 @@ use crate::paths::{
     BACKUP_DIR, FileState, LOCK_FILE, canonical_dir, checked_rel, existing_target, file_state,
     plain, prepare_target, prune_empty_dirs, write_atomic,
 };
-use crate::plan::{Accept, GameAction, InstallPlan, plan_install};
+use crate::plan::{Accept, GameAction, InstallPlan, kept_for_their_loader, plan_install};
 use crate::proton;
 use crate::running::refuse_if_running;
 
@@ -37,7 +37,9 @@ pub struct UninstallReport {
     pub removed: Vec<String>,
     /// Game files we had replaced, now restored from the backup.
     pub restored: Vec<String>,
-    /// Game files that changed since we placed them: they are the game's now and were left.
+    /// Game files left in place: ones that changed since we placed them (the game's now), and a
+    /// loader proxy we added that another loader now runs through (a BepInEx installed by hand
+    /// over ours ships the very same `winhttp.dll`).
     pub kept: Vec<String>,
     pub profile_files_removed: u32,
     pub proton_restored: bool,
@@ -45,6 +47,16 @@ pub struct UninstallReport {
 
 fn stale(detail: &str) -> LauncherError {
     LauncherError::new(codes::PLAN_STALE).with("detail", detail)
+}
+
+/// Why a ledger is undone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Undo {
+    /// Uninstall, or an install replacing the integration: an added Doorstop another loader now
+    /// runs through stays ([`kept_for_their_loader`]), as the plan assumed.
+    Uninstall,
+    /// An install that failed takes back exactly what it placed a moment ago.
+    Rollback,
 }
 
 fn backup_rel(rel: &str) -> String {
@@ -78,7 +90,7 @@ pub fn install(
     let game_root = game.game_root()?;
 
     if let Some(old) = ledger::read(&profile)? {
-        uninstall_ledger(&profile, &game_root, &old)?;
+        uninstall_ledger(&profile, &game_root, &old, Undo::Uninstall)?;
         let again = plan_install(pkg, game, &plan.profile_dir)?;
         if again.game_files != plan.game_files {
             return Err(stale("after-removing-the-previous-integration"));
@@ -136,7 +148,7 @@ pub fn install(
             Ok(ledger)
         }
         Err(e) => {
-            let _ = uninstall_ledger(&profile, &game_root, &ledger);
+            let _ = uninstall_ledger(&profile, &game_root, &ledger, Undo::Rollback);
             Err(e)
         }
     }
@@ -217,11 +229,13 @@ fn place(
 }
 
 /// Undoes what a ledger records and removes the ledger. A game file is removed or restored only
-/// while it still has our digest; one that changed since is the game's, and it wins.
+/// while it still has our digest; one that changed since is the game's, and it wins. An added
+/// Doorstop someone else's loader now runs through stays too, unless this is a rollback.
 pub(crate) fn uninstall_ledger(
     profile: &Path,
     game_root: &Path,
     ledger: &Ledger,
+    undo: Undo,
 ) -> Result<UninstallReport> {
     // Before anything is removed: a Wine still running in a prefix we wrote to would write its
     // registry back over the restore, and the uninstall must not stop half done.
@@ -255,6 +269,13 @@ pub(crate) fn uninstall_ledger(
         };
         match g.action {
             GameAction::Add => match current {
+                FileState::File { sha256 }
+                    if sha256 == g.sha256
+                        && undo == Undo::Uninstall
+                        && kept_for_their_loader(game_root, &g.rel, &target, ledger)? =>
+                {
+                    report.kept.push(g.rel.clone());
+                }
                 FileState::File { sha256 } if sha256 == g.sha256 => {
                     fs::remove_file(&target).map_err(|e| LauncherError::io_at(&e, &target))?;
                     report.removed.push(g.rel.clone());
@@ -395,7 +416,7 @@ pub fn uninstall(profile_dir: &Path, game: &GameTarget) -> Result<UninstallRepor
             Some(root) => root,
             None => game_root_for_uninstall(game)?,
         };
-        uninstall_ledger(&profile, &game_root, &ledger)?
+        uninstall_ledger(&profile, &game_root, &ledger, Undo::Uninstall)?
     };
     let _ = fs::remove_file(profile.join(LOCK_FILE));
     Ok(report)

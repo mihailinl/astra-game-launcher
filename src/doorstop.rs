@@ -19,10 +19,13 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+const V4_ENABLE: &str = "--doorstop-enabled";
+const V3_ENABLE: &str = "--doorstop-enable";
+const V4_TARGET: &str = "--doorstop-target-assembly";
 /// Options that switch Doorstop on: Doorstop 4's, then Doorstop 3's.
-const ENABLE_OPTIONS: &[&str] = &["--doorstop-enabled", "--doorstop-enable"];
+const ENABLE_OPTIONS: &[&str] = &[V4_ENABLE, V3_ENABLE];
 /// Options that name the assembly Doorstop loads: Doorstop 4's, then Doorstop 3's.
-const TARGET_OPTIONS: &[&str] = &["--doorstop-target-assembly", "--doorstop-target"];
+const TARGET_OPTIONS: &[&str] = &[V4_TARGET, "--doorstop-target"];
 const PREFIX: &str = "--doorstop-";
 
 /// A proxy is a small DLL (Doorstop's is ~27 KB). Anything larger is not read: it is not one.
@@ -126,6 +129,114 @@ pub(crate) fn read_proxy(path: &Path) -> Option<Vec<u8>> {
     let mut buf = Vec::new();
     f.take(MAX_PROXY_BYTES + 1).read_to_end(&mut buf).ok()?;
     (buf.len() as u64 <= MAX_PROXY_BYTES).then_some(buf)
+}
+
+/// Which Doorstop a proxy is, from the options it understands; `None`: not a Doorstop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Generation {
+    V3,
+    V4,
+}
+
+pub(crate) fn generation(bin: &[u8]) -> Option<Generation> {
+    if understands(bin, V4_ENABLE) {
+        Some(Generation::V4)
+    } else if understands(bin, V3_ENABLE) {
+        Some(Generation::V3)
+    } else {
+        None
+    }
+}
+
+/// The settings file Doorstop reads from the game's working folder.
+pub(crate) const CONFIG_NAME: &str = "doorstop_config.ini";
+/// The target both generations load when the file is there and names none.
+const DEFAULT_TARGET: &str = "Doorstop.dll";
+/// More than any `doorstop_config.ini`; only this much is read.
+const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+
+/// The text of the `doorstop_config.ini` at `path` (links followed: Doorstop follows them), as
+/// Windows reads it: UTF-16LE after its BOM, otherwise UTF-8 (a BOM dropped later, invalid bytes
+/// replaced). `None` when there is no file to read.
+pub(crate) fn read_config(path: &Path) -> Option<String> {
+    let mut bytes = Vec::new();
+    File::open(path)
+        .ok()?
+        .take(MAX_CONFIG_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if let Some(wide) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        let units: Vec<u16> = wide
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect();
+        return Some(String::from_utf16_lossy(&units));
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// What a Doorstop of `generation` loads on a start that passes it no options — a plain Play in
+/// Steam — given `ini`, the `doorstop_config.ini` beside it: the target assembly as that file
+/// writes it, or `None` when the file switches Doorstop off or names nothing.
+///
+/// Doorstop's own rules, in both generations (`[General]` in 4, `[UnityDoorstop]` in 3): a key
+/// missing from the file takes the default Doorstop hands `GetPrivateProfileString`, `enabled`
+/// = `true` and the target `Doorstop.dll`; a present `enabled` switches it on only when it is
+/// `true` in any letter case (anything but `true`/`false` keeps the built-in default, off); an
+/// empty target names nothing. No file at all: off — the caller's case, not this one.
+pub(crate) fn plain_start_target(ini: &str, generation: Generation) -> Option<String> {
+    let (section, target_key) = match generation {
+        Generation::V4 => ("General", "target_assembly"),
+        Generation::V3 => ("UnityDoorstop", "targetAssembly"),
+    };
+    let enabled =
+        crate::ini::get(ini, section, "enabled").is_none_or(|v| v.eq_ignore_ascii_case("true"));
+    let target =
+        crate::ini::get(ini, section, target_key).unwrap_or_else(|| DEFAULT_TARGET.to_owned());
+    (enabled && !target.is_empty()).then_some(target)
+}
+
+/// Doorstop 4 options a launch adds to the manifest's own, so that a `doorstop_config.ini` that
+/// is not ours — a shared loader's, or one kept beside our proxy — cannot change Astra's session:
+/// no Mono debugger (with `debug_suspend` the game waits for one before it starts), and the
+/// game's own `boot.config`. Each value is what Doorstop does when the file does not set it. A
+/// Doorstop that does not know an option ignores it, and reads no such setting from its file
+/// either (`boot-config-override` came to both in 4.3), so none of these is asked of a shared
+/// loader: [`serves`] still asks only for the manifest's options.
+///
+/// `dll_search_path_override` is left to the file: it has no neutral value (pointing it at the
+/// game's own `Managed` folder is not one, as Doorstop then loads each assembly from disk instead
+/// of the bytes the game hands Mono), and a person who set it usually has a game that needs it.
+///
+/// Only for a Doorstop 4 launch (one that passes `--doorstop-enabled` and
+/// `--doorstop-target-assembly`), and never an option the manifest passes itself.
+pub(crate) fn session_options(args: &[String], exe_file_name: &str) -> Vec<String> {
+    let has = |o: &str| args.iter().any(|a| a.eq_ignore_ascii_case(o));
+    if !(has(V4_ENABLE) && has(V4_TARGET)) {
+        return Vec::new();
+    }
+    let mut pins = vec![
+        ("--doorstop-mono-debug-enabled", "false".to_owned()),
+        ("--doorstop-mono-debug-suspend", "false".to_owned()),
+    ];
+    // Unity reads `<exe name>_Data/boot.config`; Doorstop redirects that very path, so naming it
+    // redirects it to itself. A name holding `${` would read as a placeholder: no pin then.
+    let stem = Path::new(exe_file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    if !stem.is_empty() && !stem.contains("${") {
+        pins.push((
+            "--doorstop-boot-config-override",
+            format!("${{game}}/{stem}_Data/boot.config"),
+        ));
+    }
+    pins.into_iter()
+        .filter(|(o, _)| !has(o))
+        .flat_map(|(o, v)| [o.to_owned(), v])
+        .collect()
 }
 
 #[cfg(test)]
@@ -232,6 +343,71 @@ mod tests {
             theirs.push(0);
         }
         assert!(stands_in(&proxy(X64, V4), &theirs, Some(X64), &v4_args()));
+    }
+
+    #[test]
+    fn a_doorstop_4_launch_pins_what_a_config_not_ours_could_change() {
+        assert_eq!(
+            session_options(&v4_args(), "Some Game.exe"),
+            args(&[
+                "--doorstop-mono-debug-enabled",
+                "false",
+                "--doorstop-mono-debug-suspend",
+                "false",
+                "--doorstop-boot-config-override",
+                "${game}/Some Game_Data/boot.config",
+            ])
+        );
+        // Unity on Linux names the data folder after the program without its extension too.
+        assert!(
+            session_options(&v4_args(), "Game.x86_64")
+                .contains(&"${game}/Game_Data/boot.config".to_owned())
+        );
+        // The manifest's own choice wins, in any letter case (Doorstop compares with lstrcmpi).
+        let mut own = v4_args();
+        own.extend(args(&["--Doorstop-Mono-Debug-Enabled", "true"]));
+        let pins = session_options(&own, "g.exe");
+        assert!(
+            !pins
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case("--doorstop-mono-debug-enabled")),
+            "{pins:?}"
+        );
+        assert!(pins.iter().any(|a| a == "--doorstop-mono-debug-suspend"));
+        // Not a Doorstop 4 launch: nothing.
+        let v3 = args(&["--doorstop-enable", "true", "--doorstop-target", "x.dll"]);
+        assert!(session_options(&v3, "g.exe").is_empty());
+        assert!(session_options(&args(&["-batchmode"]), "g.exe").is_empty());
+        // A program name that would read as a placeholder gets no path.
+        assert!(
+            !session_options(&v4_args(), "${x}.exe")
+                .iter()
+                .any(|a| a.contains("boot"))
+        );
+    }
+
+    #[test]
+    fn what_a_plain_start_loads_follows_the_generation() {
+        assert_eq!(generation(&proxy(X64, V4)), Some(Generation::V4));
+        assert_eq!(generation(&proxy(X64, V3)), Some(Generation::V3));
+        assert_eq!(generation(&proxy(X64, &["--other-loader"])), None);
+        let v3_ini = "[UnityDoorstop]\nenabled=true\ntargetAssembly=a.dll\n";
+        assert_eq!(
+            plain_start_target(v3_ini, Generation::V3).as_deref(),
+            Some("a.dll")
+        );
+        assert_eq!(
+            plain_start_target(v3_ini, Generation::V4).as_deref(),
+            Some("Doorstop.dll"),
+            "no [General]: Doorstop 4's defaults for missing keys"
+        );
+        assert_eq!(
+            plain_start_target(
+                "[General]\nenabled=false\ntarget_assembly=a.dll\n",
+                Generation::V4
+            ),
+            None
+        );
     }
 
     #[test]

@@ -362,6 +362,35 @@ pub(crate) fn absolute(p: &Path) -> Result<PathBuf> {
         .map_err(|e| LauncherError::io_at(&e, p))
 }
 
+/// What Windows (or Wine) opens for `rel` below `base`: each component in any letter case, `.`
+/// and `..` taken lexically (as `GetFullPathName` does), links followed. A read-only probe for
+/// what a loader beside the game will find, never a destination: nothing is written through it.
+pub(crate) fn find_any_case(base: &Path, rel: &[&str]) -> Option<PathBuf> {
+    let mut cur = base.to_path_buf();
+    for c in rel {
+        match *c {
+            "" | "." => continue,
+            ".." => {
+                cur.pop();
+                continue;
+            }
+            _ => {}
+        }
+        let exact = cur.join(c);
+        if fs::metadata(&exact).is_ok() {
+            cur = exact;
+            continue;
+        }
+        let entry = fs::read_dir(&cur).ok()?.flatten().find(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case(c))
+        })?;
+        cur = entry.path();
+    }
+    fs::metadata(&cur).is_ok().then_some(cur)
+}
+
 /// Removes empty folders from `dir` up to (not including) `stop`.
 pub(crate) fn prune_empty_dirs(mut dir: PathBuf, stop: &Path) {
     while dir.starts_with(stop) && dir != stop {

@@ -138,6 +138,11 @@ fn under_proton_the_profile_is_a_z_drive_path_and_steam_gets_applaunch() {
         "Z:{}\\BepInEx\\core\\BepInEx.Preloader.dll",
         profile.to_str().unwrap().replace('/', "\\")
     );
+    let game_dir = fs::canonicalize(w.game.path()).unwrap();
+    let boot = format!(
+        "Z:{}\\{GAME}_Data\\boot.config",
+        game_dir.to_str().unwrap().replace('/', "\\")
+    );
     assert_eq!(
         p,
         ProcessPlan {
@@ -149,6 +154,13 @@ fn under_proton_the_profile_is_a_z_drive_path_and_steam_gets_applaunch() {
                 "true".into(),
                 "--doorstop-target-assembly".into(),
                 z,
+                // A doorstop_config.ini that is not ours never decides these for the session.
+                "--doorstop-mono-debug-enabled".into(),
+                "false".into(),
+                "--doorstop-mono-debug-suspend".into(),
+                "false".into(),
+                "--doorstop-boot-config-override".into(),
+                boot,
             ],
             env: vec![],
             cwd: None,

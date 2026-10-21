@@ -30,6 +30,13 @@ pub mod codes {
     /// Steam's VAC flag could not be read and the caller did not pass `Accept::vac_unchecked`.
     pub const VAC_UNCHECKED: &str = "vac-unchecked";
     pub const FOREIGN_LOADER: &str = "foreign-loader";
+    /// Play: the loader proxy shared with another mod manager (`file`) was replaced by one that
+    /// no longer takes our launch options. Installing again would answer `foreign-loader`.
+    pub const SHARED_LOADER_CHANGED: &str = "shared-loader-changed";
+    /// Plan: a mod loader in the game folder is switched off by its missing proxy, while its
+    /// `doorstop_config.ini` (`file`) still switches Doorstop on with a target that exists
+    /// (`target`). Adding our proxy would bring its mods back on every plain start of the game.
+    pub const SWITCHED_OFF_LOADER: &str = "switched-off-loader";
     /// The manifest names a different game (`field` = "exe" or "steam_appid").
     pub const GAME_MISMATCH: &str = "game-mismatch";
     /// The game's platform is not in the manifest's `platforms`, or cannot be launched.
@@ -115,6 +122,12 @@ impl LauncherError {
                 "Steam's Valve Anti-Cheat flag for this game could not be read; accept that explicitly"
             }
             codes::FOREIGN_LOADER => "another mod loader is installed beside the game",
+            codes::SHARED_LOADER_CHANGED => {
+                "the mod loader shared with another mod manager was replaced by one that does not take this integration's launch options; update that mod manager, or remove its loader and install again"
+            }
+            codes::SWITCHED_OFF_LOADER => {
+                "another mod loader in the game folder is switched off, but its doorstop_config.ini still switches it on; installing would bring its mods back on every start of the game. Set enabled = false in that file, or delete it, then try again"
+            }
             codes::GAME_MISMATCH => "this integration is for a different game",
             codes::PLATFORM_UNSUPPORTED => "this integration does not support the game's platform",
             codes::PATH_ESCAPES => "a path leaves the folder it must stay in",

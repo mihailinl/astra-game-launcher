@@ -170,8 +170,9 @@ fn a_shared_doorstop_that_is_gone_asks_for_an_install_which_adds_ours() {
 }
 
 #[test]
-fn a_shared_doorstop_no_longer_able_is_a_foreign_loader_at_play() {
-    // Installing again would be refused the same way, so Play does not send the person there.
+fn a_shared_doorstop_no_longer_able_is_shared_loader_changed_at_play() {
+    // Not "another loader is installed": the shared one changed. Installing again would be refused
+    // (`foreign-loader`), so Play does not send the person there.
     let cases = [
         (
             "doorstop 3",
@@ -185,7 +186,7 @@ fn a_shared_doorstop_no_longer_able_is_a_foreign_loader_at_play() {
         plan_and_install(&pkg, &w.target(), &w.profile());
         write(&w.game.join("winhttp.dll"), &replacement);
         let e = launch(&w).unwrap_err();
-        assert_eq!(e.code, codes::FOREIGN_LOADER, "{why}");
+        assert_eq!(e.code, codes::SHARED_LOADER_CHANGED, "{why}");
         assert_eq!(e.param("file"), Some("winhttp.dll"), "{why}");
         let again = plan_install(&pkg, &w.target(), &w.profile()).unwrap_err();
         assert_eq!(again.code, codes::FOREIGN_LOADER, "{why}");
@@ -224,7 +225,7 @@ fn a_proxy_with_our_very_bytes_that_another_manager_relinks_still_plays() {
     );
     launch(&w).unwrap();
     write(&w.game.join("winhttp.dll"), b"MZ another loader's proxy");
-    assert_eq!(launch(&w).unwrap_err().code, codes::FOREIGN_LOADER);
+    assert_eq!(launch(&w).unwrap_err().code, codes::SHARED_LOADER_CHANGED);
 }
 
 #[test]

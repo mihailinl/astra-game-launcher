@@ -93,9 +93,59 @@ pub(crate) fn set_keys(text: &str, section: &str, keys: &[(String, String)]) -> 
     out
 }
 
+/// The value of `key` in `[section]` the way Windows' `GetPrivateProfileString` reads it, which is
+/// how Doorstop reads its `doorstop_config.ini`: section and key in any letter case, the first of
+/// each that matches, the value trimmed and one pair of surrounding quotes removed. `None`: the
+/// file has no such key there.
+pub(crate) fn get(text: &str, section: &str, key: &str) -> Option<String> {
+    let body = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut lines = body.split('\n').map(bare);
+    lines
+        .by_ref()
+        .find(|l| section_name(l).is_some_and(|n| n.eq_ignore_ascii_case(section)))?;
+    for line in lines {
+        if section_name(line).is_some() {
+            return None;
+        }
+        if key_of(line).is_some_and(|k| k.eq_ignore_ascii_case(key)) {
+            let (_, v) = line.split_once('=')?;
+            let v = v.trim();
+            let unquoted = ['"', '\''].iter().find_map(|q| {
+                v.strip_prefix(*q)
+                    .and_then(|s| s.strip_suffix(*q))
+                    .filter(|_| v.len() >= 2)
+            });
+            return Some(unquoted.unwrap_or(v).to_owned());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_a_key_the_way_get_private_profile_string_does() {
+        let ini = "\u{feff}# Enable Doorstop?\r\n[general]\r\nEnabled = TRUE \r\ntarget_assembly=\"BepInEx\\core\\x.dll\"\r\n[UnityMono]\r\nenabled=false\r\n";
+        assert_eq!(get(ini, "General", "enabled").as_deref(), Some("TRUE"));
+        assert_eq!(
+            get(ini, "General", "target_assembly").as_deref(),
+            Some("BepInEx\\core\\x.dll")
+        );
+        assert_eq!(get(ini, "General", "debug_suspend"), None);
+        assert_eq!(get(ini, "UnityMono", "enabled").as_deref(), Some("false"));
+        assert_eq!(get(ini, "Missing", "enabled"), None);
+        assert_eq!(
+            get("[General]\nenabled =\n", "General", "enabled").as_deref(),
+            Some("")
+        );
+        // A key before any section belongs to none.
+        assert_eq!(
+            get("enabled = true\n[General]\n", "General", "enabled"),
+            None
+        );
+    }
 
     fn kv(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs

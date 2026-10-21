@@ -266,8 +266,12 @@ pub fn prepare_launch(
             .is_some_and(|bytes| doorstop::serves(&bytes, exe_machine, &m.launch.args));
         if !serves {
             // Still there and no longer able (the other manager moved to a loader that does not
-            // take our options): installing again would be refused the same way, so say so.
-            return Err(LauncherError::new(codes::FOREIGN_LOADER).with("file", g.rel.clone()));
+            // take our options). Not "another loader is installed": the person installed beside
+            // that one, and it is the one that changed. Installing again would be refused with
+            // `foreign-loader`, so this does not send them there.
+            return Err(
+                LauncherError::new(codes::SHARED_LOADER_CHANGED).with("file", g.rel.clone())
+            );
         }
     }
 
@@ -323,11 +327,15 @@ pub fn prepare_launch(
         vars,
         backslashes: flavor == Flavor::Proton || matches!(game.platform, Platform::Windows),
     };
+    // The manifest's arguments, then the Doorstop options that keep a `doorstop_config.ini` that
+    // is not ours (a shared loader's, one kept beside our proxy) out of the session.
     let args = m
         .launch
         .args
         .iter()
-        .map(|a| x.expand(a))
+        .cloned()
+        .chain(doorstop::session_options(&m.launch.args, &exe_file))
+        .map(|a| x.expand(&a))
         .collect::<Result<Vec<_>>>()?;
 
     for c in &m.config_writes {
