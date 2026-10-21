@@ -17,11 +17,11 @@ use crate::doorstop;
 use crate::error::{LauncherError, Result, codes};
 use crate::game::{GameTarget, Platform};
 use crate::ini;
-use crate::ledger::{self, LedgerState, ProfileLock};
+use crate::ledger::{self, LedgerGameFile, LedgerState, ProfileLock};
 use crate::manifest::{Manifest, OWN_PLACEHOLDERS, Piece, pieces};
 use crate::paths::{
     FileState, canonical_dir, checked_rel, existing_target, file_state, parse_jailed, plain,
-    prepare_target, write_atomic,
+    prepare_target, real_case, write_atomic,
 };
 use crate::plan::{GameAction, is_loader_proxy};
 use crate::proton;
@@ -329,12 +329,17 @@ pub fn prepare_launch(
     };
     // The manifest's arguments, then the Doorstop options that keep a `doorstop_config.ini` that
     // is not ours (a shared loader's, one kept beside our proxy) out of the session.
+    let foreign_config = foreign_config(&game_root, &ledger.game_files)?;
     let args = m
         .launch
         .args
         .iter()
         .cloned()
-        .chain(doorstop::session_options(&m.launch.args, &exe_file))
+        .chain(doorstop::session_options(
+            &m.launch.args,
+            &exe_file,
+            foreign_config,
+        ))
         .map(|a| x.expand(&a))
         .collect::<Result<Vec<_>>>()?;
 
@@ -390,6 +395,30 @@ pub fn prepare_launch(
         args,
         env,
         cwd: Some(plain(&game_root)),
+    })
+}
+
+/// Whether the `doorstop_config.ini` Doorstop reads where the game starts (the exe's folder, the
+/// working folder of every start) is someone else's: there, and not our own file unchanged. A
+/// link or a folder in its place is not ours either.
+fn foreign_config(game_root: &Path, game_files: &[LedgerGameFile]) -> Result<bool> {
+    let ini = real_case(game_root, &[doorstop::CONFIG_NAME.to_owned()])?;
+    let rel = ini.join("/");
+    let state = match existing_target(game_root, &ini).and_then(|p| match p {
+        Some(p) => file_state(&p),
+        None => Ok(FileState::Absent),
+    }) {
+        Ok(state) => state,
+        Err(e) if e.code == codes::PATH_ESCAPES => return Ok(true),
+        Err(e) => return Err(e),
+    };
+    Ok(match state {
+        FileState::Absent => false,
+        FileState::File { sha256 } => !game_files.iter().any(|g| {
+            g.rel.eq_ignore_ascii_case(&rel)
+                && matches!(g.action, GameAction::Add | GameAction::ReuseKnownProxy)
+                && g.sha256 == sha256
+        }),
     })
 }
 

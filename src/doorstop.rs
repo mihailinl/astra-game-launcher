@@ -199,20 +199,33 @@ pub(crate) fn plain_start_target(ini: &str, generation: Generation) -> Option<St
 }
 
 /// Doorstop 4 options a launch adds to the manifest's own, so that a `doorstop_config.ini` that
-/// is not ours — a shared loader's, or one kept beside our proxy — cannot change Astra's session:
-/// no Mono debugger (with `debug_suspend` the game waits for one before it starts), and the
-/// game's own `boot.config`. Each value is what Doorstop does when the file does not set it. A
-/// Doorstop that does not know an option ignores it, and reads no such setting from its file
+/// is not ours — a shared loader's, or one kept beside our proxy — cannot change Astra's session.
+///
+/// Always: no Mono debugger (`debug_suspend` holds the game until a debugger attaches). Both are
+/// Doorstop's defaults, booleans every Doorstop 4 build reads.
+///
+/// Only when `foreign_config` (a `doorstop_config.ini` that is not our own unchanged one is where
+/// the game starts): the game's own `boot.config`, named relative to the working folder, which is
+/// the very path Doorstop compares against, so it redirects that file to itself. Not always: on
+/// 4.3+ naming an existing file switches Doorstop's file-open hooks on for the whole session, and
+/// with our own config nothing overrides `boot.config` in the first place.
+///
+/// A Doorstop that does not know an option ignores it, and reads no such setting from its file
 /// either (`boot-config-override` came to both in 4.3), so none of these is asked of a shared
-/// loader: [`serves`] still asks only for the manifest's options.
+/// loader: [`serves`] asks only for the manifest's options.
 ///
 /// `dll_search_path_override` is left to the file: it has no neutral value (pointing it at the
 /// game's own `Managed` folder is not one, as Doorstop then loads each assembly from disk instead
 /// of the bytes the game hands Mono), and a person who set it usually has a game that needs it.
 ///
 /// Only for a Doorstop 4 launch (one that passes `--doorstop-enabled` and
-/// `--doorstop-target-assembly`), and never an option the manifest passes itself.
-pub(crate) fn session_options(args: &[String], exe_file_name: &str) -> Vec<String> {
+/// `--doorstop-target-assembly`), and never an option the manifest passes itself. Each value is
+/// one argv element whatever it holds: spawning passes argv, never a shell string.
+pub(crate) fn session_options(
+    args: &[String],
+    exe_file_name: &str,
+    foreign_config: bool,
+) -> Vec<String> {
     let has = |o: &str| args.iter().any(|a| a.eq_ignore_ascii_case(o));
     if !(has(V4_ENABLE) && has(V4_TARGET)) {
         return Vec::new();
@@ -221,16 +234,16 @@ pub(crate) fn session_options(args: &[String], exe_file_name: &str) -> Vec<Strin
         ("--doorstop-mono-debug-enabled", "false".to_owned()),
         ("--doorstop-mono-debug-suspend", "false".to_owned()),
     ];
-    // Unity reads `<exe name>_Data/boot.config`; Doorstop redirects that very path, so naming it
-    // redirects it to itself. A name holding `${` would read as a placeholder: no pin then.
+    // Unity reads `<exe name>_Data/boot.config`. A name holding `${` would read as a
+    // placeholder: no pin then.
     let stem = Path::new(exe_file_name)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("");
-    if !stem.is_empty() && !stem.contains("${") {
+    if foreign_config && !stem.is_empty() && !stem.contains("${") {
         pins.push((
             "--doorstop-boot-config-override",
-            format!("${{game}}/{stem}_Data/boot.config"),
+            format!("{stem}_Data/boot.config"),
         ));
     }
     pins.into_iter()
@@ -238,6 +251,18 @@ pub(crate) fn session_options(args: &[String], exe_file_name: &str) -> Vec<Strin
         .flat_map(|(o, v)| [o.to_owned(), v])
         .collect()
 }
+
+/// Names a Doorstop build goes by beside a game (its proxy forwards to the real system DLL of the
+/// same name). Probed by bytes, so another loader under one of them (ReShade's `dxgi.dll`) is
+/// never taken for a Doorstop.
+pub(crate) const PROXY_NAMES: &[&str] = &[
+    "winhttp.dll",
+    "version.dll",
+    "winmm.dll",
+    "dxgi.dll",
+    "d3d11.dll",
+    "dinput8.dll",
+];
 
 #[cfg(test)]
 mod tests {
@@ -347,26 +372,37 @@ mod tests {
 
     #[test]
     fn a_doorstop_4_launch_pins_what_a_config_not_ours_could_change() {
+        let debugger = args(&[
+            "--doorstop-mono-debug-enabled",
+            "false",
+            "--doorstop-mono-debug-suspend",
+            "false",
+        ]);
+        // Our own config beside the game: nothing overrides boot.config, so no file hooks.
         assert_eq!(
-            session_options(&v4_args(), "Some Game.exe"),
-            args(&[
-                "--doorstop-mono-debug-enabled",
-                "false",
-                "--doorstop-mono-debug-suspend",
-                "false",
-                "--doorstop-boot-config-override",
-                "${game}/Some Game_Data/boot.config",
-            ])
+            session_options(&v4_args(), "Some Game.exe", false),
+            debugger
+        );
+        // Someone else's: their boot.config override is pointed back at the game's own, named
+        // as Doorstop compares it (working folder + program name + `_Data`), one argv element.
+        let mut with_boot = debugger.clone();
+        with_boot.extend(args(&[
+            "--doorstop-boot-config-override",
+            "Some Game_Data/boot.config",
+        ]));
+        assert_eq!(
+            session_options(&v4_args(), "Some Game.exe", true),
+            with_boot
         );
         // Unity on Linux names the data folder after the program without its extension too.
         assert!(
-            session_options(&v4_args(), "Game.x86_64")
-                .contains(&"${game}/Game_Data/boot.config".to_owned())
+            session_options(&v4_args(), "Game.x86_64", true)
+                .contains(&"Game_Data/boot.config".to_owned())
         );
         // The manifest's own choice wins, in any letter case (Doorstop compares with lstrcmpi).
         let mut own = v4_args();
         own.extend(args(&["--Doorstop-Mono-Debug-Enabled", "true"]));
-        let pins = session_options(&own, "g.exe");
+        let pins = session_options(&own, "g.exe", true);
         assert!(
             !pins
                 .iter()
@@ -376,11 +412,11 @@ mod tests {
         assert!(pins.iter().any(|a| a == "--doorstop-mono-debug-suspend"));
         // Not a Doorstop 4 launch: nothing.
         let v3 = args(&["--doorstop-enable", "true", "--doorstop-target", "x.dll"]);
-        assert!(session_options(&v3, "g.exe").is_empty());
-        assert!(session_options(&args(&["-batchmode"]), "g.exe").is_empty());
+        assert!(session_options(&v3, "g.exe", true).is_empty());
+        assert!(session_options(&args(&["-batchmode"]), "g.exe", true).is_empty());
         // A program name that would read as a placeholder gets no path.
         assert!(
-            !session_options(&v4_args(), "${x}.exe")
+            !session_options(&v4_args(), "${x}.exe", true)
                 .iter()
                 .any(|a| a.contains("boot"))
         );

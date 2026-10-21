@@ -47,7 +47,7 @@ pub use install::{UninstallReport, install, installed, uninstall};
 pub use launch::{ProcessPlan, Spawn, StdSpawn, find_steam, launch, prepare_launch};
 pub use ledger::{
     LEDGER_SCHEMA, Ledger, LedgerBackup, LedgerFile, LedgerGame, LedgerGameFile, LedgerSource,
-    LedgerState, ProtonRecord,
+    LedgerState, LoaderBaseline, ProtonRecord,
 };
 pub use manifest::{
     ConfigWrite, FileRule, GameFileRule, IntegrationInfo, Launch, MANIFEST_FILE, Manifest, SCHEMA,

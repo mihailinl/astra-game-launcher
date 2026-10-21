@@ -123,6 +123,17 @@ fn uninstall_leaves_our_doorstop_when_their_bepinex_config_replaced_ours() {
         fs::read(w.game.join("doorstop_config.ini")).unwrap(),
         BEPINEX_INI
     );
+
+    // The same after an update, whose ledger holds their config as `keep-existing`: that config
+    // arrived after us, which the baseline still says.
+    let w = World::new();
+    let pkg = doorstop_runner(&ours());
+    plan_and_install(&pkg, &w.target(), &w.profile());
+    write(&w.game.join("doorstop_config.ini"), BEPINEX_INI);
+    let again = plan_and_install(&pkg, &w.target(), &w.profile());
+    assert_eq!(again.game_files[1].action, GameAction::KeepExisting);
+    let report = uninstall(&w.profile(), &w.target()).unwrap();
+    assert_eq!(report.kept, vec!["winhttp.dll".to_owned()]);
 }
 
 #[test]
@@ -170,9 +181,10 @@ fn with_nothing_of_theirs_beside_it_our_doorstop_goes() {
 }
 
 #[test]
-fn an_update_after_their_bepinex_arrived_keeps_the_proxy_and_is_not_stale() {
-    // The plan must expect what uninstalling the old integration leaves, or every update would
-    // answer plan-stale.
+fn an_update_after_their_bepinex_arrived_keeps_the_proxy_ours_and_is_not_stale() {
+    // The plan must expect what replacing the old integration leaves, or every update would
+    // answer plan-stale; and the proxy stays OUR `add`, so that a later uninstall removes it
+    // once nobody else needs it.
     let w = World::new();
     let pkg = doorstop_runner(&ours());
     plan_and_install(&pkg, &w.target(), &w.profile());
@@ -183,13 +195,46 @@ fn an_update_after_their_bepinex_arrived_keeps_the_proxy_and_is_not_stale() {
     assert_eq!(
         actions(&again),
         vec![
-            ("winhttp.dll", GameAction::ReuseKnownProxy),
+            ("winhttp.dll", GameAction::Add),
             ("doorstop_config.ini", GameAction::KeepExisting),
         ]
     );
     launch(&w);
-    uninstall(&w.profile(), &w.target()).unwrap();
+    let report = uninstall(&w.profile(), &w.target()).unwrap();
+    assert_eq!(report.kept, vec!["winhttp.dll".to_owned()]);
     assert_eq!(fs::read(w.game.join("winhttp.dll")).unwrap(), ours());
+
+    // Their BepInEx gone again (folder and config): the next uninstall finds nobody needs it.
+    let w = World::new();
+    plan_and_install(&pkg, &w.target(), &w.profile());
+    write(&w.game.join("doorstop_config.ini"), BEPINEX_INI);
+    w.bepinex_folder();
+    plan_and_install(&pkg, &w.target(), &w.profile());
+    fs::remove_dir_all(w.game.join("BepInEx")).unwrap();
+    fs::remove_file(w.game.join("doorstop_config.ini")).unwrap();
+    let report = uninstall(&w.profile(), &w.target()).unwrap();
+    assert!(report.kept.is_empty(), "{report:?}");
+    assert!(!w.game.join("winhttp.dll").exists());
+}
+
+/// Installs `pkg` and cancels right after the first game file (the proxy) is placed.
+fn install_cancelled_after_the_proxy(w: &World, pkg: &astra_game_launcher::GiPackage) {
+    let plan = plan_install(pkg, &w.target(), &w.profile()).unwrap();
+    assert_eq!(plan.game_files[0].action, GameAction::Add);
+    let placed = Cell::new(false);
+    let cancel = || placed.get();
+    let progress = |p: Progress| {
+        if p.stage == "game-files" {
+            placed.set(true);
+        }
+    };
+    let ctx = Ctx {
+        cancel: &cancel,
+        progress: &progress,
+    };
+    let e = install(pkg, &plan, &w.target(), ACCEPT, &ctx).unwrap_err();
+    assert_eq!(e.code, codes::CANCELLED);
+    assert!(placed.get(), "the proxy was placed before the cancel");
 }
 
 #[test]
@@ -203,25 +248,105 @@ fn a_cancelled_install_takes_back_its_doorstop_even_beside_a_bepinex() {
         b"[General]\nenabled = false\ntarget_assembly = BepInEx\\core\\BepInEx.Preloader.dll\n",
     );
     let before = snapshot(w.game.path());
-    let pkg = doorstop_runner(&ours());
-    let plan = plan_install(&pkg, &w.target(), &w.profile()).unwrap();
-    assert_eq!(plan.game_files[0].action, GameAction::Add);
-
-    let placed = Cell::new(false);
-    let cancel = || placed.get();
-    let progress = |p: Progress| {
-        if p.stage == "game-files" {
-            placed.set(true);
-        }
-    };
-    let ctx = Ctx {
-        cancel: &cancel,
-        progress: &progress,
-    };
-    let e = install(&pkg, &plan, &w.target(), ACCEPT, &ctx).unwrap_err();
-    assert_eq!(e.code, codes::CANCELLED);
-    assert!(placed.get(), "the proxy was placed before the cancel");
+    install_cancelled_after_the_proxy(&w, &doorstop_runner(&ours()));
     assert_eq!(snapshot(w.game.path()), before);
+}
+
+#[test]
+fn a_cancelled_update_leaves_the_doorstop_their_bepinex_runs_through() {
+    // Their BepInEx arrived after our install; an update cut off half way must not take the proxy
+    // it runs through away with it.
+    let w = World::new();
+    let pkg = doorstop_runner(&ours());
+    plan_and_install(&pkg, &w.target(), &w.profile());
+    write(&w.game.join("doorstop_config.ini"), BEPINEX_INI);
+    w.bepinex_folder();
+    install_cancelled_after_the_proxy(&w, &pkg);
+    assert_eq!(fs::read(w.game.join("winhttp.dll")).unwrap(), ours());
+}
+
+#[test]
+fn a_bepinex_the_person_had_switched_off_before_us_is_not_theirs_running_through_ours() {
+    // Their BepInEx was in the folder before we came, switched off. What was there then is the
+    // baseline the ledger keeps: it never keeps our proxy behind, on either way it was off.
+    let off_by_config =
+        "[General]\nenabled = false\ntarget_assembly = BepInEx\\core\\BepInEx.Preloader.dll\n";
+
+    // Switched off in its config: install, uninstall.
+    let w = World::new();
+    w.bepinex_folder();
+    write(
+        &w.game.join("doorstop_config.ini"),
+        off_by_config.as_bytes(),
+    );
+    let before = snapshot(w.game.path());
+    plan_and_install(&doorstop_runner(&ours()), &w.target(), &w.profile());
+    let ledger =
+        fs::read_to_string(w.profile().join(astra_game_launcher::LEDGER_FILE_NAME)).unwrap();
+    assert!(ledger.contains("loader_baseline"), "{ledger}");
+    let report = uninstall(&w.profile(), &w.target()).unwrap();
+    assert!(report.kept.is_empty(), "{report:?}");
+    assert_eq!(snapshot(w.game.path()), before);
+
+    // Its config deleted: install (ours goes in), update, uninstall.
+    let w = World::new();
+    w.bepinex_folder();
+    let before = snapshot(w.game.path());
+    let pkg = doorstop_runner(&ours());
+    plan_and_install(&pkg, &w.target(), &w.profile());
+    let again = plan_and_install(&pkg, &w.target(), &w.profile());
+    assert_eq!(
+        actions(&again),
+        vec![
+            ("winhttp.dll", GameAction::Add),
+            ("doorstop_config.ini", GameAction::Add),
+        ]
+    );
+    let report = uninstall(&w.profile(), &w.target()).unwrap();
+    assert!(report.kept.is_empty(), "{report:?}");
+    assert_eq!(snapshot(w.game.path()), before);
+
+    // Switched back on by the person while ours is there: it runs through ours now, and stays.
+    let w = World::new();
+    w.bepinex_folder();
+    write(
+        &w.game.join("doorstop_config.ini"),
+        off_by_config.as_bytes(),
+    );
+    plan_and_install(&pkg, &w.target(), &w.profile());
+    write(
+        &w.game.join("doorstop_config.ini"),
+        off_by_config
+            .replace("enabled = false", "enabled = true")
+            .as_bytes(),
+    );
+    let report = uninstall(&w.profile(), &w.target()).unwrap();
+    assert_eq!(report.kept, vec!["winhttp.dll".to_owned()]);
+}
+
+#[test]
+fn a_ledger_from_before_the_baseline_keeps_the_proxy_beside_any_bepinex() {
+    // 0.3.0 wrote no baseline: everything beside the proxy that is not ours counts as theirs.
+    let w = World::new();
+    w.bepinex_folder();
+    write(
+        &w.game.join("doorstop_config.ini"),
+        b"[General]\nenabled = false\n[x]\n",
+    );
+    plan_and_install(&doorstop_runner(&ours()), &w.target(), &w.profile());
+    let path = w.profile().join(astra_game_launcher::LEDGER_FILE_NAME);
+    let mut ledger: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(
+        ledger
+            .as_object_mut()
+            .unwrap()
+            .remove("loader_baseline")
+            .is_some()
+    );
+    fs::write(&path, serde_json::to_string(&ledger).unwrap()).unwrap();
+    let report = uninstall(&w.profile(), &w.target()).unwrap();
+    assert_eq!(report.kept, vec!["winhttp.dll".to_owned()]);
 }
 
 #[test]
@@ -435,6 +560,73 @@ fn an_absolute_target_under_proton_is_looked_up_through_the_drive_letters() {
 }
 
 #[test]
+fn their_bepinex_under_another_proxy_name_is_a_foreign_loader_not_a_switched_off_one() {
+    // Their BepInEx runs through a Doorstop named version.dll or winmm.dll, switched on in its
+    // config: "set enabled = false" would turn their working mods off, and ours beside it would
+    // load into every start as well.
+    for name in ["version.dll", "WinMM.dll"] {
+        let w = World::new();
+        w.bepinex_folder();
+        write(&w.game.join("doorstop_config.ini"), BEPINEX_INI);
+        write(
+            &w.game.join(name),
+            &pe_with_options(X64, DOORSTOP_V4, b"their doorstop"),
+        );
+        let e = w.plan(Platform::Windows).unwrap_err();
+        assert_eq!(e.code, codes::FOREIGN_LOADER, "{name}");
+        assert_eq!(e.param("file"), Some(name));
+    }
+    // A version.dll that is not a Doorstop is none of this: the config then decides.
+    let w = World::new();
+    w.bepinex_folder();
+    write(&w.game.join("doorstop_config.ini"), BEPINEX_INI);
+    write(&w.game.join("version.dll"), b"MZ some other version.dll");
+    assert_eq!(
+        w.plan(Platform::Windows).unwrap_err().code,
+        codes::SWITCHED_OFF_LOADER
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn under_proton_the_override_that_loads_a_kept_proxy_stays_too() {
+    let w = World::new();
+    let pfx = Tmp::new("pfx");
+    fs::write(pfx.join("user.reg"), USER_REG).unwrap();
+    let game = w.on(Platform::LinuxProton {
+        prefix: Some(pfx.path().to_path_buf()),
+    });
+    let steam = Some(std::path::Path::new("/opt/fake/steam"));
+    let section = format!("[Software\\\\Wine\\\\AppDefaults\\\\{GAME}.exe\\\\DllOverrides]");
+
+    // Nothing of theirs: everything back, byte for byte.
+    plan_and_install(&doorstop_runner(&ours()), &game, &w.profile());
+    prepare_launch(&w.profile(), &game, &vars(), steam).unwrap();
+    let report = uninstall(&w.profile(), &game).unwrap();
+    assert!(report.proton_restored && report.proton_overrides_kept.is_empty());
+    assert_eq!(fs::read_to_string(pfx.join("user.reg")).unwrap(), USER_REG);
+
+    // Their BepInEx arrived and runs through our proxy: under Proton it needs the override too.
+    plan_and_install(&doorstop_runner(&ours()), &game, &w.profile());
+    prepare_launch(&w.profile(), &game, &vars(), steam).unwrap();
+    write(&w.game.join("doorstop_config.ini"), BEPINEX_INI);
+    w.bepinex_folder();
+    let report = uninstall(&w.profile(), &game).unwrap();
+    // Their config is kept as a file that changed since we placed ours; the proxy for them.
+    assert_eq!(
+        report.kept,
+        vec!["doorstop_config.ini".to_owned(), "winhttp.dll".to_owned()]
+    );
+    assert_eq!(report.proton_overrides_kept, vec!["winhttp".to_owned()]);
+    let reg = fs::read_to_string(pfx.join("user.reg")).unwrap();
+    let at = reg.find(&section).expect("the game's section stays");
+    assert!(
+        reg[at..].contains("\"winhttp\"=\"native,builtin\""),
+        "{reg}"
+    );
+}
+
+#[test]
 fn only_a_game_that_loads_the_proxy_and_only_a_doorstop_are_concerned() {
     let w = World::new();
     w.bepinex_folder();
@@ -460,33 +652,98 @@ fn a_config_that_is_not_ours_cannot_hold_the_session_at_a_debugger_or_swap_boot_
     );
     let plan = plan_and_install(&doorstop_runner(&ours()), &w.target(), &w.profile());
     assert_eq!(plan.game_files[0].action, GameAction::ShareLoader);
-    let tail: Vec<&str> = plan.launch_args[4..].iter().map(String::as_str).collect();
+    // The consent sheet shows the integration's arguments; these are the launcher's own.
+    assert_eq!(plan.launch_args.len(), 4, "{:?}", plan.launch_args);
+
+    let args = launch(&w);
     assert_eq!(
-        tail,
-        vec![
+        &args[6..],
+        [
             "--doorstop-mono-debug-enabled",
             "false",
             "--doorstop-mono-debug-suspend",
             "false",
+            // Relative to the working folder, as Doorstop compares it: their override points
+            // back at the game's own file.
             "--doorstop-boot-config-override",
-            "${game}/Some Game_Data/boot.config",
+            "Some Game_Data/boot.config",
         ]
     );
+}
 
+#[test]
+fn with_our_own_config_beside_the_game_boot_config_is_left_alone() {
+    // On Doorstop 4.3+ an override that names an existing file switches its file-open hooks on
+    // for the whole session; with our own config nothing overrides boot.config at all.
+    let w = World::new();
+    plan_and_install(&doorstop_runner(&ours()), &w.target(), &w.profile());
     let args = launch(&w);
-    let value = |opt: &str| {
-        let i = args.iter().position(|a| a == opt).unwrap();
-        args[i + 1].clone()
-    };
-    assert_eq!(value("--doorstop-mono-debug-enabled"), "false");
-    assert_eq!(value("--doorstop-mono-debug-suspend"), "false");
-    let game = fs::canonicalize(w.game.path()).unwrap();
+    assert!(
+        !args.iter().any(|a| a == "--doorstop-boot-config-override"),
+        "{args:?}"
+    );
+    assert!(args.iter().any(|a| a == "--doorstop-mono-debug-suspend"));
+}
+
+#[test]
+fn with_no_config_at_all_boot_config_is_left_alone() {
+    // An integration that ships no doorstop_config.ini, in a game with none: Doorstop reads no
+    // file, so there is nothing to pin.
+    let block =
+        "[[game_files]]\nfrom = \"doorstop_config.ini\"\nto = \"${game}/doorstop_config.ini\"\n\n";
+    let m = runner_manifest("").replace(&sha(WINHTTP), &sha(&ours()));
+    assert!(m.contains(block), "{m}");
+    let m = m.replace(block, "");
+    let pkg = open(&zip(&[
+        E::File("astra-gi.toml", m.as_bytes()),
+        E::File("winhttp.dll", &ours()),
+        E::File("BepInEx/core/BepInEx.Preloader.dll", PRELOADER),
+        E::File("BepInEx/core/BepInEx.dll", CORE_DLL),
+    ]))
+    .unwrap();
+    let w = World::new();
+    plan_and_install(&pkg, &w.target(), &w.profile());
+    let args = launch(&w);
+    assert!(
+        !args.iter().any(|a| a == "--doorstop-boot-config-override"),
+        "{args:?}"
+    );
+}
+
+#[test]
+fn a_path_with_spaces_is_one_argument_and_carries_no_quotes() {
+    // Spawning passes argv, never a shell string: Rust quotes an element with spaces on Windows
+    // exactly as r2modman and Thunderstore Mod Manager do for `steam -applaunch` (whose own data
+    // folder is "Thunderstore Mod Manager"), and quotes inside an element would reach Doorstop as
+    // part of the path.
+    let w = World::new();
+    let profile = w.profiles.join("Astra Games/Some Game profile");
+    write(
+        &w.game.join("doorstop_config.ini"),
+        b"[General]\nenabled = false\nx = y\n",
+    );
+    let game = w.target();
+    plan_and_install(&doorstop_runner(&ours()), &game, &profile);
+    let args = prepare_launch(
+        &profile,
+        &game,
+        &vars(),
+        Some(std::path::Path::new("/opt/fake/steam")),
+    )
+    .unwrap()
+    .args;
+    let at = |opt: &str| args[args.iter().position(|a| a == opt).unwrap() + 1].clone();
+    let target = at("--doorstop-target-assembly");
+    assert!(
+        target.contains("Astra Games\\Some Game profile\\BepInEx\\core\\BepInEx.Preloader.dll"),
+        "{target}"
+    );
     assert_eq!(
-        value("--doorstop-boot-config-override"),
-        format!(
-            "{}\\{GAME}_Data\\boot.config",
-            game.to_str().unwrap().replace('/', "\\")
-        ),
-        "the game's own boot.config: Doorstop redirects it to itself"
+        at("--doorstop-boot-config-override"),
+        "Some Game_Data/boot.config"
+    );
+    assert!(
+        !args.iter().any(|a| a.contains('"')),
+        "no quote in any element: {args:?}"
     );
 }

@@ -73,7 +73,13 @@ Every refusal is a `LauncherError { code, params }`; the codes are stable
 | `switched-off-loader` | `plan_install`, `install` | `file` (the `doorstop_config.ini`), `target` (as that file writes it) | Another mod loader (BepInEx) in the game folder is switched off, but its settings file still switches it on: installing would bring its mods back on every start of the game. Set `enabled = false` in that file, or delete it, then install again. |
 | `shared-loader-changed` | `prepare_launch` | `file` (the loader proxy) | The mod loader shared with another mod manager was replaced by one that does not take this integration's launch options (it used to be `foreign-loader`). Update that mod manager, or remove its loader and install again. |
 
-`UninstallReport::kept` can now name a loader proxy we added that another BepInEx runs through.
+`foreign-loader` (`file`) now also comes from `plan_install` / `install` for another Doorstop
+beside the game under another name than ours (`version.dll`, `winmm.dll`).
+
+`UninstallReport::kept` can now name a loader proxy we added that another BepInEx runs through,
+and `UninstallReport::proton_overrides_kept` the Wine overrides left for it. `Ledger` gains
+`loader_baseline` (absent from older ledgers, ignored by older launchers; the schema number does
+not change).
 
 ## Which program is the game
 
@@ -150,32 +156,48 @@ rules: a launcher beside a Unity game is not a Unity game.
   and replaced. Uninstall removes or restores a file only while it still has our digest; a file
   the game updated since is the game's.
 - **Someone else's BepInEx.** A BepInEx installed by hand after ours puts the very same
-  `winhttp.dll` there, so a digest cannot tell whose it is. Uninstall therefore leaves a Doorstop
-  proxy it added (and says so in `kept`) when the `doorstop_config.ini` beside it is no longer the
-  one the install left (or is one it never wrote), or a `BepInEx/core` beside it holds anything
-  the install did not put there; a plan made for an update expects the same, and an install that
-  fails still takes back exactly what it placed. The other way round, a plan that would ADD our
-  Doorstop where a `doorstop_config.ini` we do not write stays beside it, switching Doorstop on
-  with a target that exists, is refused (`switched-off-loader`): that is a mod loader the person
-  switched off by removing its proxy, and ours would load its mods again on every plain start of
-  the game. The file is read as Doorstop reads it (`GetPrivateProfileString`: a missing `enabled`
-  is `true`, a missing target `Doorstop.dll`; a relative target is looked up below the game's
-  folder in any letter case, an absolute one through Proton's drive letters, and one that cannot
-  be looked up counts as there). A target that is not there — r2modman's and Thunderstore Mod
-  Manager's file names one in their own profile — loads nothing and is no reason to refuse.
-  Windows and Proton only: a native Linux game loads no proxy.
+  `winhttp.dll` there, so a digest cannot tell whose it is. The ledger therefore keeps, for each
+  Doorstop proxy we add, what sat beside it before Astra first added it (`loader_baseline`: the
+  `doorstop_config.ini`'s digest and the `BepInEx/core` names, carried unchanged by every update).
+  Uninstall leaves our proxy (and says so in `kept`) only when something not in that baseline and
+  not ours sits beside it: another `doorstop_config.ini`, or a `BepInEx/core` name. A BepInEx the
+  person had switched off before we came is in the baseline, so our proxy never stays behind for
+  it; one they switch back on (its config changed) does run through ours, and keeps it. Under
+  Proton the Wine override that loads a kept proxy stays too (`proton_overrides_kept`). An update
+  removes our proxy and places the new one, so it stays our `add`; an install that fails takes
+  back what it placed, unless another loader runs through it. A ledger from before 0.3.1 has no
+  baseline: then every config and `BepInEx/core` entry that is not ours counts as theirs.
+- **Their loader switched off.** A plan that would ADD our Doorstop beside a mod loader of the
+  person's is refused. Another Doorstop in that folder under another name (BepInEx as
+  `version.dll` or `winmm.dll`, judged by its bytes) is `foreign-loader`, naming it. A
+  `doorstop_config.ini` we do not write that switches Doorstop on with a target that exists is
+  `switched-off-loader`: a mod loader the person switched off by removing its proxy, whose mods
+  ours would load again on every plain start of the game. The file is read as Doorstop reads it
+  (`GetPrivateProfileString`: a missing `enabled` is `true`, a missing target `Doorstop.dll`); a
+  relative target is looked up below the game's folder in any letter case, an absolute one
+  through Proton's drive letters. A target that cannot be looked up counts as there: the check
+  fails closed, with a refusal the person can lift by switching that file off. A target that is
+  not there (r2modman's and Thunderstore Mod Manager's file names one in their own profile)
+  loads nothing and is no reason to refuse. Windows and Proton only: a native Linux game loads no
+  proxy. A proxy of ours already there (an update) changes nothing about how the game starts, and
+  is not refused.
 - **Doorstop's settings in the session.** A launch whose manifest passes Doorstop 4's
   `--doorstop-enabled` and `--doorstop-target-assembly` also passes
-  `--doorstop-mono-debug-enabled false`, `--doorstop-mono-debug-suspend false` and
-  `--doorstop-boot-config-override ${game}/<exe name>_Data/boot.config` (the game's own, which
-  Doorstop then redirects to itself), unless the manifest sets one itself, so a
-  `doorstop_config.ini` that is not ours cannot hold the game at a debugger or swap its
-  `boot.config`. Each value is Doorstop's own default, a Doorstop that does not know an option
-  ignores it and reads no such setting from its file either (boot-config came to both in 4.3), so
-  none is asked of a shared loader. `dll_search_path_override` is left to that file: it has no
-  neutral value (the game's own `Managed` folder is not one: Doorstop would then load each
-  assembly from disk instead of the bytes the game hands Mono). The plan's `launch_args` show
-  these options too.
+  `--doorstop-mono-debug-enabled false` and `--doorstop-mono-debug-suspend false`, so a
+  `doorstop_config.ini` that is not ours cannot hold the game at a debugger. When the config where
+  the game starts is not our own unchanged one, it also passes
+  `--doorstop-boot-config-override <exe name>_Data/boot.config`: the game's own file, relative to
+  the working folder exactly as Doorstop compares it, which it then redirects to itself. Not
+  otherwise, since on 4.3+ naming an existing file switches Doorstop's file-open hooks on for the
+  whole session. None of these is passed when the manifest sets it, and none is asked of a shared
+  loader: each value is Doorstop's own default, and a Doorstop that does not know an option
+  ignores it and reads no such setting from its file either (boot-config came to both in 4.3).
+  `dll_search_path_override` is left to that file: it has no neutral value (the game's own
+  `Managed` folder is not one: Doorstop would then load each assembly from disk instead of the
+  bytes the game hands Mono). These are the launcher's, not the integration's: the plan's
+  `launch_args` stay the manifest's. Every argument is one argv element, never a shell string: a
+  path with spaces is one element and carries no quotes (Rust quotes it for `steam -applaunch` on
+  Windows just as r2modman and Thunderstore Mod Manager do).
 - **Steam's appinfo.** `appinfo.vdf` is someone else's binary file, often 100+ MB: it is read
   buffered, skipping to the one app by its size fields, with every length and the nesting depth
   bounded; anything corrupt answers `None`, never a panic. What it names is only a hint, which

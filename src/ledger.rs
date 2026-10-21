@@ -70,6 +70,21 @@ pub struct LedgerGameFile {
     pub backup: Option<LedgerBackup>,
 }
 
+/// What sat beside a Doorstop proxy before Astra first added it to this game: the yardstick for
+/// "someone else's loader runs through ours now" ([`crate::plan`]'s `kept_for_their_loader`).
+/// Recorded by the install that first adds the proxy and carried, unchanged, by every update.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoaderBaseline {
+    /// The proxy, below the exe's folder, `/`-separated.
+    pub proxy: String,
+    /// The digest of the `doorstop_config.ini` beside it then; `None`: there was none.
+    #[serde(default)]
+    pub ini_sha256: Option<String>,
+    /// The names in the `BepInEx/core` beside it then (a BepInEx the person had switched off).
+    #[serde(default)]
+    pub bepinex_core: Vec<String>,
+}
+
 /// The Wine DLL override written into a Proton prefix's `user.reg`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtonRecord {
@@ -103,6 +118,11 @@ pub struct Ledger {
     /// on an unchecked plan). Without it, a Play whose VAC check is still unread is refused.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub vac_unchecked_accepted: bool,
+    /// One per Doorstop proxy this integration added. Absent from a ledger written before 0.3.1,
+    /// which a launcher before it ignores (no schema change): without one, everything beside the
+    /// proxy that is not ours counts as someone else's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loader_baseline: Vec<LoaderBaseline>,
 }
 
 /// `proton` is an object when there is one record (every ledger written before several overrides

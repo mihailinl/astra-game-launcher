@@ -26,7 +26,10 @@ use crate::paths::{
     BACKUP_DIR, FileState, LOCK_FILE, canonical_dir, checked_rel, existing_target, file_state,
     plain, prepare_target, prune_empty_dirs, write_atomic,
 };
-use crate::plan::{Accept, GameAction, InstallPlan, kept_for_their_loader, plan_install};
+use crate::plan::{
+    Accept, GameAction, GameFileAction, InstallPlan, kept_for_their_loader, loader_baselines,
+    plan_install, plan_install_with,
+};
 use crate::proton;
 use crate::running::refuse_if_running;
 
@@ -43,20 +46,14 @@ pub struct UninstallReport {
     pub kept: Vec<String>,
     pub profile_files_removed: u32,
     pub proton_restored: bool,
+    /// Wine DLL overrides (`winhttp`) left in the Proton prefix because the proxy they load was
+    /// kept for another loader, which needs them to be loaded at all. Absent before 0.3.1.
+    #[serde(default)]
+    pub proton_overrides_kept: Vec<String>,
 }
 
 fn stale(detail: &str) -> LauncherError {
     LauncherError::new(codes::PLAN_STALE).with("detail", detail)
-}
-
-/// Why a ledger is undone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Undo {
-    /// Uninstall, or an install replacing the integration: an added Doorstop another loader now
-    /// runs through stays ([`kept_for_their_loader`]), as the plan assumed.
-    Uninstall,
-    /// An install that failed takes back exactly what it placed a moment ago.
-    Rollback,
 }
 
 fn backup_rel(rel: &str) -> String {
@@ -89,9 +86,14 @@ pub fn install(
     refuse_if_running(&game.exe_file_name()?)?;
     let game_root = game.game_root()?;
 
-    if let Some(old) = ledger::read(&profile)? {
-        uninstall_ledger(&profile, &game_root, &old, Undo::Uninstall)?;
-        let again = plan_install(pkg, game, &plan.profile_dir)?;
+    let old = ledger::read(&profile)?;
+    // Measured before the replaced integration is undone, which may take files from that folder.
+    let loader_baseline = loader_baselines(&game_root, &plan.game_files, old.as_ref())?;
+    if let Some(old) = old {
+        uninstall_ledger(&profile, &game_root, &old, &plan.game_files)?;
+        // The game folder as the plan expected it once the old integration is gone. The plan's
+        // refusals were judged with that integration in place, as the person will find the game.
+        let again = plan_install_with(pkg, game, &plan.profile_dir, false)?;
         if again.game_files != plan.game_files {
             return Err(stale("after-removing-the-previous-integration"));
         }
@@ -138,6 +140,7 @@ pub fn install(
             .collect(),
         proton: Vec::new(),
         vac_unchecked_accepted: !plan.vac_checked && accept.vac_unchecked,
+        loader_baseline,
     };
     ledger::write(&profile, &ledger)?;
 
@@ -148,7 +151,7 @@ pub fn install(
             Ok(ledger)
         }
         Err(e) => {
-            let _ = uninstall_ledger(&profile, &game_root, &ledger, Undo::Rollback);
+            let _ = uninstall_ledger(&profile, &game_root, &ledger, &[]);
             Err(e)
         }
     }
@@ -230,12 +233,15 @@ fn place(
 
 /// Undoes what a ledger records and removes the ledger. A game file is removed or restored only
 /// while it still has our digest; one that changed since is the game's, and it wins. An added
-/// Doorstop someone else's loader now runs through stays too, unless this is a rollback.
+/// Doorstop someone else's loader now runs through stays too ([`kept_for_their_loader`]), and so
+/// does the Proton override that loads it — unless `readd`, the plan of the integration replacing
+/// this one, adds it again right away. A rollback passes none: with the baseline the failed
+/// install recorded, only what arrived since keeps a proxy, and nothing did.
 pub(crate) fn uninstall_ledger(
     profile: &Path,
     game_root: &Path,
     ledger: &Ledger,
-    undo: Undo,
+    readd: &[GameFileAction],
 ) -> Result<UninstallReport> {
     // Before anything is removed: a Wine still running in a prefix we wrote to would write its
     // registry back over the restore, and the uninstall must not stop half done.
@@ -249,7 +255,15 @@ pub(crate) fn uninstall_ledger(
         kept: Vec::new(),
         profile_files_removed: 0,
         proton_restored: false,
+        proton_overrides_kept: Vec::new(),
     };
+    let readded = |rel: &str| {
+        readd
+            .iter()
+            .any(|a| a.action == GameAction::Add && a.rel_path.eq_ignore_ascii_case(rel))
+    };
+    // The DLLs (file stems) of proxies kept for another loader.
+    let mut kept_dlls: Vec<String> = Vec::new();
 
     for g in ledger.game_files.iter().rev() {
         let comps = checked_rel(&g.rel)?;
@@ -271,10 +285,13 @@ pub(crate) fn uninstall_ledger(
             GameAction::Add => match current {
                 FileState::File { sha256 }
                     if sha256 == g.sha256
-                        && undo == Undo::Uninstall
+                        && !readded(&g.rel)
                         && kept_for_their_loader(game_root, &g.rel, &target, ledger)? =>
                 {
                     report.kept.push(g.rel.clone());
+                    if let Some(stem) = Path::new(&g.rel).file_stem() {
+                        kept_dlls.push(stem.to_string_lossy().into_owned());
+                    }
                 }
                 FileState::File { sha256 } if sha256 == g.sha256 => {
                     fs::remove_file(&target).map_err(|e| LauncherError::io_at(&e, &target))?;
@@ -307,7 +324,18 @@ pub(crate) fn uninstall_ledger(
         }
     }
 
-    report.proton_restored = proton::restore_prefix(&ledger.proton)?;
+    // An override that loads a kept proxy stays: under Proton their loader needs it as ours did.
+    let (left, restore): (Vec<_>, Vec<_>) = ledger
+        .proton
+        .iter()
+        .cloned()
+        .partition(|r| kept_dlls.iter().any(|d| d.eq_ignore_ascii_case(&r.dll)));
+    report.proton_restored = proton::restore_prefix(&restore)?;
+    for r in left {
+        if !report.proton_overrides_kept.contains(&r.dll) {
+            report.proton_overrides_kept.push(r.dll);
+        }
+    }
 
     for f in &ledger.files {
         let comps = checked_rel(&f.rel)?;
@@ -416,7 +444,7 @@ pub fn uninstall(profile_dir: &Path, game: &GameTarget) -> Result<UninstallRepor
             Some(root) => root,
             None => game_root_for_uninstall(game)?,
         };
-        uninstall_ledger(&profile, &game_root, &ledger, Undo::Uninstall)?
+        uninstall_ledger(&profile, &game_root, &ledger, &[])?
     };
     let _ = fs::remove_file(profile.join(LOCK_FILE));
     Ok(report)

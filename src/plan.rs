@@ -4,6 +4,7 @@
 
 //! The install plan: the consent sheet, as data. Computing it changes nothing on disk.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,7 @@ use crate::doorstop;
 use crate::error::{LauncherError, Result, codes};
 use crate::game::{GameTarget, Platform};
 use crate::game::{several_apps, steam_appids_of_dir};
-use crate::ledger::{self, Ledger};
+use crate::ledger::{self, Ledger, LoaderBaseline};
 use crate::manifest::IntegrationInfo;
 use crate::package::{GiPackage, PackFile};
 use crate::paths::{
@@ -78,8 +79,8 @@ pub struct InstallPlan {
     pub profile_files: u32,
     pub profile_bytes: u64,
     pub game_files: Vec<GameFileAction>,
-    /// With placeholders still visible: the manifest's, then the Doorstop options every launch adds
-    /// so that a `doorstop_config.ini` that is not ours cannot change the session.
+    /// The manifest's, with placeholders still visible. (A launch adds Doorstop options of the
+    /// launcher's own, `doorstop::session_options`; they are not the integration's choice.)
     pub launch_args: Vec<String>,
     /// Written into the Proton prefix at launch (Proton only), every one: (dll, value), in the
     /// manifest's key order.
@@ -209,14 +210,11 @@ pub fn vac_verdict(
 }
 
 /// What the game file at `path` will be once the current install (if any) is uninstalled:
-/// uninstall removes our `add`s and restores our `replace`s, while they still have our digest —
-/// except an added Doorstop someone else's loader now runs through ([`kept_for_their_loader`]).
-fn state_before(
-    game_root: &Path,
-    path: &Path,
-    rel: &str,
-    existing: Option<&Ledger>,
-) -> Result<FileState> {
+/// uninstall removes our `add`s and restores our `replace`s, while they still have our digest. An
+/// added Doorstop someone else's loader now runs through is no exception here: replacing the
+/// integration removes it and places the new one's (`uninstall_ledger`'s `readd`), so it stays
+/// ours (`add`) for the uninstall that may one day find nobody else needs it.
+fn state_before(path: &Path, rel: &str, existing: Option<&Ledger>) -> Result<FileState> {
     let actual = file_state(path)?;
     if let (Some(l), FileState::File { sha256 }) = (existing, &actual)
         && let Some(e) = l
@@ -226,7 +224,6 @@ fn state_before(
         && *sha256 == e.sha256
     {
         match e.action {
-            GameAction::Add if kept_for_their_loader(game_root, rel, path, l)? => {}
             GameAction::Add => return Ok(FileState::Absent),
             GameAction::Replace => {
                 if let Some(b) = &e.backup {
@@ -258,14 +255,127 @@ fn shared_loader(
     Ok(doorstop::stands_in(&ours, &theirs, machine, args).then(|| sha256_hex(&theirs)))
 }
 
+/// The folder of a game file (`/`-separated, below the exe's folder) and the path of that folder.
+fn folder_of(game_root: &Path, rel: &str) -> Result<(Vec<String>, PathBuf)> {
+    let mut comps = checked_rel(rel)?;
+    comps.pop();
+    let path = comps.iter().fold(game_root.to_path_buf(), |p, c| p.join(c));
+    Ok((comps, path))
+}
+
+/// The `doorstop_config.ini` in `dir` (below `game_root`): its spelling on disk and its state.
+fn config_in(game_root: &Path, dir: &[String]) -> Result<(String, FileState)> {
+    let mut ini = dir.to_vec();
+    ini.push(doorstop::CONFIG_NAME.to_owned());
+    let ini = real_case(game_root, &ini)?;
+    let state = match existing_target(game_root, &ini)? {
+        Some(p) => file_state(&p)?,
+        None => FileState::Absent,
+    };
+    Ok((ini.join("/"), state))
+}
+
+/// Whether `<dir>BepInEx/core/<name>` (or something below it) is a game file of `ledger`.
+fn placed_by(ledger: &Ledger, dir: &[String], name: &str) -> bool {
+    let base: String = dir.iter().map(|c| format!("{c}/")).collect();
+    let r = format!("{base}BepInEx/core/{name}").to_ascii_lowercase();
+    ledger.game_files.iter().any(|g| {
+        let g = g.rel.to_ascii_lowercase();
+        g == r || g.starts_with(&format!("{r}/"))
+    })
+}
+
+/// The names in the `BepInEx/core` in `dir_path`, if there is one.
+fn bepinex_core(dir_path: &Path) -> Vec<String> {
+    find_any_case(dir_path, &["BepInEx", "core"])
+        .and_then(|core| std::fs::read_dir(core).ok())
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What sits beside each Doorstop proxy `planned` adds, before this integration first added it:
+/// the [`LoaderBaseline`] the ledger keeps. A proxy the replaced integration (`old`) had added
+/// already keeps that install's baseline, carried unchanged, so that what arrived since stays
+/// someone else's (a ledger from before 0.3.1 has none to carry). A proxy added now for the first
+/// time is measured now, before `old` is undone: its config as the plan leaves it, and the
+/// `BepInEx/core` names that are not `old`'s files.
+pub(crate) fn loader_baselines(
+    game_root: &Path,
+    planned: &[GameFileAction],
+    old: Option<&Ledger>,
+) -> Result<Vec<LoaderBaseline>> {
+    let mut out = Vec::new();
+    for a in planned
+        .iter()
+        .filter(|a| a.action == GameAction::Add && is_loader_proxy(&a.rel_path))
+    {
+        if let Some(old) = old
+            && old
+                .game_files
+                .iter()
+                .any(|g| g.rel.eq_ignore_ascii_case(&a.rel_path) && g.action == GameAction::Add)
+        {
+            out.extend(
+                old.loader_baseline
+                    .iter()
+                    .find(|b| b.proxy.eq_ignore_ascii_case(&a.rel_path))
+                    .cloned(),
+            );
+            continue;
+        }
+        let (dir, dir_path) = folder_of(game_root, &a.rel_path)?;
+        let (ini_rel, on_disk) = config_in(game_root, &dir)?;
+        let ini_sha256 = match planned
+            .iter()
+            .find(|p| p.rel_path.eq_ignore_ascii_case(&ini_rel))
+        {
+            Some(p) if p.action == GameAction::Add => None,
+            Some(p) if p.action == GameAction::ReuseKnownProxy => Some(p.sha256.clone()),
+            Some(p) => p.existing_sha256.clone(),
+            // Not this integration's file. One the replaced integration added goes with it.
+            None => match on_disk {
+                FileState::File { sha256 }
+                    if !old.is_some_and(|l| {
+                        l.game_files.iter().any(|g| {
+                            g.rel.eq_ignore_ascii_case(&ini_rel)
+                                && g.action == GameAction::Add
+                                && g.sha256 == sha256
+                        })
+                    }) =>
+                {
+                    Some(sha256)
+                }
+                _ => None,
+            },
+        };
+        let bepinex_core = bepinex_core(&dir_path)
+            .into_iter()
+            .filter(|n| !old.is_some_and(|l| placed_by(l, &dir, n)))
+            .collect();
+        out.push(LoaderBaseline {
+            proxy: a.rel_path.clone(),
+            ini_sha256,
+            bepinex_core,
+        });
+    }
+    Ok(out)
+}
+
 /// Whether the Doorstop proxy at `path` (`rel` below `game_root`), which `ledger`'s install added
 /// and which still has the bytes it placed, now also serves someone else's loader, so that
-/// removing it would silently switch their mods off — a person who installed BepInEx by hand
-/// after us gets the very same `winhttp.dll`, so its digest says nothing. What does: the
-/// `doorstop_config.ini` beside it is no longer the one the install left there (or is one the
-/// install never wrote), or a `BepInEx/core` beside it holds something the install did not put
-/// there. Uninstall then leaves the proxy (reported in `kept`), and a plan counts it as staying.
-/// A proxy that is not a Doorstop (ReShade's `dxgi.dll`) serves no BepInEx: never kept for one.
+/// removing it would silently switch their mods off — a person who installs BepInEx by hand after
+/// us gets the very same `winhttp.dll`, so its digest says nothing. What does is something beside
+/// it that was not there before Astra first added it ([`LoaderBaseline`]) and is not ours: a
+/// `doorstop_config.ini` other than the one there then and other than ours (or a link or folder
+/// in its place), or a name in `BepInEx/core` that was not there then and is no file of ours.
+/// Without a baseline (a ledger from before 0.3.1), every config the ledger does not hold and
+/// every `BepInEx/core` entry that is not ours counts. Uninstall then leaves the proxy (reported
+/// in `kept`). A proxy that is not a Doorstop (ReShade's `dxgi.dll`) serves no BepInEx: never kept.
 pub(crate) fn kept_for_their_loader(
     game_root: &Path,
     rel: &str,
@@ -277,66 +387,75 @@ pub(crate) fn kept_for_their_loader(
     {
         return Ok(false);
     }
-    let comps = checked_rel(rel)?;
-    let dir = &comps[..comps.len() - 1];
-    let recorded = |r: &str| {
-        ledger
-            .game_files
-            .iter()
-            .find(|g| g.rel.eq_ignore_ascii_case(r))
-    };
-
-    let mut ini = dir.to_vec();
-    ini.push(doorstop::CONFIG_NAME.to_owned());
-    let found = real_case(game_root, &ini).and_then(|ini| {
-        let state = match existing_target(game_root, &ini)? {
-            Some(p) => file_state(&p)?,
-            None => FileState::Absent,
-        };
-        Ok((ini.join("/"), state))
-    });
-    match found {
+    let baseline = ledger
+        .loader_baseline
+        .iter()
+        .find(|b| b.proxy.eq_ignore_ascii_case(rel));
+    let (dir, dir_path) = folder_of(game_root, rel)?;
+    match config_in(game_root, &dir) {
         Ok((_, FileState::Absent)) => {}
         Ok((ini_rel, FileState::File { sha256 })) => {
-            // The ledger holds every file's digest as the install left it (`keep-existing`: the
-            // one that was there).
-            if recorded(&ini_rel).is_none_or(|g| g.sha256 != sha256) {
+            // Ours: the digest the ledger holds for it. With a baseline only our own file counts
+            // (`keep-existing` there records a config that may have arrived since we came); the
+            // one from before us is the baseline's.
+            let ours = ledger.game_files.iter().any(|g| {
+                g.rel.eq_ignore_ascii_case(&ini_rel)
+                    && g.sha256 == sha256
+                    && (baseline.is_none()
+                        || matches!(g.action, GameAction::Add | GameAction::ReuseKnownProxy))
+            });
+            let before_us =
+                baseline.is_some_and(|b| b.ini_sha256.as_deref() == Some(sha256.as_str()));
+            if !ours && !before_us {
                 return Ok(true);
             }
         }
-        // A link or a folder in its place: not the file the install left.
+        // A link or a folder in its place: not a file anyone left there for us.
         Err(e) if e.code == codes::PATH_ESCAPES => return Ok(true),
         Err(e) => return Err(e),
     }
-
-    let dir_path = dir.iter().fold(game_root.to_path_buf(), |p, c| p.join(c));
-    let Some(core) = find_any_case(&dir_path, &["BepInEx", "core"]) else {
-        return Ok(false);
+    let before = |name: &str| {
+        baseline.is_some_and(|b| b.bepinex_core.iter().any(|n| n.eq_ignore_ascii_case(name)))
     };
-    let Ok(entries) = std::fs::read_dir(&core) else {
-        return Ok(false);
-    };
-    let base: String = dir.iter().map(|c| format!("{c}/")).collect();
-    let installed_by_us = |name: &str| {
-        let r = format!("{base}BepInEx/core/{name}").to_ascii_lowercase();
-        ledger.game_files.iter().any(|g| {
-            let g = g.rel.to_ascii_lowercase();
-            g == r || g.starts_with(&format!("{r}/"))
-        })
-    };
-    Ok(entries
-        .flatten()
-        .any(|e| !e.file_name().to_str().is_some_and(installed_by_us)))
+    Ok(bepinex_core(&dir_path)
+        .iter()
+        .any(|n| !placed_by(ledger, &dir, n) && !before(n)))
 }
 
-/// Refuses (`switched-off-loader`) adding `proxy`, a Doorstop (`ours`, its bytes), where a
-/// `doorstop_config.ini` this install does not write stays beside it and switches Doorstop on
-/// with a target that exists. That is a mod loader the person switched off by removing its
-/// proxy (BepInEx's `winhttp.dll` deleted or renamed, its folder and settings left): ours would
-/// read their file on every start Steam makes without our options, and load their mods again —
-/// old mods on an updated game can crash it. A target that is not there (r2modman's and
-/// Thunderstore Mod Manager's file names one in their own profile, passed on their command line)
-/// loads nothing, and is no reason to refuse.
+/// Another Doorstop in `dir_path`, under another proxy name than `ours` (their BepInEx as
+/// `version.dll` or `winmm.dll`), judged by its bytes; links followed, as Windows follows them.
+fn other_doorstop(dir_path: &Path, ours: &str) -> Option<String> {
+    doorstop::PROXY_NAMES
+        .iter()
+        .filter(|n| !n.eq_ignore_ascii_case(ours))
+        .find_map(|n| {
+            let p = find_any_case(dir_path, &[n])?;
+            let mut bytes = Vec::new();
+            std::fs::File::open(&p)
+                .ok()?
+                .take(doorstop::MAX_PROXY_BYTES)
+                .read_to_end(&mut bytes)
+                .ok()?;
+            doorstop::generation(&bytes)?;
+            p.file_name().map(|f| f.to_string_lossy().into_owned())
+        })
+}
+
+/// Refuses adding `proxy`, a Doorstop (`ours`, its bytes), beside a mod loader of the person's:
+///
+/// - `foreign-loader`, naming it, when another Doorstop sits in that folder under another name
+///   (BepInEx as `version.dll`, `winmm.dll`): it loads into every start too, and its config is
+///   theirs to keep switched on, so the `switched-off-loader` advice would be wrong;
+/// - `switched-off-loader` when a `doorstop_config.ini` this install does not write stays beside
+///   it and switches Doorstop on with a target that exists. That is a mod loader the person
+///   switched off by removing its proxy (BepInEx's `winhttp.dll` deleted or renamed, its folder
+///   and settings left): ours would read their file on every start Steam makes without our
+///   options, and load their mods again — old mods on an updated game can crash it. A target
+///   that is not there (r2modman's and Thunderstore Mod Manager's file names one in their own
+///   profile, passed on their command line) loads nothing, and is no reason to refuse.
+///
+/// A proxy already there is the replaced integration's own (`state_before` maps it to absent):
+/// the plan changes nothing about how the game starts, and is not refused for it.
 fn refuse_reviving_their_loader(
     game_root: &Path,
     proxy: &GameFileAction,
@@ -348,8 +467,18 @@ fn refuse_reviving_their_loader(
         return Ok(());
     };
     let comps = checked_rel(&proxy.rel_path)?;
-    let dir = &comps[..comps.len() - 1];
-    let mut ini = dir.to_vec();
+    if existing_target(game_root, &comps)?.is_some_and(|p| std::fs::symlink_metadata(p).is_ok()) {
+        return Ok(());
+    }
+    let (dir, dir_path) = folder_of(game_root, &proxy.rel_path)?;
+    let name = comps.last().map(String::as_str).unwrap_or_default();
+    if let Some(other) = other_doorstop(&dir_path, name) {
+        let base: String = dir.iter().map(|c| format!("{c}/")).collect();
+        return Err(
+            LauncherError::new(codes::FOREIGN_LOADER).with("file", format!("{base}{other}"))
+        );
+    }
+    let mut ini = dir.clone();
     ini.push(doorstop::CONFIG_NAME.to_owned());
     let ini_rel = ini.join("/");
     if planned.iter().any(|a| {
@@ -358,7 +487,6 @@ fn refuse_reviving_their_loader(
     }) {
         return Ok(());
     }
-    let dir_path = dir.iter().fold(game_root.to_path_buf(), |p, c| p.join(c));
     let Some(text) =
         find_any_case(&dir_path, &[doorstop::CONFIG_NAME]).and_then(|p| doorstop::read_config(&p))
     else {
@@ -420,6 +548,18 @@ pub fn plan_install(
     pkg: &GiPackage,
     game: &GameTarget,
     profile_root: &Path,
+) -> Result<InstallPlan> {
+    plan_install_with(pkg, game, profile_root, true)
+}
+
+/// [`plan_install`]; without `loader_checks`, the refusals about a mod loader of the person's
+/// beside the game are not made again — for install's look at the game folder once the
+/// integration it replaces is undone, which removes our own proxy for a moment.
+pub(crate) fn plan_install_with(
+    pkg: &GiPackage,
+    game: &GameTarget,
+    profile_root: &Path,
+    loader_checks: bool,
 ) -> Result<InstallPlan> {
     let m = pkg.manifest();
     if m.target.anti_cheat != "none" {
@@ -487,7 +627,7 @@ pub fn plan_install(
         let rel = real.join("/");
         let path = existing_target(&game_root, &real)?;
         let state = match &path {
-            Some(path) => state_before(&game_root, path, &rel, existing.as_ref())?,
+            Some(path) => state_before(path, &rel, existing.as_ref())?,
             None => FileState::Absent,
         };
         let name = f
@@ -525,10 +665,12 @@ pub fn plan_install(
 
     // A Doorstop we add reads the `doorstop_config.ini` beside it whenever the game starts
     // without our options. Only Windows and Proton load a proxy at all.
-    if matches!(
-        game.platform,
-        Platform::Windows | Platform::LinuxProton { .. }
-    ) {
+    if loader_checks
+        && matches!(
+            game.platform,
+            Platform::Windows | Platform::LinuxProton { .. }
+        )
+    {
         for (f, a) in pkg.game_files.iter().zip(&game_files) {
             if a.action == GameAction::Add && is_loader_proxy(&a.rel_path) {
                 let ours = pkg.read(&mut pkg.archive()?, f)?;
@@ -556,16 +698,7 @@ pub fn plan_install(
         profile_files: pkg.profile_files.len() as u32,
         profile_bytes: pkg.profile_files.iter().map(|f| f.size).sum(),
         game_files,
-        launch_args: m
-            .launch
-            .args
-            .iter()
-            .cloned()
-            .chain(doorstop::session_options(
-                &m.launch.args,
-                &game.exe_file_name()?,
-            ))
-            .collect(),
+        launch_args: m.launch.args.clone(),
         proton_overrides: match game.platform {
             Platform::LinuxProton { .. } => m.proton_overrides(),
             _ => Vec::new(),
