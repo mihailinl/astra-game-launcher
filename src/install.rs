@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::ctx::Ctx;
 use crate::digest::sha256_hex;
 use crate::error::{LauncherError, Result, codes};
+use crate::former;
 use crate::game::GameTarget;
 use crate::ledger::{
     self, Ledger, LedgerBackup, LedgerFile, LedgerGame, LedgerGameFile, LedgerSource, LedgerState,
@@ -27,8 +28,8 @@ use crate::paths::{
     plain, prepare_target, prune_empty_dirs, write_atomic,
 };
 use crate::plan::{
-    Accept, GameAction, GameFileAction, InstallPlan, kept_for_their_loader, loader_baselines,
-    plan_install, plan_install_with,
+    Accept, FormerFile, GameAction, GameFileAction, InstallPlan, kept_for_their_loader,
+    loader_baselines, plan_install, plan_install_with,
 };
 use crate::proton;
 use crate::running::refuse_if_running;
@@ -51,6 +52,16 @@ pub struct UninstallReport {
     /// needs them to be loaded at all. Absent before 0.3.1.
     #[serde(default)]
     pub proton_overrides_kept: Vec<String>,
+    /// Game files we had replaced whose backup is a file an older Astra left there (UE4SS's
+    /// v0.2.1 `dwmapi.dll`, the 0.2.x ReShade, `astra.addon64`: `crate::former`) and not the
+    /// player's: ours is removed (it is in `removed` too) and the backup is not put back. Absent
+    /// before 0.4.0.
+    #[serde(default)]
+    pub not_restored: Vec<String>,
+    /// Files an older Astra left beside the game's program that this ledger did not name, removed
+    /// by `uninstall`. Absent before 0.4.0.
+    #[serde(default)]
+    pub former_removed: Vec<String>,
 }
 
 fn stale(detail: &str) -> LauncherError {
@@ -99,6 +110,9 @@ pub fn install(
             return Err(stale("after-removing-the-previous-integration"));
         }
     }
+
+    // What an older Astra left beside the program, and no ledger names: gone before ours arrive.
+    remove_former(&game_root, &plan.former_files)?;
 
     let mut ledger = Ledger {
         // `ledger::write` stores the lowest schema that carries it; nothing is in `proton` yet.
@@ -186,7 +200,14 @@ fn place(
         let current = file_state(&target)?;
         match a.action {
             GameAction::Add => {
-                if current != FileState::Absent {
+                // Nothing there, or a file an older Astra left that ours takes the place of.
+                let former = a.existing_sha256.as_ref().is_some_and(|sha256| {
+                    current
+                        == FileState::File {
+                            sha256: sha256.clone(),
+                        }
+                });
+                if current != FileState::Absent && !former {
                     return Err(stale(&a.rel_path));
                 }
                 write_atomic(&target, &pkg.read(&mut ar, f)?)?;
@@ -258,6 +279,8 @@ pub(crate) fn uninstall_ledger(
         profile_files_removed: 0,
         proton_restored: false,
         proton_overrides_kept: Vec::new(),
+        not_restored: Vec::new(),
+        former_removed: Vec::new(),
     };
     let readded = |rel: &str| {
         readd
@@ -305,6 +328,16 @@ pub(crate) fn uninstall_ledger(
             GameAction::Replace => {
                 let backup = g.backup.as_ref();
                 match current {
+                    // What we replaced was a file an older Astra left (a launcher before 0.4.0
+                    // took it for the player's): never put back. Ours goes, as an `add` would.
+                    FileState::File { sha256 }
+                        if sha256 == g.sha256
+                            && backup.is_some_and(|b| backup_is_former(game_root, &g.rel, b)) =>
+                    {
+                        fs::remove_file(&target).map_err(|e| LauncherError::io_at(&e, &target))?;
+                        report.removed.push(g.rel.clone());
+                        report.not_restored.push(g.rel.clone());
+                    }
                     FileState::File { sha256 } if sha256 == g.sha256 => {
                         let restored = match backup {
                             Some(b) => restore_backup(profile, b, &target)?,
@@ -374,6 +407,56 @@ pub(crate) fn uninstall_ledger(
     remove_tree_no_follow(&profile.join(BACKUP_DIR))?;
     ledger::remove(profile)?;
     Ok(report)
+}
+
+/// Whether the backup `b` of the game file `rel` holds a file an older Astra left there rather than
+/// the player's (`crate::former`'s rules exactly, beside the file as the game folder is now).
+fn backup_is_former(game_root: &Path, rel: &str, b: &LedgerBackup) -> bool {
+    let Ok(mut comps) = checked_rel(rel) else {
+        return false;
+    };
+    let Some(name) = comps.pop() else {
+        return false;
+    };
+    let dir = comps.iter().fold(game_root.to_path_buf(), |p, c| p.join(c));
+    former::former_kind(&dir, &name, &b.sha256).is_some()
+}
+
+/// Removes, beside the game's program, what an older Astra left there and the plan lists — each
+/// hashed again right before, and removed only while it is exactly what the plan showed
+/// (`plan-stale` otherwise). Never backed up: Astra's own, never the player's.
+fn remove_former(game_root: &Path, former: &[FormerFile]) -> Result<()> {
+    for f in former {
+        match former::remove_exact(game_root, &f.rel_path, f.kind, &f.sha256) {
+            Ok(former::Removal::Removed | former::Removal::Absent) => {}
+            Ok(former::Removal::Changed) => return Err(stale(&f.rel_path)),
+            Err(e) => return Err(LauncherError::io_at(&e, &game_root.join(&f.rel_path))),
+        }
+    }
+    Ok(())
+}
+
+/// Removes what an older Astra left beside the game's program that `ledger` does not name (the
+/// ledger governs its own files), for an uninstall: each hashed again right before, and removed
+/// only while it is exactly what was judged. Best effort: the integration is already gone, and a
+/// file that cannot be removed is only not reported.
+fn sweep_former(game_root: &Path, ledger: &Ledger) -> Vec<String> {
+    let names = |rel: &str, name: &str| {
+        let (rel, name) = (rel.to_ascii_lowercase(), name.to_ascii_lowercase());
+        rel == name || rel.starts_with(&format!("{name}/"))
+    };
+    let mut removed = Vec::new();
+    for f in former::former_set(game_root) {
+        if ledger.game_files.iter().any(|g| names(&g.rel, &f.name)) {
+            continue;
+        }
+        if let Ok(former::Removal::Removed) =
+            former::remove_exact(game_root, &f.name, f.kind, &f.sha256)
+        {
+            removed.push(f.name);
+        }
+    }
+    removed
 }
 
 /// Copies the backup back over `target` when the backup still has its recorded digest.
@@ -456,7 +539,8 @@ pub fn uninstall(profile_dir: &Path, game: &GameTarget) -> Result<UninstallRepor
             Some(root) => root,
             None => game_root_for_uninstall(game)?,
         };
-        let report = uninstall_ledger(&profile, &game_root, &ledger, &[])?;
+        let mut report = uninstall_ledger(&profile, &game_root, &ledger, &[])?;
+        report.former_removed = sweep_former(&game_root, &ledger);
         // The player's answer to "play with your mods?" goes with the install, so a reinstall asks
         // again. An update keeps it (it never comes through here). Best effort: the integration is
         // gone already, and a choice left behind only means the next install does not ask.

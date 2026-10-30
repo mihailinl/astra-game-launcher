@@ -169,6 +169,49 @@ A Play with mods can also answer an existing code: `unknown-key` / `manifest-inv
 for a chain loader file that changed, `shared-loader-changed` for a proxy that cannot start the
 chain (Doorstop 3 with IL2CPP). The CLI's `mods` command lists the sources and remembers a choice.
 
+## What an older Astra left beside a game (0.4.0)
+
+The Unreal runner 0.2.x (astra-reshade v0.2.0 … v0.2.11) put files beside the game's program that
+a lost profile or a deleted ledger no longer names, and that a launcher before 0.4.0 took for the
+player's. Each of them is also, byte for byte, an upstream release a player may install, so they
+are recognised by exact rules only (`FormerKind`):
+
+1. `dwmapi.dll` with RE-UE4SS 3.0.1-1164's digest (`3f11fad9…e6cc`), only when neither
+   `UE4SS.dll` nor `ue4ss/UE4SS.dll` is beside it — the state in which every plain Steam start
+   fails with "Failed to load UE4SS.dll". With UE4SS beside it, it is the player's: replaced with
+   a backup and put back on uninstall, as always.
+2. `dxgi.dll` with ReShade 6.8.0 Addon's digest (`0cee63f9…`), only when an `astra.addon64`
+   beside it has the digest of one of the twelve releases' add-ons. Then that `dxgi.dll`, that
+   `astra.addon64` and the `astra-reshade/` folder beside them are one set, Astra's — except
+   `astra-reshade/AstraPreset.ini` (any letter case), where our add-on points ReShade's
+   `PresetPath` and ReShade saves the player's tuning: theirs, like `ReShade.ini`, so it stays and
+   keeps the folder. No other DLL name is ever ReShade here; a ReShade beside no add-on of ours
+   (or one we never shipped), or a `dxgi.dll` the player updated, is theirs.
+
+The digests' named source is `tests/fixtures/astra-reshade-unreal/`, every release's own
+`astra-gi.toml` verbatim from its GitHub release asset (`tools/fetch-astra-reshade-manifests.sh`);
+a unit test checks each constant against those files. A file the current ledger names is never
+classified: the ledger governs its own files.
+
+- **Install and update.** A game file the package places where one sits is an `add` over it
+  (`existing_sha256` = its digest): no backup, and an uninstall puts nothing back. The others are
+  listed in `InstallPlan::former_files` (warning `former-astra-files`) and removed by the install.
+- **Uninstall.** A `replace` whose backup is one of them (a ledger a launcher before 0.4.0 wrote)
+  removes ours and does not put the backup back (`UninstallReport::not_restored`); the ones beside
+  the exe the ledger does not name are removed too (`UninstallReport::former_removed`).
+- **Every removal** hashes the file (or the folder's whole tree) again right before it and removes
+  only what is exactly what was judged (`plan-stale` for an install, left alone by an uninstall);
+  nothing larger than 64 MiB is ever one of these.
+- **Known limit (order).** Whether a backup is put back is judged beside the file as the
+  uninstall finds it at that moment, so a ledger a launcher before 0.4.0 wrote that `replace`d
+  `dwmapi.dll` (backup: UE4SS's proxy) AND `add`ed `ue4ss/UE4SS.dll` itself gets an answer that
+  depends on the ledger's order (whether its own `UE4SS.dll` is gone yet). No released package
+  makes that ledger; it is named here, not fixed.
+- **A lost profile or ledger.** Play says `not-installed`. Installing again cleans the files above
+  as described; the Unity runner's own `winhttp.dll` and `doorstop_config.ini`, found with our
+  very bytes, are reused (`reuse-known-proxy`: never removed, as nothing can tell them from a
+  BepInEx's own). The mods choice went with the profile, so the next Play asks again.
+
 ## Which program is the game
 
 `detect_with(dir, hint)` (and `detect(dir)`, without a hint) decides by what sits beside a
@@ -382,7 +425,7 @@ algorithm) and bakes it in:
 
 ```
 astra-game-launcher --version
-# astra-game-launcher 0.3.2 (source tree sha256 <hex>)
+# astra-game-launcher 0.4.0 (source tree sha256 <hex>)
 ```
 
 Astra's own release notes / About screen show the same hash for the commit it pinned. A GitHub
@@ -392,7 +435,7 @@ a hash you compute yourself. Recompute it from a clone of a tag with one line (r
 and `sha256sum`; `scripts/tree-hash.sh` is this same command, runnable against any directory):
 
 ```bash
-V=0.3.2 REPO=https://github.com/mihailinl/astra-game-launcher
+V=0.4.0 REPO=https://github.com/mihailinl/astra-game-launcher
 rm -rf /tmp/astra-gl-verify && mkdir -p /tmp/astra-gl-verify && \
 git clone --quiet --depth 1 --branch "v$V" "$REPO" /tmp/astra-gl-verify/src && \
 cd /tmp/astra-gl-verify/src && git archive "v$V" | tar -x -C /tmp/astra-gl-verify && \

@@ -13,6 +13,7 @@ use crate::detect::{anti_cheat_scan, engine_of_exe};
 use crate::digest::sha256_hex;
 use crate::doorstop;
 use crate::error::{LauncherError, Result, codes};
+use crate::former::{self, FormerKind};
 use crate::game::{GameTarget, Platform};
 use crate::game::{several_apps, steam_appids_of_dir};
 use crate::ledger::{self, Ledger, LoaderBaseline};
@@ -68,8 +69,22 @@ pub struct GameFileAction {
     pub action: GameAction,
     /// The digest of the file we ship.
     pub sha256: String,
-    /// The digest of the file already there (`replace`, `keep-existing`, `share-loader`).
+    /// The digest of the file already there (`replace`, `keep-existing`, `share-loader`; `add`
+    /// over a file an older Astra left there, which is neither backed up nor ever put back).
     pub existing_sha256: Option<String>,
+}
+
+/// A file (or the `astra-reshade/` folder) an older Astra left beside the game's program that no
+/// ledger names (`crate::former`): the install removes it — without a backup, since it is Astra's
+/// own and never the player's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FormerFile {
+    /// Below the exe's folder.
+    pub rel_path: String,
+    /// The digest it has now (a folder's: of everything below it); the install hashes it again
+    /// right before removing it, and refuses with `plan-stale` when it changed since.
+    pub sha256: String,
+    pub kind: FormerKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,8 +107,16 @@ pub struct InstallPlan {
     pub proton_overrides: Vec<(String, String)>,
     /// The integration installed in this profile now; install replaces it.
     pub replaces: Option<IntegrationInfo>,
+    /// Files an older Astra left beside the game's program (Unreal runner 0.2.x: UE4SS's v0.2.1
+    /// `dwmapi.dll`, its ReShade with `astra.addon64` beside it, the add-on) that no ledger names
+    /// any more: the install removes them. One the package itself places is not here: its game
+    /// file is an `add` that takes its place (`existing_sha256` = the former file's digest), so an
+    /// uninstall puts nothing back. Absent in an older serialised plan: none.
+    #[serde(default)]
+    pub former_files: Vec<FormerFile>,
     /// Codes: "experimental", "not-reviewed", "replaces-integration", "no-license",
-    /// "vac-unchecked" (the same fact as `vac_checked == false`, for a sheet that lists codes).
+    /// "vac-unchecked" (the same fact as `vac_checked == false`, for a sheet that lists codes),
+    /// "former-astra-files" (`former_files` is not empty).
     pub warnings: Vec<String>,
     /// Steam's Valve Anti-Cheat flag was READ for this app and is clear. `false`: no TRUSTED Steam
     /// appid (the caller's, or the one the folder's appmanifest proves; never the integration
@@ -235,6 +258,15 @@ fn state_before(path: &Path, rel: &str, existing: Option<&Ledger>) -> Result<Fil
             GameAction::Add => return Ok(FileState::Absent),
             GameAction::Replace => {
                 if let Some(b) = &e.backup {
+                    // A backup an uninstall never puts back: a file an older Astra left there
+                    // (`crate::former`, its rules exactly). What the uninstall leaves is nothing.
+                    let name = rel.rsplit('/').next().unwrap_or(rel);
+                    if path
+                        .parent()
+                        .is_some_and(|d| former::former_kind(d, name, &b.sha256).is_some())
+                    {
+                        return Ok(FileState::Absent);
+                    }
                     return Ok(FileState::File {
                         sha256: b.sha256.clone(),
                     });
@@ -643,8 +675,25 @@ pub(crate) fn plan_install_with(
             .last()
             .map(|n| n.to_ascii_lowercase())
             .unwrap_or_default();
+        // A file an older Astra left there (`crate::former`, its rules exactly) and no ledger
+        // names: ours takes its place, as onto nothing. A file of the current ledger is the
+        // ledger's, never this.
+        let recorded = existing.as_ref().is_some_and(|l| {
+            l.game_files
+                .iter()
+                .any(|g| g.rel.eq_ignore_ascii_case(&rel))
+        });
+        let former = match (&state, &path) {
+            (FileState::File { sha256 }, Some(path)) if !recorded => {
+                let file = real.last().map(String::as_str).unwrap_or_default();
+                path.parent()
+                    .and_then(|d| former::former_kind(d, file, sha256))
+            }
+            _ => None,
+        };
         let (action, existing_sha256) = match state {
             FileState::Absent => (GameAction::Add, None),
+            FileState::File { sha256 } if former.is_some() => (GameAction::Add, Some(sha256)),
             FileState::File { sha256 } if sha256 == f.sha256 => (GameAction::ReuseKnownProxy, None),
             FileState::File { sha256 } if keep_if_present(&name) => {
                 (GameAction::KeepExisting, Some(sha256))
@@ -687,6 +736,28 @@ pub(crate) fn plan_install_with(
         }
     }
 
+    // What an older Astra left beside the program that neither this package places nor a ledger
+    // names: the install removes it.
+    // (The shaders' folder counts as named when anything is placed or recorded below it.)
+    let names = |rel: &str, name: &str| {
+        let (rel, name) = (rel.to_ascii_lowercase(), name.to_ascii_lowercase());
+        rel == name || rel.starts_with(&format!("{name}/"))
+    };
+    let former_files: Vec<FormerFile> = former::former_set(&game_root)
+        .into_iter()
+        .filter(|f| {
+            !game_files.iter().any(|g| names(&g.rel_path, &f.name))
+                && !existing
+                    .as_ref()
+                    .is_some_and(|l| l.game_files.iter().any(|g| names(&g.rel, &f.name)))
+        })
+        .map(|f| FormerFile {
+            rel_path: f.name,
+            sha256: f.sha256,
+            kind: f.kind,
+        })
+        .collect();
+
     let mut warnings = vec!["experimental".to_owned(), "not-reviewed".to_owned()];
     if existing.is_some() {
         warnings.push("replaces-integration".to_owned());
@@ -696,6 +767,9 @@ pub(crate) fn plan_install_with(
     }
     if !vac {
         warnings.push("vac-unchecked".to_owned());
+    }
+    if !former_files.is_empty() {
+        warnings.push("former-astra-files".to_owned());
     }
 
     Ok(InstallPlan {
@@ -712,6 +786,7 @@ pub(crate) fn plan_install_with(
             _ => Vec::new(),
         },
         replaces: existing.map(|l| l.integration),
+        former_files,
         warnings,
         vac_checked: vac,
     })

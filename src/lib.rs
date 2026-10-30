@@ -21,6 +21,7 @@ mod digest;
 mod doorstop;
 mod error;
 mod fetch;
+mod former;
 mod game;
 mod ini;
 mod install;
@@ -44,6 +45,7 @@ pub use error::{LauncherError, Result, codes};
 #[cfg(feature = "cli")]
 pub use fetch::UreqFetch;
 pub use fetch::{Fetch, MAX_DOWNLOAD_BYTES, fetch_verified};
+pub use former::FormerKind;
 pub use game::{GameTarget, Platform, proton_prefix_for, steam_appid_of_dir, steam_appids_of_dir};
 pub use install::{UninstallReport, install, installed, uninstall};
 pub use launch::{
@@ -66,7 +68,8 @@ pub use mods::{
 };
 pub use package::{GiPackage, Limits, PackageSummary, SummaryConfigWrite, SummaryGameFile};
 pub use plan::{
-    Accept, GameAction, GameFileAction, InstallPlan, VALVE_ANTI_CHEAT, plan_install, vac_verdict,
+    Accept, FormerFile, GameAction, GameFileAction, InstallPlan, VALVE_ANTI_CHEAT, plan_install,
+    vac_verdict,
 };
 pub use running::is_running;
 pub use steam_appinfo::{

@@ -349,6 +349,18 @@ fn plan_text(p: &InstallPlan) -> String {
             g.sha256
         );
     }
+    for f in &p.former_files {
+        let _ = writeln!(
+            s,
+            "  {:<18} {}  (left by an older Astra: {})",
+            "remove",
+            f.rel_path,
+            serde_json::to_value(f.kind)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_default()
+        );
+    }
     let _ = writeln!(
         s,
         "launch args: {}",
