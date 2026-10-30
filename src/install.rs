@@ -456,7 +456,12 @@ pub fn uninstall(profile_dir: &Path, game: &GameTarget) -> Result<UninstallRepor
             Some(root) => root,
             None => game_root_for_uninstall(game)?,
         };
-        uninstall_ledger(&profile, &game_root, &ledger, &[])?
+        let report = uninstall_ledger(&profile, &game_root, &ledger, &[])?;
+        // The player's answer to "play with your mods?" goes with the install, so a reinstall asks
+        // again. An update keeps it (it never comes through here). Best effort: the integration is
+        // gone already, and a choice left behind only means the next install does not ask.
+        let _ = crate::mods::remove_choice(&profile);
+        report
     };
     let _ = fs::remove_file(profile.join(LOCK_FILE));
     Ok(report)

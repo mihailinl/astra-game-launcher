@@ -1,0 +1,868 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//! Finding the player's own mods (`discover_mods`) and remembering their answer
+//! (`mods-choice.json`). Every mod manager folder here is a fixture below a temporary "home": no
+//! test reads or writes a real one.
+
+mod common;
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+use astra_game_launcher::{
+    Choice, ChoiceKind, ChoiceSource, LoaderKind, MODS_CHOICE_FILE_NAME, Manifest, ModManager,
+    ModSource, ModsEnv, ModsLoader, Platform, Unplayable, codes, default_mods_source,
+    discover_mods_in, mods_choice, set_mods_choice, uninstall,
+};
+use common::*;
+
+const GAME: &str = "Some Game";
+/// Not in Thunderstore's table: found only by the fallbacks.
+const NEW_APPID: u32 = 4_000_100;
+/// Lethal Company, in the table: r2modman's `LethalCompany`, Gale's `lethal-company`.
+const LETHAL: u32 = 1_966_720;
+
+fn proxy() -> Vec<u8> {
+    pe_with_options(X64, DOORSTOP_V4, b"4.5.0 ours")
+}
+
+/// A game in `<tmp>/common/<GAME>` (so its Steam install folder's name is `GAME`), a profile, and
+/// a home whose mod managers are fixtures.
+struct World {
+    tmp: Tmp,
+    appid: u32,
+    platform: Platform,
+}
+
+impl World {
+    fn new(appid: u32) -> World {
+        let tmp = Tmp::new("mods");
+        let w = World {
+            tmp,
+            appid,
+            platform: Platform::Windows,
+        };
+        unity_game(&w.game_dir(), GAME);
+        write(
+            &w.game_dir().join(format!("{GAME}.exe")),
+            &pe_with_options(X64, &[], b"game"),
+        );
+        fs::create_dir_all(w.home()).unwrap();
+        w
+    }
+
+    fn game_dir(&self) -> PathBuf {
+        self.tmp.join("common").join(GAME)
+    }
+
+    fn home(&self) -> PathBuf {
+        self.tmp.join("home")
+    }
+
+    fn profile(&self) -> PathBuf {
+        self.tmp.join("profiles").join("p")
+    }
+
+    fn env(&self) -> ModsEnv {
+        ModsEnv::linux(Some(&self.home()), None, None)
+    }
+
+    fn target(&self) -> astra_game_launcher::GameTarget {
+        target(
+            &self.game_dir(),
+            &format!("{GAME}.exe"),
+            Some(self.appid),
+            self.platform.clone(),
+        )
+    }
+
+    /// The runner installed, with `decl` as its `[integration.mods]` (or none).
+    fn install(&self, decl: &str) {
+        plan_and_install(
+            &mods_runner(&proxy(), decl),
+            &self.target(),
+            &self.profile(),
+        );
+    }
+
+    /// `<data>/com.kesomannen.gale/<folder>/profiles/<profile>`.
+    fn gale(&self, folder: &str, profile: &str) -> PathBuf {
+        self.home()
+            .join(".local/share/com.kesomannen.gale")
+            .join(folder)
+            .join("profiles")
+            .join(profile)
+    }
+
+    /// `<config>/r2modmanPlus-local/<folder>/profiles/<profile>`.
+    fn r2(&self, folder: &str, profile: &str) -> PathBuf {
+        self.home()
+            .join(".config/r2modmanPlus-local")
+            .join(folder)
+            .join("profiles")
+            .join(profile)
+    }
+
+    fn discover(&self) -> Vec<ModSource> {
+        discover_mods_in(&self.target(), &self.profile(), &self.env())
+    }
+}
+
+/// A BepInEx 5.4.23.5 profile at `root` holding one mod.
+fn profile_with_a_mod(root: &Path) {
+    bepinex5_at(root, "5.4.23.5+57f1fb8");
+    plugin_at(root, "Author-Mod/Mod.dll");
+}
+
+/// BepInEx's log at `root`, its first lines `lines`, last written `ago` before now.
+fn log(root: &Path, lines: &[&str], ago: Duration) {
+    let p = root.join("BepInEx/LogOutput.log");
+    write(&p, lines.join("\n").as_bytes());
+    let f = fs::File::options().write(true).open(&p).unwrap();
+    f.set_modified(SystemTime::now() - ago).unwrap();
+}
+
+fn start_line(program: &str) -> String {
+    format!("[Message:   BepInEx] BepInEx 5.4.23.5 - {program} (10/30/2026 1:23:45 PM)")
+}
+
+fn roots(found: &[ModSource]) -> Vec<(ModManager, PathBuf)> {
+    found
+        .iter()
+        .map(|s| (s.manager, fs::canonicalize(&s.root).unwrap()))
+        .collect()
+}
+
+fn real(p: &Path) -> PathBuf {
+    fs::canonicalize(p).unwrap()
+}
+
+// ---- where the mod managers keep their data ----
+
+#[test]
+fn the_mod_managers_data_folders_per_os() {
+    let t = Tmp::new("env");
+    let appdata = t.join("AppData/Roaming");
+    for d in [
+        "r2modmanPlus-local",
+        "Thunderstore Mod Manager/DataFolder",
+        "com.kesomannen.gale",
+    ] {
+        fs::create_dir_all(appdata.join(d)).unwrap();
+    }
+    assert_eq!(
+        ModsEnv::windows(Some(appdata.clone())).manager_roots(),
+        vec![
+            (ModManager::R2modman, appdata.join("r2modmanPlus-local")),
+            (
+                ModManager::Thunderstore,
+                appdata.join("Thunderstore Mod Manager/DataFolder")
+            ),
+            (ModManager::Gale, appdata.join("com.kesomannen.gale")),
+        ]
+    );
+
+    // Linux: the XDG defaults below home, and every Flatpak's own config and data.
+    let home = t.join("home");
+    for d in [
+        ".config/r2modmanPlus-local",
+        ".local/share/com.kesomannen.gale",
+        ".var/app/com.github.ebkr.r2modmanPlus/config/r2modmanPlus-local",
+        ".var/app/com.kesomannen.gale/data/com.kesomannen.gale",
+        ".var/app/org.other.App/config",
+    ] {
+        fs::create_dir_all(home.join(d)).unwrap();
+    }
+    let env = ModsEnv::linux(Some(&home), None, None);
+    assert_eq!(env.config_home, Some(home.join(".config")));
+    assert_eq!(env.data_home, Some(home.join(".local/share")));
+    assert_eq!(
+        env.manager_roots(),
+        vec![
+            (
+                ModManager::R2modman,
+                home.join(".config/r2modmanPlus-local")
+            ),
+            (
+                ModManager::Gale,
+                home.join(".local/share/com.kesomannen.gale")
+            ),
+            (
+                ModManager::R2modman,
+                home.join(".var/app/com.github.ebkr.r2modmanPlus/config/r2modmanPlus-local")
+            ),
+            (
+                ModManager::Gale,
+                home.join(".var/app/com.kesomannen.gale/data/com.kesomannen.gale")
+            ),
+        ]
+    );
+
+    // XDG folders that are set win; a relative one is invalid and ignored.
+    let xdg_config = t.join("xdg-config");
+    fs::create_dir_all(xdg_config.join("r2modmanPlus-local")).unwrap();
+    let env = ModsEnv::linux(Some(&home), Some(&xdg_config), Some(Path::new("relative")));
+    assert_eq!(env.config_home, Some(xdg_config.clone()));
+    assert_eq!(env.data_home, Some(home.join(".local/share")));
+    assert_eq!(
+        env.manager_roots()[0],
+        (ModManager::R2modman, xdg_config.join("r2modmanPlus-local"))
+    );
+    // No home at all: nothing but what is set.
+    assert_eq!(ModsEnv::linux(None, None, None).manager_roots(), vec![]);
+}
+
+// ---- which folder is this game's ----
+
+#[test]
+fn thunderstores_table_names_each_managers_folder_for_the_game() {
+    let w = World::new(LETHAL);
+    profile_with_a_mod(&w.r2("LethalCompany", "Default"));
+    profile_with_a_mod(&w.gale("lethal-company", "Main"));
+    // Each manager's name for the game in the other's folder, another game's folder, a folder
+    // named after the install folder, and a log naming the program: the table decides, alone.
+    profile_with_a_mod(&w.gale("LethalCompany", "R2sName"));
+    profile_with_a_mod(&w.r2("lethal-company", "GalesName"));
+    profile_with_a_mod(&w.gale("valheim", "Default"));
+    profile_with_a_mod(&w.r2(GAME, "ByName"));
+    let logged = w.gale("renamed", "Logged");
+    profile_with_a_mod(&logged);
+    log(&logged, &[&start_line(GAME)], Duration::from_secs(60));
+    let found = w.discover();
+    assert_eq!(
+        roots(&found),
+        vec![
+            (
+                ModManager::R2modman,
+                real(&w.r2("LethalCompany", "Default"))
+            ),
+            (ModManager::Gale, real(&w.gale("lethal-company", "Main"))),
+        ],
+        "{found:#?}"
+    );
+    // Nothing installed in the profile: shown, never offered.
+    assert!(found.iter().all(|s| s.playable
+        == Err(Unplayable::NotSupported {
+            reason: "not-installed".into()
+        })));
+}
+
+#[test]
+fn a_game_newer_than_the_table_is_found_by_its_install_folder_or_its_log() {
+    let w = World::new(NEW_APPID);
+    // The Steam install folder's name.
+    profile_with_a_mod(&w.gale(GAME, "ByFolder"));
+    // A log naming the program on its second line (Unity 6 writes an error first).
+    let by_log = w.r2("SomethingElse", "ByLog");
+    profile_with_a_mod(&by_log);
+    log(
+        &by_log,
+        &[
+            "[Error  : Unity Log] Unable to start Unity log writer",
+            &start_line(GAME),
+        ],
+        Duration::from_secs(60),
+    );
+    // Another program, and this one named only past the first five lines: never a guess.
+    let other = w.r2("SomethingElse", "Other");
+    profile_with_a_mod(&other);
+    log(
+        &other,
+        &[&start_line("Other Game")],
+        Duration::from_secs(60),
+    );
+    let late = w.gale("late", "Late");
+    profile_with_a_mod(&late);
+    let mut lines = vec!["x"; 5];
+    let named = start_line(GAME);
+    lines.push(&named);
+    log(&late, &lines, Duration::from_secs(60));
+
+    let mut found = roots(&w.discover());
+    found.sort();
+    let mut want = vec![
+        (ModManager::R2modman, real(&by_log)),
+        (ModManager::Gale, real(&w.gale(GAME, "ByFolder"))),
+    ];
+    want.sort();
+    assert_eq!(found, want);
+}
+
+// ---- what counts ----
+
+#[test]
+fn only_what_their_bepinex_will_load_counts_as_a_mod() {
+    let w = World::new(NEW_APPID);
+    let p = w.gale(GAME, "Counted");
+    bepinex5_at(&p, "5.4.23.5");
+    plugin_at(&p, "A-Mod/A.dll");
+    plugin_at(&p, "B-Nested/plugins/deep/B.DLL");
+    plugin_at(&p, "C-Disabled/C.dll.old");
+    plugin_at(&p, "D-NoDll/readme.txt");
+    plugin_at(&p, "Loose.dll");
+    plugin_at(&p, "LooseDisabled.dll.old");
+    // Astra's own items never count.
+    plugin_at(&p, "Astra/Astra.Bridge.dll");
+    write(&p.join("BepInEx/plugins/Astra/astra-item.json"), b"{}");
+    write(&p.join("BepInEx/patchers/P-Patcher/P.dll"), b"MZ");
+
+    // A profile with Astra alone, one with no preloader, one with only disabled mods: none.
+    let astra_only = w.gale(GAME, "AstraOnly");
+    bepinex5_at(&astra_only, "5.4.23.5");
+    plugin_at(&astra_only, "Astra/Astra.dll");
+    write(
+        &astra_only.join("BepInEx/plugins/Astra/astra-item.json"),
+        b"{}",
+    );
+    let no_core = w.gale(GAME, "NoCore");
+    plugin_at(&no_core, "A-Mod/A.dll");
+    let disabled = w.gale(GAME, "Disabled");
+    bepinex5_at(&disabled, "5.4.23.5");
+    plugin_at(&disabled, "A-Mod/A.dll.old");
+
+    let found = w.discover();
+    assert_eq!(roots(&found), vec![(ModManager::Gale, real(&p))]);
+    assert_eq!(found[0].mods, 4, "A, B, Loose, the patcher");
+    assert_eq!(found[0].profile, "Counted");
+    assert_eq!(
+        found[0].loader.preloader.as_deref(),
+        Some("BepInEx.Preloader.dll")
+    );
+}
+
+#[test]
+fn a_bepinex_in_the_game_folder_is_the_manual_source_and_melonloader_is_shown_not_offered() {
+    let w = World::new(NEW_APPID);
+    w.install(MODS_DECL);
+    let game = w.game_dir();
+    bepinex5_at(&game, "5.4.23.5");
+    plugin_at(&game, "Their-Mod/Their.dll");
+    // MelonLoader with its proxy: it loads into every start.
+    fs::create_dir_all(game.join("MelonLoader")).unwrap();
+    write(&game.join("version.dll"), b"MZ melon proxy");
+    // A mod manager's MelonLoader profile.
+    let melon = w.r2(GAME, "Melon");
+    fs::create_dir_all(melon.join("MelonLoader")).unwrap();
+    write(&melon.join("Mods/Melon.dll"), b"MZ");
+
+    let found = w.discover();
+    let game_root = real(&game);
+    let manual: Vec<&ModSource> = found
+        .iter()
+        .filter(|s| s.manager == ModManager::Manual)
+        .collect();
+    assert_eq!(manual.len(), 2, "{found:#?}");
+    let bep = manual
+        .iter()
+        .find(|s| s.loader.kind == LoaderKind::Bepinex5)
+        .unwrap();
+    assert_eq!(
+        (real(&bep.root), bep.profile.as_str(), bep.mods),
+        (game_root.clone(), "", 1)
+    );
+    assert_eq!(bep.playable, Ok(()));
+    let ml = manual
+        .iter()
+        .find(|s| s.loader.kind == LoaderKind::MelonLoader)
+        .unwrap();
+    assert_eq!(ml.playable, Err(Unplayable::MelonLoader));
+    let profile = found
+        .iter()
+        .find(|s| s.manager == ModManager::R2modman)
+        .unwrap();
+    assert_eq!(
+        (profile.loader.kind, profile.mods),
+        (LoaderKind::MelonLoader, 1)
+    );
+    assert_eq!(profile.playable, Err(Unplayable::MelonLoader));
+    assert_eq!(
+        default_mods_source(&found).map(|s| s.manager),
+        Some(ModManager::Manual)
+    );
+
+    // MelonLoader's folder without its proxy loads nothing.
+    fs::remove_file(game.join("version.dll")).unwrap();
+    assert!(
+        !w.discover()
+            .iter()
+            .any(|s| s.manager == ModManager::Manual && s.loader.kind == LoaderKind::MelonLoader)
+    );
+}
+
+// ---- the default pick ----
+
+#[test]
+fn the_most_recently_played_source_is_offered_first_ties_by_name() {
+    let w = World::new(NEW_APPID);
+    w.install(MODS_DECL);
+    let old = w.gale(GAME, "Old");
+    let beta = w.gale(GAME, "Beta");
+    let alpha = w.r2(GAME, "Alpha");
+    let never = w.gale(GAME, "Never");
+    let newest_unplayable = w.gale(GAME, "Unplayable");
+    for p in [&old, &beta, &alpha, &never] {
+        profile_with_a_mod(p);
+    }
+    bepinex5_at(&newest_unplayable, "5.3.1.0");
+    plugin_at(&newest_unplayable, "M/M.dll");
+    log(&old, &[], Duration::from_secs(3600));
+    // Beta and Alpha were played at the very same moment.
+    let at = SystemTime::now() - Duration::from_secs(60);
+    for p in [&beta, &alpha] {
+        log(p, &[], Duration::ZERO);
+        fs::File::options()
+            .write(true)
+            .open(p.join("BepInEx/LogOutput.log"))
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    }
+    log(&newest_unplayable, &[], Duration::from_secs(1));
+
+    let found = w.discover();
+    let names: Vec<&str> = found.iter().map(|s| s.profile.as_str()).collect();
+    assert_eq!(names, ["Unplayable", "Alpha", "Beta", "Old", "Never"]);
+    assert_eq!(found[4].last_played, None);
+    assert_eq!(
+        found[0].playable,
+        Err(Unplayable::LoaderUnsupported {
+            have: "5.3.1.0".into(),
+            need: "5.4".into()
+        })
+    );
+    assert_eq!(default_mods_source(&found).unwrap().profile, "Alpha");
+}
+
+// ---- their BepInEx's version, from its version resource ----
+
+#[test]
+fn their_bepinex_is_judged_by_its_version_resource() {
+    let w = World::new(NEW_APPID);
+    w.install(MODS_DECL);
+    let cases = [
+        (
+            "Valheim",
+            "5.4.23.6+b89fcc8ecbec7e07cd37b67315b932506084e8b4",
+            Ok(()),
+        ),
+        ("Ror2", "5.4.21.0", Ok(())),
+        (
+            "Subnautica",
+            "5.3.0.0",
+            Err(Unplayable::LoaderUnsupported {
+                have: "5.3.0.0".into(),
+                need: "5.4".into(),
+            }),
+        ),
+    ];
+    for (name, version, _) in &cases {
+        let p = w.gale(GAME, name);
+        bepinex5_at(&p, version);
+        plugin_at(&p, "M/M.dll");
+    }
+    let found = w.discover();
+    for (name, version, playable) in cases {
+        let s = found.iter().find(|s| s.profile == name).unwrap();
+        assert_eq!(s.loader.version.as_deref(), Some(version), "{name}");
+        assert_eq!(s.playable, playable, "{name}");
+    }
+}
+
+#[test]
+fn an_il2cpp_integration_needs_their_exact_bleeding_edge_build() {
+    let w = World::new(NEW_APPID);
+    w.install(&MODS_DECL.replace(
+        "loader = \"bepinex5\"",
+        "loader = \"bepinex6-il2cpp\"\nbepinex_build = 788",
+    ));
+    let be788 = w.gale(GAME, "Be788");
+    bepinex6_il2cpp_at(
+        &be788,
+        "6.0.0-be.788+5b766a3b7f6c164d4798924a93f3acf4db769d06",
+    );
+    // V Rising's pack (1.733.2): a dev build, whose version names no build number at all.
+    let dev733 = w.gale(GAME, "Dev733");
+    bepinex6_il2cpp_at(
+        &dev733,
+        "6.0.0-dev+3a12d1810bf4dd5ca1635352ccf5bff5d95f987f",
+    );
+    // A BepInEx 5 for this IL2CPP integration.
+    let be5 = w.gale(GAME, "Be5");
+    bepinex5_at(&be5, "5.4.23.5");
+    for p in [&be788, &dev733, &be5] {
+        plugin_at(p, "M/M.dll");
+    }
+    let found = w.discover();
+    let get = |n: &str| found.iter().find(|s| s.profile == n).unwrap();
+    assert_eq!(get("Be788").loader.kind, LoaderKind::Bepinex6Il2cpp);
+    assert_eq!(get("Be788").playable, Ok(()));
+    assert_eq!(
+        get("Dev733").playable,
+        Err(Unplayable::LoaderUnsupported {
+            have: "6.0.0-dev".into(),
+            need: "6.0.0-be.788".into()
+        })
+    );
+    assert_eq!(
+        get("Be5").playable,
+        Err(Unplayable::LoaderUnsupported {
+            have: "5.4.23.5".into(),
+            need: "6.0.0-be.788".into()
+        })
+    );
+}
+
+#[test]
+fn an_integration_that_cannot_play_with_mods_says_why() {
+    let reason = |w: &World| match &w.discover()[0].playable {
+        Err(Unplayable::NotSupported { reason }) => reason.clone(),
+        other => panic!("{other:?}"),
+    };
+    let w = World::new(NEW_APPID);
+    profile_with_a_mod(&w.gale(GAME, "P"));
+    assert_eq!(reason(&w), "not-installed");
+    // No table at all (an IL2CPP runner until it is proven): listed, "only without mods for now".
+    w.install("");
+    let found = w.discover();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].playable, Err(Unplayable::IntegrationWithoutMods));
+    assert_eq!(default_mods_source(&found), None);
+    // A table this launcher cannot use is not a reason to refuse the install.
+    w.install(&format!("{MODS_DECL}future_key = 1\n"));
+    assert_eq!(reason(&w), codes::UNKNOWN_KEY);
+    w.install(&MODS_DECL.replace("bepinex5", "bepinex7"));
+    assert_eq!(reason(&w), codes::MANIFEST_INVALID);
+
+    let mut native = World::new(NEW_APPID);
+    native.platform = Platform::LinuxNative;
+    profile_with_a_mod(&native.gale(GAME, "P"));
+    native.install(MODS_DECL);
+    assert_eq!(reason(&native), "platform");
+}
+
+// ---- folders the player added ----
+
+#[test]
+fn folders_the_player_added_are_looked_in_too() {
+    let w = World::new(NEW_APPID);
+    w.install(MODS_DECL);
+    // A custom r2modman data folder (its setting lives in its database: added by hand).
+    let custom = w.tmp.join("D/r2modmanPlus-local");
+    profile_with_a_mod(&custom.join(GAME).join("profiles/Custom"));
+    // A Gale profile itself, and a folder of profiles somewhere else.
+    let gale_profile = w
+        .tmp
+        .join("E/com.kesomannen.gale/some-game/profiles/Direct");
+    profile_with_a_mod(&gale_profile);
+    let folder = w.tmp.join("F/Peak mods");
+    profile_with_a_mod(&folder.join("profiles/Mine"));
+    set_mods_choice(
+        &w.profile(),
+        Choice {
+            choice: ChoiceKind::Without,
+            source: None,
+            added_roots: vec![custom.clone(), gale_profile.clone(), folder.clone()],
+        },
+    )
+    .unwrap();
+    let mut found = roots(&w.discover());
+    found.sort();
+    let mut want = vec![
+        (
+            ModManager::R2modman,
+            real(&custom.join(GAME).join("profiles/Custom")),
+        ),
+        (ModManager::Gale, real(&gale_profile)),
+        (ModManager::Folder, real(&folder.join("profiles/Mine"))),
+    ];
+    want.sort();
+    assert_eq!(found, want);
+}
+
+// ---- discovery writes nothing ----
+
+#[test]
+fn discovery_writes_nothing_anywhere() {
+    let w = World::new(NEW_APPID);
+    w.install(MODS_DECL);
+    profile_with_a_mod(&w.gale(GAME, "Main"));
+    log(
+        &w.gale(GAME, "Main"),
+        &[&start_line(GAME)],
+        Duration::from_secs(5),
+    );
+    bepinex5_at(&w.game_dir(), "5.4.23.5");
+    plugin_at(&w.game_dir(), "Their/Their.dll");
+    let before = snapshot(w.tmp.path());
+    let found = w.discover();
+    assert_eq!(found.len(), 2);
+    assert_eq!(snapshot(w.tmp.path()), before);
+}
+
+// ---- the remembered choice ----
+
+#[test]
+fn the_choice_round_trips_in_its_documented_shape() {
+    let w = World::new(NEW_APPID);
+    w.install(MODS_DECL);
+    assert_eq!(mods_choice(&w.profile()).unwrap(), None);
+    assert_eq!(mods_choice(&w.tmp.join("no-such-profile")).unwrap(), None);
+    let root = w.gale(GAME, "Default");
+    let choice = Choice {
+        choice: ChoiceKind::With,
+        source: Some(ChoiceSource {
+            manager: ModManager::Gale,
+            profile: "Default".into(),
+            root: root.clone(),
+        }),
+        added_roots: vec![w.tmp.join("D")],
+    };
+    set_mods_choice(&w.profile(), choice.clone()).unwrap();
+    assert_eq!(mods_choice(&w.profile()).unwrap(), Some(choice));
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(w.profile().join(MODS_CHOICE_FILE_NAME)).unwrap())
+            .unwrap();
+    assert_eq!(
+        on_disk,
+        serde_json::json!({
+            "schema": 1,
+            "choice": "with",
+            "source": {"manager": "gale", "profile": "Default", "root": root},
+            "added_roots": [w.tmp.join("D")],
+        })
+    );
+
+    // "without" needs no source; "with" does; every path is absolute.
+    let without = Choice {
+        choice: ChoiceKind::Without,
+        source: None,
+        added_roots: vec![],
+    };
+    set_mods_choice(&w.profile(), without.clone()).unwrap();
+    assert_eq!(mods_choice(&w.profile()).unwrap(), Some(without));
+    let no_source = Choice {
+        choice: ChoiceKind::With,
+        source: None,
+        added_roots: vec![],
+    };
+    assert_eq!(
+        set_mods_choice(&w.profile(), no_source).unwrap_err().code,
+        codes::IO
+    );
+    let relative = Choice {
+        choice: ChoiceKind::Without,
+        source: None,
+        added_roots: vec![PathBuf::from("relative/x")],
+    };
+    assert_eq!(
+        set_mods_choice(&w.profile(), relative).unwrap_err().code,
+        codes::IO
+    );
+
+    // A newer schema is said as such.
+    fs::write(
+        w.profile().join(MODS_CHOICE_FILE_NAME),
+        br#"{"schema":2,"choice":"maybe"}"#,
+    )
+    .unwrap();
+    let e = mods_choice(&w.profile()).unwrap_err();
+    assert_eq!(
+        (e.code, e.param("file")),
+        (codes::SCHEMA_TOO_NEW, Some(MODS_CHOICE_FILE_NAME))
+    );
+}
+
+#[test]
+fn an_update_keeps_the_choice_and_uninstall_takes_it_away() {
+    let w = World::new(NEW_APPID);
+    w.install(MODS_DECL);
+    let choice = Choice {
+        choice: ChoiceKind::Without,
+        source: None,
+        added_roots: vec![],
+    };
+    set_mods_choice(&w.profile(), choice.clone()).unwrap();
+    // Installing again (an update) is not a reason to ask again.
+    w.install(MODS_DECL);
+    assert_eq!(mods_choice(&w.profile()).unwrap(), Some(choice));
+    uninstall(&w.profile(), &w.target()).unwrap();
+    assert!(!w.profile().join(MODS_CHOICE_FILE_NAME).exists());
+}
+
+#[test]
+fn no_manifest_file_may_be_named_like_the_choice() {
+    let m =
+        runner_manifest("\n[[files]]\nfrom = \"x.json\"\nto = \"${profile}/MODS-CHOICE.json\"\n");
+    let e = open(&zip(&[
+        E::File("astra-gi.toml", m.as_bytes()),
+        E::File("winhttp.dll", WINHTTP),
+        E::File("doorstop_config.ini", DOORSTOP_INI),
+        E::File("x.json", b"{}"),
+    ]))
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.param("reason")),
+        (codes::PATH_ESCAPES, Some("reserved"))
+    );
+}
+
+// ---- the manifest's table ----
+
+#[test]
+fn integration_mods_is_read_apart_and_never_refuses_the_manifest() {
+    let parse = |extra: &str| Manifest::parse(&runner_manifest(extra)).unwrap();
+    assert!(parse("").mods().is_none());
+    let m = parse(&format!("\n{MODS_DECL}"));
+    let d = m.mods().unwrap().unwrap();
+    assert_eq!(d.loader, ModsLoader::Bepinex5);
+    assert_eq!(d.chain, "${profile}/chain/Astra.Chain.dll");
+    assert_eq!(d.chain_config, "${profile}/chain/chain.ini");
+    let il2cpp = parse(&format!(
+        "\n{}",
+        MODS_DECL.replace("\"bepinex5\"", "\"bepinex6-il2cpp\"\nbepinex_build = 788")
+    ));
+    assert_eq!(
+        il2cpp.mods().unwrap().unwrap().loader,
+        ModsLoader::Bepinex6Il2cpp { build: 788 }
+    );
+
+    // Whatever is in it, the manifest itself parses: an older launcher ignores the table, and
+    // this one only refuses a Play with mods.
+    for (extra, code, key) in [
+        (
+            "future = true\n",
+            codes::UNKNOWN_KEY,
+            Some("integration.mods.future"),
+        ),
+        (
+            "",
+            codes::MANIFEST_INVALID,
+            Some("integration.mods.bepinex_build"),
+        ),
+    ] {
+        let decl = if extra.is_empty() {
+            format!("\n{MODS_DECL}bepinex_build = 1\n")
+        } else {
+            format!("\n{MODS_DECL}{extra}")
+        };
+        let e = parse(&decl).mods().unwrap().unwrap_err().clone();
+        assert_eq!((e.code, e.param("key")), (code, key), "{decl}");
+    }
+    let escaping = parse(&format!(
+        "\n{}",
+        MODS_DECL.replace("${profile}/chain/chain.ini", "${game}/chain.ini")
+    ));
+    assert_eq!(
+        escaping.mods().unwrap().unwrap_err().code,
+        codes::PATH_ESCAPES
+    );
+    let reserved = parse(&format!(
+        "\n{}",
+        MODS_DECL.replace("${profile}/chain/chain.ini", "${profile}/play-arm.json")
+    ));
+    assert_eq!(
+        reserved.mods().unwrap().unwrap_err().code,
+        codes::PATH_ESCAPES
+    );
+    // The chain reads chain.ini beside itself, and nothing else.
+    for elsewhere in [
+        "${profile}/chain.ini",
+        "${profile}/chain/other.ini",
+        "${profile}/chain/sub/chain.ini",
+    ] {
+        let m = parse(&format!(
+            "\n{}",
+            MODS_DECL.replace("${profile}/chain/chain.ini", elsewhere)
+        ));
+        let e = m.mods().unwrap().unwrap_err().clone();
+        assert_eq!(
+            (e.code, e.param("key")),
+            (
+                codes::MANIFEST_INVALID,
+                Some("integration.mods.chain_config")
+            ),
+            "{elsewhere}"
+        );
+    }
+    let cased = parse(&format!(
+        "\n{}",
+        MODS_DECL.replace("${profile}/chain/chain.ini", "${profile}/Chain/Chain.INI")
+    ));
+    assert!(
+        cased.mods().unwrap().is_ok(),
+        "Windows and Wine find it in any letter case"
+    );
+    let not_a_table = Manifest::parse(
+        &runner_manifest("").replace("license = \"MIT\"", "license = \"MIT\"\nmods = \"yes\""),
+    )
+    .unwrap();
+    assert_eq!(
+        not_a_table.mods().unwrap().unwrap_err().code,
+        codes::MANIFEST_INVALID
+    );
+}
+
+// ---- their files are only ever read when they are regular files ----
+
+/// A FIFO at `path` (`mkfifo`); `false` where there is no such tool.
+#[cfg(unix)]
+fn fifo(path: &Path) -> bool {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_where_a_log_or_an_assembly_should_be_never_blocks_discovery() {
+    let w = World::new(NEW_APPID);
+    w.install(MODS_DECL);
+    // A log naming the program would be read; this one is a FIFO no one writes.
+    let logged = w.r2("Elsewhere", "Logged");
+    profile_with_a_mod(&logged);
+    // BepInEx.dll itself a FIFO.
+    let odd = w.gale(GAME, "Odd");
+    write(&odd.join("BepInEx/core/BepInEx.Preloader.dll"), b"MZ");
+    plugin_at(&odd, "M/M.dll");
+    if !fifo(&logged.join("BepInEx/LogOutput.log")) || !fifo(&odd.join("BepInEx/core/BepInEx.dll"))
+    {
+        eprintln!("no mkfifo here: skipped");
+        return;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (target, profile, env) = (w.target(), w.profile(), w.env());
+    std::thread::spawn(move || {
+        let _ = tx.send(discover_mods_in(&target, &profile, &env));
+    });
+    let found = rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("discovery opened a FIFO and waited for a writer");
+    let odd_source = found.iter().find(|s| s.profile == "Odd").unwrap();
+    assert_eq!(
+        odd_source.loader.version, None,
+        "no version read from a FIFO"
+    );
+    assert!(!found.iter().any(|s| s.profile == "Logged"));
+}
+
+#[test]
+fn no_more_than_32_folders_can_be_added_by_hand() {
+    let w = World::new(NEW_APPID);
+    w.install(MODS_DECL);
+    let roots: Vec<PathBuf> = (0..33).map(|i| w.tmp.join(&format!("added{i}"))).collect();
+    let choice = |n: usize| Choice {
+        choice: ChoiceKind::Without,
+        source: None,
+        added_roots: roots[..n].to_vec(),
+    };
+    set_mods_choice(&w.profile(), choice(32)).unwrap();
+    assert_eq!(
+        set_mods_choice(&w.profile(), choice(33)).unwrap_err().code,
+        codes::IO
+    );
+}

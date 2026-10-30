@@ -81,6 +81,48 @@ and `UninstallReport::proton_overrides_kept` the Wine overrides left for it. `Le
 `loader_baseline` (absent from older ledgers, ignored by older launchers; the schema number does
 not change).
 
+## Playing together with the player's own mods (0.4.0)
+
+An integration that declares `[integration.mods]` (astra-bepinex's manifest doc, §7) can run
+Astra *beside* the player's own BepInEx — their mod manager's profile or a BepInEx they installed
+in the game folder — instead of in Astra's separate one. The table lives inside `[integration]`,
+which every launcher reads with no key check, so a launcher before 0.4.0 installs the same
+release and plays Astra on its own. This one never refuses a manifest for that table either: one
+it cannot use (an unknown key, an unknown loader, a path outside the profile) only means "not
+with mods" (`Manifest::mods`).
+
+```rust
+let sources = discover_mods(&game, &profile_dir);                 // pure reads, newest first
+let pick = default_mods_source(&sources);                         // the newest one offered
+set_mods_choice(&profile_dir, Choice { choice: ChoiceKind::With,
+    source: pick.map(ChoiceSource::of), added_roots: vec![] })?;  // asked once per game
+```
+
+- **Where.** r2modman (`%APPDATA%\r2modmanPlus-local`, `$XDG_CONFIG_HOME` or `~/.config`),
+  Thunderstore Mod Manager (`%APPDATA%\Thunderstore Mod Manager\DataFolder`), Gale
+  (`%APPDATA%\com.kesomannen.gale`, `$XDG_DATA_HOME` or `~/.local/share`), every Flatpak's
+  own `~/.var/app/*/config|data/…`, and folders the player added (`Choice::added_roots`: a
+  profile, a folder of profiles, or a manager's custom data folder). The game's folder in each is
+  `src/mods/games.tsv` (Steam appid → r2modman's folder, Gale's community), generated from
+  Thunderstore's ecosystem schema by `tools/gen-mods-games.py`; for a game newer than the table,
+  the Steam install folder's name, or a profile whose `BepInEx/LogOutput.log` names the game's
+  program in its first five lines. Never a guess beyond that. `ModsEnv` says which data folders
+  are looked in (`discover_mods_in` takes one).
+- **What counts.** A profile whose `BepInEx/core` holds a known preloader; a BepInEx in the game
+  folder no ledger of ours placed (`manual`); MelonLoader, shown and never offered. Mods are the
+  first-level entries of `BepInEx/plugins` and `BepInEx/patchers` with at least one `*.dll`
+  (`*.dll.old` is disabled; an entry holding `astra-item.json` is Astra's own); a source with none
+  is not listed. `last_played` is the log's modification time.
+- **Whether.** `ModSource::playable`: their BepInEx's `ProductVersion` (the version resource of
+  `BepInEx.dll` / `BepInEx.Core.dll`) against the declaration — 5.4.x for `bepinex5`, exactly
+  `6.0.0-be.<bepinex_build>` for `bepinex6-il2cpp` — or why the installed integration cannot:
+  `IntegrationWithoutMods` (no table: listed, "only without mods for now"), `NotSupported`
+  (`not-installed`, `platform`, …).
+- **The choice.** `<profile>/mods-choice.json`
+  (`{"schema":1,"choice":"with"|"without","source":{…},"added_roots":[…]}`), written atomically
+  under the profile lock by `set_mods_choice` only; its name is reserved like the ledger's. An
+  update keeps it, `uninstall` removes it, so a reinstall asks again.
+
 ## Which program is the game
 
 `detect_with(dir, hint)` (and `detect(dir)`, without a hint) decides by what sits beside a

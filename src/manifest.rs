@@ -6,7 +6,10 @@
 //!
 //! An unknown key in a section that ACTS (`[target]`, `[[files]]`, `[[game_files]]`, `[launch]`,
 //! `[[config_writes]]`) is refused: a newer feature read as nothing would make an install that
-//! looks fine and is broken. Unknown keys in `[integration]` (metadata) are ignored.
+//! looks fine and is broken. Unknown keys in `[integration]` (metadata) are ignored — which is why
+//! `[integration.mods]` lives there: a launcher from before it installs the same release and plays
+//! Astra on its own. This one reads that table apart ([`Manifest::mods`]) and never refuses the
+//! manifest for it: a table it cannot use only means "not with mods".
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -15,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::detect::Engine;
 use crate::digest::normalize_hex;
 use crate::error::{LauncherError, Result, codes};
+use crate::mods::ModsDecl;
 use crate::paths::{JailPath, Root, check_component, parse_jailed, relative_components};
 
 /// The newest manifest schema this launcher reads.
@@ -99,6 +103,10 @@ pub struct Manifest {
     pub launch: Launch,
     #[serde(default)]
     pub config_writes: Vec<ConfigWrite>,
+    /// `[integration.mods]` as [`Manifest::mods`] reads it: absent, usable, or what a Play with
+    /// mods refuses with. Never part of the manifest's own checks.
+    #[serde(skip)]
+    mods: Option<std::result::Result<ModsDecl, LauncherError>>,
 }
 
 const TOP_KEYS: &[&str] = &[
@@ -330,9 +338,21 @@ impl Manifest {
             "config_writes",
         )?;
 
-        let m: Manifest = toml::from_str(text).map_err(|e| invalid("", e.message().to_owned()))?;
+        let mut m: Manifest =
+            toml::from_str(text).map_err(|e| invalid("", e.message().to_owned()))?;
         m.check()?;
+        m.mods = table
+            .get("integration")
+            .and_then(|i| i.get("mods"))
+            .map(ModsDecl::from_toml);
         Ok(m)
+    }
+
+    /// `[integration.mods]`: `None` when the integration does not declare it (it plays Astra on
+    /// its own only), `Some(Err)` when it does in a way this launcher cannot use (an unknown key or
+    /// loader, a path outside the profile): the refusal a Play with mods answers with.
+    pub fn mods(&self) -> Option<std::result::Result<&ModsDecl, &LauncherError>> {
+        self.mods.as_ref().map(|r| r.as_ref())
     }
 
     fn check(&self) -> Result<()> {

@@ -27,6 +27,7 @@ mod install;
 mod launch;
 mod ledger;
 mod manifest;
+mod mods;
 mod package;
 mod paths;
 mod plan;
@@ -53,6 +54,11 @@ pub use manifest::{
     ConfigWrite, FileRule, GameFileRule, IntegrationInfo, Launch, MANIFEST_FILE, Manifest, SCHEMA,
     Target, wine_dll_overrides,
 };
+pub use mods::{
+    Choice, ChoiceKind, ChoiceSource, LoaderKind, MODS_CHOICE_SCHEMA, ModLoader, ModManager,
+    ModSource, ModsDecl, ModsEnv, ModsLoader, Unplayable, default_mods_source, discover_mods,
+    discover_mods_in, mods_choice, set_mods_choice,
+};
 pub use package::{GiPackage, Limits, PackageSummary, SummaryConfigWrite, SummaryGameFile};
 pub use plan::{
     Accept, GameAction, GameFileAction, InstallPlan, VALVE_ANTI_CHEAT, plan_install, vac_verdict,
@@ -69,6 +75,9 @@ pub const LEDGER_FILE_NAME: &str = paths::LEDGER_FILE;
 /// written by [`launch`] immediately before it spawns a Steam game (see the `launch` module's
 /// docs).
 pub const PLAY_ARM_FILE_NAME: &str = paths::PLAY_ARM_FILE;
+
+/// The mods choice's file name inside a profile (see [`set_mods_choice`]).
+pub const MODS_CHOICE_FILE_NAME: &str = paths::MODS_CHOICE_FILE;
 
 /// This build's own version (`Cargo.toml`'s `[package].version`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

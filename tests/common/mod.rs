@@ -252,3 +252,92 @@ pub fn vars() -> BTreeMap<String, String> {
 
 /// A `user.reg` shaped like a Proton prefix's.
 pub const USER_REG: &str = "WINE REGISTRY Version 2\n;; All keys relative to REGISTRY\\\\User\\\\S-1-5-21-0-0-1000-1000\n\n#arch=win64\n\n[Control Panel\\\\Desktop] 1784681205\n#time=1dcf9d1a3c4e000\n\"FontSmoothing\"=\"2\"\n\n[Software\\\\Wine\\\\AppDefaults\\\\Other.exe\\\\DllOverrides] 1784681205\n#time=1dcf9d1a3c4e000\n\"dxgi\"=\"native\"\n\n[Software\\\\Wine\\\\DllOverrides] 1784681205\n#time=1dcf9d1a3c4e000\n\"winhttp\"=\"builtin\"\n";
+
+/// One `String` entry of a PE version resource (`ProductVersion`, `ProductName`, …), laid out as a
+/// linker writes it: header, UTF-16LE key and NUL, padding to 32 bits, UTF-16LE value and NUL.
+pub fn version_entry(key: &str, value: &str) -> Vec<u8> {
+    let wide = |s: &str| -> Vec<u8> {
+        let mut v: Vec<u8> = s.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        v.extend([0, 0]);
+        v
+    };
+    let (key, val) = (wide(key), wide(value));
+    let head = (6 + key.len()).div_ceil(4) * 4;
+    let mut out = Vec::new();
+    out.extend(((head + val.len()) as u16).to_le_bytes());
+    out.extend(((val.len() / 2) as u16).to_le_bytes());
+    out.extend(1u16.to_le_bytes());
+    out.extend(&key);
+    out.resize(head, 0);
+    out.extend(&val);
+    out.resize(out.len().div_ceil(4) * 4, 0);
+    out
+}
+
+/// A PE image whose version resource carries `strings`.
+pub fn pe_with_version(strings: &[(&str, &str)]) -> Vec<u8> {
+    let mut b = pe_with_options(X64, &[], b"assembly\0\0\0\0");
+    for (k, v) in strings {
+        b.extend(version_entry(k, v));
+    }
+    b
+}
+
+/// The chain loader's two files, as a runner zip carries them.
+pub const CHAIN_DLL: &[u8] = b"MZ fake Astra.Chain.dll";
+pub const CHAIN_HOOKS_DLL: &[u8] = b"MZ fake Astra.Chain.Hooks.dll";
+
+/// `[integration.mods]` as the Mono runner declares it.
+pub const MODS_DECL: &str = "[integration.mods]\nloader = \"bepinex5\"\nchain = \"${profile}/chain/Astra.Chain.dll\"\nchain_config = \"${profile}/chain/chain.ini\"\n";
+
+/// The runner shipping `proxy` as its Doorstop, the chain loader in `chain/`, and `decl` (a
+/// `[integration.mods]` table, or nothing) after everything else.
+pub fn mods_runner(proxy: &[u8], decl: &str) -> GiPackage {
+    let files = "\n[[files]]\nfrom = \"chain/**\"\nto = \"${profile}/chain/\"\n";
+    let m = runner_manifest(&format!("{files}\n{decl}")).replace(&sha(WINHTTP), &sha(proxy));
+    open(&zip(&[
+        E::File("astra-gi.toml", m.as_bytes()),
+        E::File("winhttp.dll", proxy),
+        E::File("doorstop_config.ini", DOORSTOP_INI),
+        E::File("BepInEx/core/BepInEx.Preloader.dll", PRELOADER),
+        E::File("BepInEx/core/BepInEx.dll", CORE_DLL),
+        E::File("chain/Astra.Chain.dll", CHAIN_DLL),
+        E::File("chain/Astra.Chain.Hooks.dll", CHAIN_HOOKS_DLL),
+    ]))
+    .unwrap()
+}
+
+/// A BepInEx 5 below `root` (a profile, or a game folder): its preloader and a `BepInEx.dll`
+/// whose version resource says `version`.
+pub fn bepinex5_at(root: &Path, version: &str) {
+    write(
+        &root.join("BepInEx/core/BepInEx.Preloader.dll"),
+        b"MZ preloader",
+    );
+    write(
+        &root.join("BepInEx/core/BepInEx.dll"),
+        &pe_with_version(&[("ProductName", "BepInEx"), ("ProductVersion", version)]),
+    );
+}
+
+/// A BepInEx 6 for IL2CPP below `root`, `BepInEx.Core.dll` saying `version`, with its `dotnet/`.
+pub fn bepinex6_il2cpp_at(root: &Path, version: &str) {
+    write(
+        &root.join("BepInEx/core/BepInEx.Unity.IL2CPP.dll"),
+        b"MZ il2cpp preloader",
+    );
+    write(
+        &root.join("BepInEx/core/BepInEx.Preloader.Core.dll"),
+        b"MZ core preloader",
+    );
+    write(
+        &root.join("BepInEx/core/BepInEx.Core.dll"),
+        &pe_with_version(&[("ProductName", "BepInEx.Core"), ("ProductVersion", version)]),
+    );
+    write(&root.join("dotnet/coreclr.dll"), b"MZ coreclr");
+}
+
+/// A mod of the player's: `BepInEx/plugins/<rel>`.
+pub fn plugin_at(root: &Path, rel: &str) {
+    write(&root.join("BepInEx/plugins").join(rel), b"MZ a mod");
+}

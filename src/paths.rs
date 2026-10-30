@@ -21,6 +21,9 @@ pub(crate) const BACKUP_DIR: &str = "astra-launcher-backup";
 /// Written by [`crate::launch()`] right before it asks Steam to start a game: the runner's sign
 /// that Astra started this launch. Never one of the ledger's files.
 pub(crate) const PLAY_ARM_FILE: &str = "play-arm.json";
+/// The player's answer to "play with your mods?" for this game ([`crate::set_mods_choice`]).
+/// Never one of the ledger's files.
+pub(crate) const MODS_CHOICE_FILE: &str = "mods-choice.json";
 const TEMP_MARK: &str = ".astra-tmp-";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,11 +90,15 @@ pub(crate) fn parse_jailed(s: &str) -> Result<JailPath> {
     Ok(JailPath { root, rel, is_dir })
 }
 
-/// The profile's own bookkeeping: the ledger, its lock, the backups, the play-arm file.
-/// Case-insensitive.
+/// The profile's own bookkeeping: the ledger, its lock, the backups, the play-arm file, the mods
+/// choice. Case-insensitive.
 pub(crate) fn is_reserved(first: &str) -> bool {
     let f = first.to_ascii_lowercase();
-    f == LEDGER_FILE || f == LOCK_FILE || f == BACKUP_DIR || f == PLAY_ARM_FILE
+    f == LEDGER_FILE
+        || f == LOCK_FILE
+        || f == BACKUP_DIR
+        || f == PLAY_ARM_FILE
+        || f == MODS_CHOICE_FILE
 }
 
 /// One path component that is safe on every platform the launcher serves: no separators, no
@@ -434,6 +441,8 @@ mod tests {
             "BepInEx/x",
             "${profile}/astra-launcher-ledger.json",
             "${profile}/astra-launcher-backup/x",
+            "${profile}/play-arm.json",
+            "${profile}/Mods-Choice.json",
         ] {
             assert_eq!(
                 parse_jailed(bad).unwrap_err().code,
