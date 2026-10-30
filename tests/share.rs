@@ -254,8 +254,9 @@ fn ours_overwritten_by_the_other_manager_is_shared_after_an_install() {
     let pkg = doorstop_runner(&ours());
     plan_and_install(&pkg, &w.target(), &w.profile());
     // The other manager links its own proxy over ours, as r2modman does at every modded start.
+    // Play runs through it (tests/coexist.rs has the details), and so does an install after.
     write(&w.game.join("winhttp.dll"), &theirs());
-    assert_eq!(launch(&w).unwrap_err().code, codes::NEEDS_REINSTALL);
+    launch(&w).unwrap();
 
     let plan = plan_install(&pkg, &w.target(), &w.profile()).unwrap();
     assert_eq!(plan.game_files[0].action, GameAction::ShareLoader);

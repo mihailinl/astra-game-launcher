@@ -47,7 +47,8 @@ pub struct UninstallReport {
     pub profile_files_removed: u32,
     pub proton_restored: bool,
     /// Wine DLL overrides (`winhttp`) left in the Proton prefix because the proxy they load was
-    /// kept for another loader, which needs them to be loaded at all. Absent before 0.3.1.
+    /// kept for another loader, or is another mod manager's shared one (`share-loader`), which
+    /// needs them to be loaded at all. Absent before 0.3.1.
     #[serde(default)]
     pub proton_overrides_kept: Vec<String>,
 }
@@ -235,8 +236,9 @@ fn place(
 /// while it still has our digest; one that changed since is the game's, and it wins. An added
 /// Doorstop someone else's loader now runs through stays too ([`kept_for_their_loader`]), and so
 /// does the Proton override that loads it — unless `readd`, the plan of the integration replacing
-/// this one, adds it again right away. A rollback passes none: with the baseline the failed
-/// install recorded, only what arrived since keeps a proxy, and nothing did.
+/// this one, adds it again right away. A shared proxy (`share-loader`) still there keeps its
+/// override as well. A rollback passes none: with the baseline the failed install recorded, only
+/// what arrived since keeps a proxy, and nothing did.
 pub(crate) fn uninstall_ledger(
     profile: &Path,
     game_root: &Path,
@@ -320,7 +322,17 @@ pub(crate) fn uninstall_ledger(
                     FileState::Absent => {}
                 }
             }
-            GameAction::ReuseKnownProxy | GameAction::KeepExisting | GameAction::ShareLoader => {}
+            // A shared proxy stays where it is, and so does the override that loads it: under
+            // Proton the other manager's loader needs it as ours did (one that relinked its proxy
+            // over ours may have come to rely on the override we wrote).
+            GameAction::ShareLoader => {
+                if let (FileState::File { .. }, Some(stem)) =
+                    (current, Path::new(&g.rel).file_stem())
+                {
+                    kept_dlls.push(stem.to_string_lossy().into_owned());
+                }
+            }
+            GameAction::ReuseKnownProxy | GameAction::KeepExisting => {}
         }
     }
 

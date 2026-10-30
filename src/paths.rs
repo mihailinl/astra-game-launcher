@@ -18,6 +18,9 @@ use crate::error::{LauncherError, Result, codes};
 pub(crate) const LEDGER_FILE: &str = "astra-launcher-ledger.json";
 pub(crate) const LOCK_FILE: &str = "astra-launcher-ledger.lock";
 pub(crate) const BACKUP_DIR: &str = "astra-launcher-backup";
+/// Written by [`crate::launch()`] right before it asks Steam to start a game: the runner's sign
+/// that Astra started this launch. Never one of the ledger's files.
+pub(crate) const PLAY_ARM_FILE: &str = "play-arm.json";
 const TEMP_MARK: &str = ".astra-tmp-";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,10 +87,11 @@ pub(crate) fn parse_jailed(s: &str) -> Result<JailPath> {
     Ok(JailPath { root, rel, is_dir })
 }
 
-/// The profile's own bookkeeping: the ledger, its lock, the backups. Case-insensitive.
+/// The profile's own bookkeeping: the ledger, its lock, the backups, the play-arm file.
+/// Case-insensitive.
 pub(crate) fn is_reserved(first: &str) -> bool {
     let f = first.to_ascii_lowercase();
-    f == LEDGER_FILE || f == LOCK_FILE || f == BACKUP_DIR
+    f == LEDGER_FILE || f == LOCK_FILE || f == BACKUP_DIR || f == PLAY_ARM_FILE
 }
 
 /// One path component that is safe on every platform the launcher serves: no separators, no

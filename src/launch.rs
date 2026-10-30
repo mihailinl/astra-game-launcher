@@ -4,12 +4,42 @@
 
 //! Play: check the install against its ledger, write the INI keys, apply the Proton override,
 //! and build the command. Spawning is the caller's (`Spawn`), so the daemon can own its children.
+//!
+//! **A file we added that someone else rewrote.** r2modman and Gale copy their profile's Doorstop
+//! proxy (`winhttp.dll`) and `doorstop_config.ini` into the game folder at every modded start,
+//! over the ones we added, and ReShade rewrites `ReShade.ini` whenever the player changes a
+//! setting. Play does not send the person back to Install for that (which would only write ours
+//! back, to be overwritten again): a relinked proxy that still does our proxy's job is recorded
+//! as shared (`share-loader`, with the digest there now), one that no longer does is
+//! `shared-loader-changed`, and a changed config of the kind a plan leaves alone when it is
+//! already there (`doorstop_config.ini`, `ReShade.ini`: `plan::keep_if_present`) is recorded as
+//! theirs (`keep-existing`) and never rewritten. A Doorstop config that is theirs is kept out of
+//! the session by the Doorstop options a foreign config gets (`doorstop::session_options`); only
+//! that file decides those options, never `ReShade.ini`. A file of ours that is gone, and any
+//! other added file that changed, is still `needs-reinstall`.
+//!
+//! What Play records about those files is written to the ledger last, once nothing can refuse
+//! this Play any more: a refused Play records nothing.
+//!
+//! **`<profile>/play-arm.json`** (the runner's contract). Steam starts the game, so this is how
+//! the runner knows that the start it sees is one Astra asked for, and when:
+//! `{"schema":1,"appid":<steam appid>,"started_unix_ms":<ms since the UNIX epoch>}`.
+//! [`prepare_launch`] writes nothing: the plan it returns for a Steam game carries the arm, and
+//! [`launch`] writes it atomically, under the profile lock, immediately before it spawns Steam.
+//! So whatever the caller refuses between the two (Astra's daemon checks its bridge engine there)
+//! leaves no fresh arm for a later plain Steam start to be taken for Astra's, and a spawn that
+//! fails puts back what was there. `started_unix_ms` is the moment Astra asked Steam to start the
+//! game, not the moment the game's process started: Steam may update the game first. A failed
+//! write fails the launch before anything is spawned. A game without a Steam appid gets none. The
+//! launcher never deletes an arm a launch left (removing the profile folder is the caller's), it
+//! is not a file of the ledger's, and no manifest file may be named `play-arm.json`.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -20,10 +50,10 @@ use crate::ini;
 use crate::ledger::{self, LedgerGameFile, LedgerState, ProfileLock};
 use crate::manifest::{Manifest, OWN_PLACEHOLDERS, Piece, pieces};
 use crate::paths::{
-    FileState, canonical_dir, checked_rel, existing_target, file_state, parse_jailed, plain,
-    prepare_target, real_case, write_atomic,
+    FileState, PLAY_ARM_FILE, canonical_dir, check_regular_or_absent, checked_rel, existing_target,
+    file_state, parse_jailed, plain, prepare_target, real_case, write_atomic,
 };
-use crate::plan::{GameAction, is_loader_proxy};
+use crate::plan::{GameAction, is_loader_proxy, keep_if_present};
 use crate::proton;
 use crate::running::refuse_if_running;
 
@@ -34,6 +64,29 @@ pub struct ProcessPlan {
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
     pub cwd: Option<PathBuf>,
+    /// The play-arm [`launch`] writes right before it spawns (a Steam game). Only
+    /// [`prepare_launch`] sets it, and it is never serialised or read back, so no plan made
+    /// elsewhere can have `launch` write into another folder.
+    #[serde(skip)]
+    arm: Option<Arm>,
+}
+
+/// Where a launch's `play-arm.json` goes, and the Steam app it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Arm {
+    /// The profile, as [`prepare_launch`] resolved it.
+    profile: PathBuf,
+    appid: u32,
+}
+
+impl ProcessPlan {
+    /// The `play-arm.json` [`launch`] writes immediately before it spawns this plan, and the
+    /// Steam appid it names; `None` for a game started without Steam.
+    pub fn play_arm(&self) -> Option<(PathBuf, u32)> {
+        self.arm
+            .as_ref()
+            .map(|a| (a.profile.join(PLAY_ARM_FILE), a.appid))
+    }
 }
 
 /// Starts a process. The daemon passes its own; [`StdSpawn`] is the plain one.
@@ -94,9 +147,32 @@ impl Spawn for StdSpawn {
     }
 }
 
-/// Runs a prepared command.
+/// Runs a prepared command. For a Steam game it first writes `<profile>/play-arm.json` (the
+/// module docs), under the profile lock and immediately before the spawn: a failed write fails
+/// the launch with nothing started, and a failed spawn puts back what was there before, since an
+/// arm left by a launch that never happened would vouch for the next plain start of the game.
 pub fn launch(plan: &ProcessPlan, spawner: &dyn Spawn) -> Result<()> {
-    spawner.spawn(plan)
+    let Some(arm) = &plan.arm else {
+        return spawner.spawn(plan);
+    };
+    let _lock = ProfileLock::acquire(&arm.profile)?;
+    let path = arm.profile.join(PLAY_ARM_FILE);
+    // A link or a folder there is not an arm of ours: never read through it, never replace it.
+    check_regular_or_absent(&path)?;
+    let previous = match fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == ErrorKind::NotFound => None,
+        Err(e) => return Err(LauncherError::io_at(&e, &path)),
+    };
+    write_play_arm(&path, arm.appid)?;
+    if let Err(e) = spawner.spawn(plan) {
+        let _ = match previous {
+            Some(bytes) => write_atomic(&path, &bytes),
+            None => fs::remove_file(&path).map_err(|e| LauncherError::io_at(&e, &path)),
+        };
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// How a path is written for the game.
@@ -167,10 +243,34 @@ fn needs_reinstall(file: &str) -> LauncherError {
     LauncherError::new(codes::NEEDS_REINSTALL).with("file", file)
 }
 
+/// `<profile>/play-arm.json`, as the runner reads it (the module docs).
+#[derive(Serialize)]
+struct PlayArm {
+    schema: u32,
+    appid: u32,
+    started_unix_ms: u64,
+}
+
+/// Writes the play-arm at `path` for a launch of Steam app `appid` that Astra asks for now.
+fn write_play_arm(path: &Path, appid: u32) -> Result<()> {
+    let started_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let arm = PlayArm {
+        schema: 1,
+        appid,
+        started_unix_ms,
+    };
+    let text = serde_json::to_vec(&arm).map_err(LauncherError::io)?;
+    write_atomic(path, &text)
+}
+
 /// Prepares a launch: checks the install, writes `[[config_writes]]` (into the profile only),
 /// applies the Proton override (`proton-prefix-missing` when the prefix does not exist yet) and
 /// returns the command — `<steam> -applaunch <appid> <args…>` for a Steam game, otherwise the
-/// exe itself with its args and env.
+/// exe itself with its args and env. A Steam game's plan carries the play-arm [`launch`] writes;
+/// this writes none.
 pub fn prepare_launch(
     profile_dir: &Path,
     game: &GameTarget,
@@ -236,7 +336,13 @@ pub fn prepare_launch(
     }
     let game_root = game.game_root()?;
     let exe_machine = doorstop::pe_machine_of_file(&game_root.join(game.exe_file_name()?));
-    for g in &ledger.game_files {
+    // Only a launch through Doorstop added a proxy another mod manager's Doorstop can stand in
+    // for. A package that starts another kind of proxy (ReShade's `dxgi.dll`) has none to share.
+    let through_doorstop = doorstop::launch_options(&m.launch.args).is_some();
+    // Files we added that someone else has since rewritten, and what they are now:
+    // (index into `game_files`, the action that now describes them, the digest there now).
+    let mut relinked: Vec<(usize, GameAction, String)> = Vec::new();
+    for (i, g) in ledger.game_files.iter().enumerate() {
         if g.action == GameAction::KeepExisting {
             continue;
         }
@@ -251,13 +357,31 @@ pub fn prepare_launch(
         if g.action != GameAction::ShareLoader && state == pinned {
             continue;
         }
-        // A loader proxy another mod manager owns — shared, or there before us with our very
-        // bytes — is relinked by that manager whenever it likes: what matters is that the one
-        // there now still does the job, not that it is the same file.
+        // Gone: Install again (which adds ours where theirs went).
+        let FileState::File { sha256: now } = state else {
+            return Err(needs_reinstall(&g.rel));
+        };
+        // A config we added (or found with our very bytes) that someone else rewrote since — a
+        // mod manager's `doorstop_config.ini` over ours (r2modman and Gale copy theirs in at every
+        // modded start), the settings ReShade saves into `ReShade.ini`: theirs now, as one that
+        // was there before us would be. Never rewritten. Only a Doorstop config changes the
+        // session, through `foreign_config`, which reads that file alone.
+        if matches!(g.action, GameAction::Add | GameAction::ReuseKnownProxy)
+            && keep_if_present(&g.rel)
+        {
+            relinked.push((i, GameAction::KeepExisting, now));
+            continue;
+        }
+        // A loader proxy another mod manager owns — shared, there before us with our very bytes,
+        // or relinked over the Doorstop we added — is relinked by that manager whenever it likes:
+        // what matters is that the one there now still does the job, not that it is the same file.
+        let relinked_proxy =
+            g.action == GameAction::Add && is_loader_proxy(&g.rel) && through_doorstop;
         let theirs = g.action == GameAction::ShareLoader
-            || (g.action == GameAction::ReuseKnownProxy && is_loader_proxy(&g.rel));
-        // Gone, or a file of ours that changed: Install again (which adds ours where theirs went).
-        if !theirs || state == FileState::Absent {
+            || (g.action == GameAction::ReuseKnownProxy && is_loader_proxy(&g.rel))
+            || relinked_proxy;
+        // Any other file of ours that changed: Install again.
+        if !theirs {
             return Err(needs_reinstall(&g.rel));
         }
         let serves = path
@@ -273,6 +397,18 @@ pub fn prepare_launch(
                 LauncherError::new(codes::SHARED_LOADER_CHANGED).with("file", g.rel.clone())
             );
         }
+        if relinked_proxy {
+            relinked.push((i, GameAction::ShareLoader, now));
+        }
+    }
+    // Whose they are now: the session's Doorstop options read it below, and the ledger records it
+    // at the very end, once nothing can refuse this Play any more. Then an uninstall leaves them
+    // and an update shares them.
+    let mut game_files = ledger.game_files.clone();
+    for (i, action, sha256) in relinked {
+        let g = &mut game_files[i];
+        g.action = action;
+        g.sha256 = sha256;
     }
 
     let exe_file = game.exe_file_name()?;
@@ -329,7 +465,7 @@ pub fn prepare_launch(
     };
     // The manifest's arguments, then the Doorstop options that keep a `doorstop_config.ini` that
     // is not ours (a shared loader's, one kept beside our proxy) out of the session.
-    let foreign_config = foreign_config(&game_root, &ledger.game_files)?;
+    let foreign_config = foreign_config(&game_root, &game_files)?;
     let args = m
         .launch
         .args
@@ -373,29 +509,46 @@ pub fn prepare_launch(
         })?;
     }
 
-    if let Some(appid) = game.steam_appid {
-        let steam = steam_exe.expect("checked above");
-        let mut argv = vec!["-applaunch".to_owned(), appid.to_string()];
-        argv.extend(args);
-        return Ok(ProcessPlan {
-            program: steam.to_path_buf(),
-            args: argv,
-            env: Vec::new(),
-            cwd: None,
-        });
+    let plan = match game.steam_appid {
+        Some(appid) => {
+            let steam = steam_exe.expect("checked above");
+            let mut argv = vec!["-applaunch".to_owned(), appid.to_string()];
+            argv.extend(args);
+            ProcessPlan {
+                program: steam.to_path_buf(),
+                args: argv,
+                env: Vec::new(),
+                cwd: None,
+                // Written by `launch`, right before Steam is asked to start the game.
+                arm: Some(Arm {
+                    profile: profile.clone(),
+                    appid,
+                }),
+            }
+        }
+        None => {
+            let env = m
+                .launch
+                .env
+                .iter()
+                .map(|(k, v)| Ok((k.clone(), x.expand(v)?)))
+                .collect::<Result<Vec<_>>>()?;
+            ProcessPlan {
+                program: plain(&game_root.join(&exe_file)),
+                args,
+                env,
+                cwd: Some(plain(&game_root)),
+                arm: None,
+            }
+        }
+    };
+
+    // Last, once nothing can refuse this Play any more: what was rewritten is theirs now.
+    if game_files != ledger.game_files {
+        ledger.game_files = game_files;
+        ledger::write(&profile, &ledger)?;
     }
-    let env = m
-        .launch
-        .env
-        .iter()
-        .map(|(k, v)| Ok((k.clone(), x.expand(v)?)))
-        .collect::<Result<Vec<_>>>()?;
-    Ok(ProcessPlan {
-        program: plain(&game_root.join(&exe_file)),
-        args,
-        env,
-        cwd: Some(plain(&game_root)),
-    })
+    Ok(plan)
 }
 
 /// Whether the `doorstop_config.ini` Doorstop reads where the game starts (the exe's folder, the

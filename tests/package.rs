@@ -402,6 +402,7 @@ fn a_wildcard_cannot_land_on_the_profile_s_bookkeeping() {
         "astra-launcher-ledger.json",
         "Astra-Launcher-Ledger.lock",
         "astra-launcher-backup/game/winhttp.dll",
+        "Play-Arm.json",
     ] {
         let m = runner_manifest("\n[[files]]\nfrom = \"**\"\nto = \"${profile}/\"\n");
         let z = zip(&[

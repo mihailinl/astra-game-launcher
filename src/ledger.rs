@@ -63,7 +63,7 @@ pub struct LedgerGameFile {
     /// Below the exe's folder, `/`-separated.
     pub rel: String,
     /// Ours, or (for `keep-existing` and `share-loader`) the file that was left alone, as it was
-    /// at install.
+    /// at install, or when Play found one we added rewritten by someone else.
     pub sha256: String,
     pub action: GameAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]

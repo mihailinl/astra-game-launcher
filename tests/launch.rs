@@ -139,11 +139,11 @@ fn under_proton_the_profile_is_a_z_drive_path_and_steam_gets_applaunch() {
         profile.to_str().unwrap().replace('/', "\\")
     );
     assert_eq!(
-        p,
-        ProcessPlan {
-            program: PathBuf::from("/opt/fake/steam"),
-            args: vec![
-                "-applaunch".into(),
+        (&p.program, &p.args, &p.env, &p.cwd),
+        (
+            &PathBuf::from("/opt/fake/steam"),
+            &vec![
+                "-applaunch".to_owned(),
                 APPID.to_string(),
                 "--doorstop-enabled".into(),
                 "true".into(),
@@ -156,9 +156,14 @@ fn under_proton_the_profile_is_a_z_drive_path_and_steam_gets_applaunch() {
                 "--doorstop-mono-debug-suspend".into(),
                 "false".into(),
             ],
-            env: vec![],
-            cwd: None,
-        }
+            &vec![],
+            &None,
+        )
+    );
+    // `launch` writes the play-arm, right before it spawns Steam.
+    assert_eq!(
+        p.play_arm(),
+        Some((profile.join(astra_game_launcher::PLAY_ARM_FILE_NAME), APPID))
     );
 }
 

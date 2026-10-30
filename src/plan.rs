@@ -36,12 +36,16 @@ pub enum GameAction {
     /// The very file we ship is already there. It is never rewritten, and never removed.
     ReuseKnownProxy,
     /// A config file we did not write (`doorstop_config.ini`, `ReShade.ini`) is already there.
-    /// It is left as it is, and uninstall neither removes nor "restores" it.
+    /// It is left as it is, and uninstall neither removes nor "restores" it. Play also records
+    /// such a config we added as this once it changed: a mod manager's `doorstop_config.ini`
+    /// copied over ours, a `ReShade.ini` ReShade saved the player's settings into.
     KeepExisting,
     /// Another mod manager's loader proxy (r2modman's, Thunderstore Mod Manager's, a hand-made
     /// BepInEx install's Doorstop) is already there, and it honours every option our launch
     /// passes ([`crate::doorstop`]): the game runs through it. It is never written, backed up or
-    /// removed, and its digest is not pinned, since the manager that owns it may update it.
+    /// removed, and its digest is not pinned, since the manager that owns it may update it. Play
+    /// also records a proxy we added as this once a mod manager has copied one over ours that
+    /// still does the job.
     ShareLoader,
 }
 
@@ -117,10 +121,14 @@ pub(crate) fn is_loader_proxy(rel: &str) -> bool {
 /// `ReShade.ini` is here because ReShade REWRITES it while the game runs (the overlay saves the
 /// user's settings into it). A user's own file must survive install and uninstall, and ours, once
 /// ReShade has rewritten it, is the user's settings: an update must not back it up and replace it,
-/// and an uninstall must not "restore" an older copy over it.
+/// and an uninstall must not "restore" an older copy over it. Play applies the same rule to one we
+/// added that changed since ([`crate::launch`]): it is the user's, or a mod manager's, now.
 const KEEP_IF_PRESENT: &[&str] = &["doorstop_config.ini", "ReShade.ini"];
 
-fn keep_if_present(name: &str) -> bool {
+/// Whether the file at `rel` (`/`-separated) goes by a [`KEEP_IF_PRESENT`] name, in any letter
+/// case.
+pub(crate) fn keep_if_present(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
     KEEP_IF_PRESENT.iter().any(|k| k.eq_ignore_ascii_case(name))
 }
 
@@ -373,7 +381,7 @@ pub(crate) fn loader_baselines(
 /// it that was not there before Astra first added it ([`LoaderBaseline`]) and is not ours: a
 /// `doorstop_config.ini` other than the one there then and other than ours (or a link or folder
 /// in its place), or a name in `BepInEx/core` that was not there then and is no file of ours.
-/// Without a baseline (a ledger from before 0.3.1), every config the ledger does not hold and
+/// Without a baseline (a ledger from before 0.3.1), every config that is not our own file and
 /// every `BepInEx/core` entry that is not ours counts. Uninstall then leaves the proxy (reported
 /// in `kept`). A proxy that is not a Doorstop (ReShade's `dxgi.dll`) serves no BepInEx: never kept.
 pub(crate) fn kept_for_their_loader(
@@ -395,14 +403,14 @@ pub(crate) fn kept_for_their_loader(
     match config_in(game_root, &dir) {
         Ok((_, FileState::Absent)) => {}
         Ok((ini_rel, FileState::File { sha256 })) => {
-            // Ours: the digest the ledger holds for it. With a baseline only our own file counts
-            // (`keep-existing` there records a config that may have arrived since we came); the
-            // one from before us is the baseline's.
+            // Ours: our own file, with the digest the ledger holds for it. Never a `keep-existing`
+            // config: that records one we did not write, which may have arrived since we came
+            // (Play records one a mod manager copied over ours that way). The one from before us
+            // is the baseline's.
             let ours = ledger.game_files.iter().any(|g| {
                 g.rel.eq_ignore_ascii_case(&ini_rel)
                     && g.sha256 == sha256
-                    && (baseline.is_none()
-                        || matches!(g.action, GameAction::Add | GameAction::ReuseKnownProxy))
+                    && matches!(g.action, GameAction::Add | GameAction::ReuseKnownProxy)
             });
             let before_us =
                 baseline.is_some_and(|b| b.ini_sha256.as_deref() == Some(sha256.as_str()));

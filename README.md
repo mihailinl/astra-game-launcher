@@ -149,7 +149,17 @@ rules: a launcher beside a Unity game is not a Unity game.
   whenever it likes (the same holds for a `reuse-known-proxy` loader, one that was there before
   us with our very bytes). Gone: `needs-reinstall`, and installing again adds ours. Still there
   and no longer able: `shared-loader-changed` (installing again would answer `foreign-loader`,
-  so Play does not send the person there). This is how those
+  so Play does not send the person there). r2modman and Gale copy their profile's proxy and
+  `doorstop_config.ini` over the ones WE added at every modded start, and ReShade saves the
+  player's settings into the `ReShade.ini` we added: Play then records the proxy as shared when
+  the one there does the job (`shared-loader-changed` when it does not; only for an integration
+  that launches through Doorstop, so a changed ReShade `dxgi.dll` of ours is `needs-reinstall`),
+  and a changed `doorstop_config.ini` or `ReShade.ini` we added or found with our very bytes as
+  theirs (`keep-existing`, never rewritten), each with
+  the digest there now, so uninstall leaves them and Play never asks for an install that would
+  only write ours back. A Doorstop config that is theirs is kept out of the session by the
+  options below; `ReShade.ini` has no say in those. Any other file we added that changed, or
+  that is gone, is `needs-reinstall`. This is how those
   managers run every profile through one proxy, and it puts no new code into the game: Windows
   loads that DLL on every start of the game anyway. A foreign proxy that cannot do the job is
   refused (`foreign-loader`). Any other existing file is backed up into the profile
@@ -247,6 +257,20 @@ rules: a launcher beside a Unity game is not a Unity game.
   the lowest schema that carries it (3 when a loader is shared) and its schema is read before its
   shape, so from this version on a ledger newer than the launcher is `schema-too-new` rather than
   a parse failure.
+- **The play-arm file.** `launch` writes `<profile>/play-arm.json` atomically, under the profile
+  lock, immediately before it asks Steam to start a game:
+  `{"schema":1,"appid":<steam appid>,"started_unix_ms":<ms since the UNIX epoch>}`. Steam starts
+  the game, so this is how the runner tells a start Astra asked for (and when) from any other.
+  `started_unix_ms` is when Astra asked, not when the game's process started (Steam may update
+  the game first). `prepare_launch` writes none, so a refusal between the two leaves no fresh arm;
+  a failed write fails the launch before anything starts, and a failed spawn puts back what was
+  there. A game without a Steam appid gets none. It is not a file of the ledger's, uninstall
+  leaves it (removing the profile folder is the caller's), and like the ledger, its lock and the
+  backups its name is reserved: no manifest file may be named `play-arm.json`. Known gap, shared
+  by all four names: a Windows 8.3 short name (`PLAY-A~1.JSO`) is not recognised as one of them.
+- **What Play records.** It is written to the ledger last, once nothing can refuse the Play any
+  more: a refused Play records nothing. Uninstall keeps the Proton override that loads a shared
+  proxy (`share-loader`) still beside the game, as it does for a proxy kept for another loader.
 - **Nothing runs.** The launcher never elevates, never runs a program from a package, and passes
   launch arguments as an argv array, never through a shell.
 
@@ -270,7 +294,7 @@ algorithm) and bakes it in:
 
 ```
 astra-game-launcher --version
-# astra-game-launcher 0.3.1 (source tree sha256 <hex>)
+# astra-game-launcher 0.3.2 (source tree sha256 <hex>)
 ```
 
 Astra's own release notes / About screen show the same hash for the commit it pinned. A GitHub
@@ -280,7 +304,7 @@ a hash you compute yourself. Recompute it from a clone of a tag with one line (r
 and `sha256sum`; `scripts/tree-hash.sh` is this same command, runnable against any directory):
 
 ```bash
-V=0.3.1 REPO=https://github.com/mihailinl/astra-game-launcher
+V=0.3.2 REPO=https://github.com/mihailinl/astra-game-launcher
 rm -rf /tmp/astra-gl-verify && mkdir -p /tmp/astra-gl-verify && \
 git clone --quiet --depth 1 --branch "v$V" "$REPO" /tmp/astra-gl-verify/src && \
 cd /tmp/astra-gl-verify/src && git archive "v$V" | tar -x -C /tmp/astra-gl-verify && \

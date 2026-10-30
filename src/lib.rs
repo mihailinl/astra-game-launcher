@@ -65,6 +65,11 @@ pub use steam_appinfo::{
 /// The ledger's file name inside a profile.
 pub const LEDGER_FILE_NAME: &str = paths::LEDGER_FILE;
 
+/// The play-arm file's name inside a profile: `{"schema":1,"appid":…,"started_unix_ms":…}`,
+/// written by [`launch`] immediately before it spawns a Steam game (see the `launch` module's
+/// docs).
+pub const PLAY_ARM_FILE_NAME: &str = paths::PLAY_ARM_FILE;
+
 /// This build's own version (`Cargo.toml`'s `[package].version`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
