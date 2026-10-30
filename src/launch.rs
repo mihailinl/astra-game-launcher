@@ -49,6 +49,8 @@ use crate::game::{GameTarget, Platform};
 use crate::ini;
 use crate::ledger::{self, LedgerGameFile, LedgerState, ProfileLock};
 use crate::manifest::{Manifest, OWN_PLACEHOLDERS, Piece, pieces};
+use crate::mods::ModsEnv;
+use crate::mods::play::{GamePath, without_doorstop_options};
 use crate::paths::{
     FileState, PLAY_ARM_FILE, canonical_dir, check_regular_or_absent, checked_rel, existing_target,
     file_state, parse_jailed, plain, prepare_target, real_case, write_atomic,
@@ -64,6 +66,12 @@ pub struct ProcessPlan {
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
     pub cwd: Option<PathBuf>,
+    /// Things the person should know before playing, as codes:
+    /// [`STEAM_LAUNCH_OPTIONS_DOORSTOP`] (their Steam launch options for the game pass Doorstop
+    /// options of their own, which may win over these), [`MODS_CHOICE_UNREADABLE`] (their
+    /// answer about their mods could not be read). Never a reason not to play.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     /// The play-arm [`launch`] writes right before it spawns (a Steam game). Only
     /// [`prepare_launch`] sets it, and it is never serialised or read back, so no plan made
     /// elsewhere can have `launch` write into another folder.
@@ -88,6 +96,16 @@ impl ProcessPlan {
             .map(|a| (a.profile.join(PLAY_ARM_FILE), a.appid))
     }
 }
+
+/// [`ProcessPlan::warnings`]: a Steam user's own launch options for the game carry `--doorstop-…`
+/// (read from `localconfig.vdf`, [`crate::steam_user_launch_options`]). Steam adds them to every
+/// start, Astra's included, and Doorstop may take them over the ones Astra passes.
+pub const STEAM_LAUNCH_OPTIONS_DOORSTOP: &str = "steam-launch-options-doorstop";
+
+/// [`ProcessPlan::warnings`]: `mods-choice.json` could not be read (not JSON, too new, not a file)
+/// and nothing could be played together anyway, so this Play is Astra's alone, as if the player
+/// had not been asked yet. Never a refusal.
+pub const MODS_CHOICE_UNREADABLE: &str = "mods-choice-unreadable";
 
 /// Starts a process. The daemon passes its own; [`StdSpawn`] is the plain one.
 pub trait Spawn {
@@ -271,11 +289,32 @@ fn write_play_arm(path: &Path, appid: u32) -> Result<()> {
 /// returns the command — `<steam> -applaunch <appid> <args…>` for a Steam game, otherwise the
 /// exe itself with its args and env. A Steam game's plan carries the play-arm [`launch`] writes;
 /// this writes none.
+///
+/// **With the player's own mods** (`[integration.mods]`, `mods-choice.json`; the `mods` module
+/// docs): the player's answer is read here. Not asked yet while mods are found that could be
+/// played together: `mods-choice-needed`. "With": Doorstop starts the integration's chain loader
+/// on THEIR BepInEx, with their pack's Doorstop settings, for the generation of the proxy beside
+/// the game now; everything is checked first (`mods-source-missing`, `mods-loader-unsupported`,
+/// `mods-melonloader`, `mods-unsupported`), and `chain.ini` is written into the profile last,
+/// once nothing can refuse this Play any more. Nothing of theirs is written. "Without", or an
+/// integration without the table: exactly the Play of 0.3.2, argument for argument. The mod
+/// managers' folders looked in are this process's ([`ModsEnv::from_process`]).
 pub fn prepare_launch(
     profile_dir: &Path,
     game: &GameTarget,
     vars: &BTreeMap<String, String>,
     steam_exe: Option<&Path>,
+) -> Result<ProcessPlan> {
+    prepare_launch_with(profile_dir, game, vars, steam_exe, &ModsEnv::from_process())
+}
+
+/// [`prepare_launch`], looking for the player's mods in the mod managers' folders `mods_env` names.
+pub fn prepare_launch_with(
+    profile_dir: &Path,
+    game: &GameTarget,
+    vars: &BTreeMap<String, String>,
+    steam_exe: Option<&Path>,
+    mods_env: &ModsEnv,
 ) -> Result<ProcessPlan> {
     let profile =
         canonical_dir(profile_dir).map_err(|_| LauncherError::new(codes::NOT_INSTALLED))?;
@@ -339,6 +378,10 @@ pub fn prepare_launch(
     // Only a launch through Doorstop added a proxy another mod manager's Doorstop can stand in
     // for. A package that starts another kind of proxy (ReShade's `dxgi.dll`) has none to share.
     let through_doorstop = doorstop::launch_options(&m.launch.args).is_some();
+    // The player's answer about their own mods, and everything a Play with them needs, read now
+    // (reads only); refused, if at all, once the install itself is known to be whole.
+    let mods = crate::mods::play::resolve_play(&profile, &m, &ledger, game, mods_env);
+    let with_mods = mods.as_ref().ok().and_then(|r| r.with.as_ref());
     // Files we added that someone else has since rewritten, and what they are now:
     // (index into `game_files`, the action that now describes them, the digest there now).
     let mut relinked: Vec<(usize, GameAction, String)> = Vec::new();
@@ -384,10 +427,14 @@ pub fn prepare_launch(
         if !theirs {
             return Err(needs_reinstall(&g.rel));
         }
+        // With mods, Play passes its own options, for the proxy's own generation.
         let serves = path
             .as_deref()
             .and_then(doorstop::read_proxy)
-            .is_some_and(|bytes| doorstop::serves(&bytes, exe_machine, &m.launch.args));
+            .is_some_and(|bytes| match with_mods {
+                Some(w) => w.served_by(&bytes, exe_machine),
+                None => doorstop::serves(&bytes, exe_machine, &m.launch.args),
+            });
         if !serves {
             // Still there and no longer able (the other manager moved to a loader that does not
             // take our options). Not "another loader is installed": the person installed beside
@@ -453,6 +500,10 @@ pub fn prepare_launch(
         return Err(LauncherError::new(codes::STEAM_NOT_FOUND));
     }
 
+    // Nothing has been written yet: the last refusals are about the player's mods.
+    let resolved = mods?;
+    let mods = resolved.with;
+
     let flavor = match game.platform {
         Platform::LinuxProton { .. } => Flavor::Proton,
         _ => Flavor::Native,
@@ -464,20 +515,47 @@ pub fn prepare_launch(
         backslashes: flavor == Flavor::Proton || matches!(game.platform, Platform::Windows),
     };
     // The manifest's arguments, then the Doorstop options that keep a `doorstop_config.ini` that
-    // is not ours (a shared loader's, one kept beside our proxy) out of the session.
+    // is not ours (a shared loader's, one kept beside our proxy) out of the session. With mods,
+    // the manifest's own Doorstop options give way to this Play's ([`doorstop_with_mods`]).
     let foreign_config = foreign_config(&game_root, &game_files)?;
-    let args = m
-        .launch
-        .args
+    let with_mods = match &mods {
+        Some(w) => Some(doorstop_with_mods(
+            w,
+            &x,
+            flavor,
+            &game_root,
+            &game_files,
+            exe_machine,
+        )?),
+        None => None,
+    };
+    let (own, doorstop_opts) = match &with_mods {
+        Some((opts, _)) => (without_doorstop_options(&m.launch.args), opts.clone()),
+        None => (m.launch.args.clone(), Vec::new()),
+    };
+    let pins_for = if with_mods.is_some() {
+        &doorstop_opts
+    } else {
+        &m.launch.args
+    };
+    let mut args = own
         .iter()
-        .cloned()
-        .chain(doorstop::session_options(
-            &m.launch.args,
-            &exe_file,
-            foreign_config,
-        ))
-        .map(|a| x.expand(&a))
+        .map(|a| x.expand(a))
         .collect::<Result<Vec<_>>>()?;
+    args.extend(doorstop_opts.iter().cloned());
+    for pin in doorstop::session_options(pins_for, &exe_file, foreign_config) {
+        args.push(x.expand(&pin)?);
+    }
+    // Where `chain.ini` goes, resolved and checked now (a link or a folder in its place is
+    // refused here): a refusal there comes before `[[config_writes]]` and the Proton override
+    // have written anything. Its parent is the chain's own folder, already there.
+    let chain_ini = match (&mods, &with_mods) {
+        (Some(w), Some((_, text))) => {
+            let jp = parse_jailed(&w.decl.chain_config)?;
+            Some((prepare_target(&profile, &jp.rel)?, text.clone()))
+        }
+        _ => None,
+    };
 
     for c in &m.config_writes {
         let jp = parse_jailed(&c.file)?;
@@ -509,7 +587,7 @@ pub fn prepare_launch(
         })?;
     }
 
-    let plan = match game.steam_appid {
+    let mut plan = match game.steam_appid {
         Some(appid) => {
             let steam = steam_exe.expect("checked above");
             let mut argv = vec!["-applaunch".to_owned(), appid.to_string()];
@@ -519,6 +597,7 @@ pub fn prepare_launch(
                 args: argv,
                 env: Vec::new(),
                 cwd: None,
+                warnings: steam_warnings(game, appid),
                 // Written by `launch`, right before Steam is asked to start the game.
                 arm: Some(Arm {
                     profile: profile.clone(),
@@ -538,17 +617,107 @@ pub fn prepare_launch(
                 args,
                 env,
                 cwd: Some(plain(&game_root)),
+                warnings: Vec::new(),
                 arm: None,
             }
         }
     };
 
-    // Last, once nothing can refuse this Play any more: what was rewritten is theirs now.
+    if resolved.choice_unreadable.is_some() {
+        plan.warnings.push(MODS_CHOICE_UNREADABLE.to_owned());
+    }
+
+    // Last, once nothing can refuse this Play any more: the chain's `chain.ini` (the one file a
+    // Play with mods adds, in the profile), then what was rewritten is theirs now.
+    if let Some((target, text)) = &chain_ini {
+        write_atomic(target, text.as_bytes())?;
+    }
     if game_files != ledger.game_files {
         ledger.game_files = game_files;
         ledger::write(&profile, &ledger)?;
     }
     Ok(plan)
+}
+
+/// A Play with mods' Doorstop options and its `chain.ini`, for the proxy beside the game now: the
+/// first loader proxy of the install still there (ours, shared, or relinked by their manager).
+/// One that cannot start this chain is `shared-loader-changed`, as for any Play.
+fn doorstop_with_mods(
+    w: &crate::mods::play::WithMods,
+    x: &Expander,
+    flavor: Flavor,
+    game_root: &Path,
+    game_files: &[LedgerGameFile],
+    exe_machine: Option<u16>,
+) -> Result<(Vec<String>, String)> {
+    let proxies: Vec<&LedgerGameFile> = game_files
+        .iter()
+        .filter(|g| is_loader_proxy(&g.rel) && g.action != GameAction::KeepExisting)
+        .collect();
+    let changed = |rel: &str| LauncherError::new(codes::SHARED_LOADER_CHANGED).with("file", rel);
+    let mut now = None;
+    for g in &proxies {
+        if let Some(p) = existing_target(game_root, &checked_rel(&g.rel)?)?
+            && let Some(bytes) = doorstop::read_proxy(&p)
+        {
+            now = Some((g.rel.clone(), bytes));
+            break;
+        }
+    }
+    let first = proxies.first().map(|g| g.rel.as_str()).unwrap_or_default();
+    let Some((rel, bytes)) = now else {
+        return Err(changed(first));
+    };
+    let generation = match doorstop::generation(&bytes) {
+        Some(g) if w.served_by(&bytes, exe_machine) => g,
+        _ => return Err(changed(&rel)),
+    };
+    let text = |p: &GamePath| -> Result<String> {
+        match p {
+            GamePath::Local(p) => path_text(&plain(p), flavor),
+            GamePath::Verbatim(s) => Ok(s.clone()),
+        }
+    };
+    let chain = x.expand(&w.decl.chain)?;
+    let opts = w
+        .doorstop_args(generation, &chain, &text)?
+        .ok_or_else(|| changed(&rel))?;
+    let chain_ini = w.chain_ini(&path_text(&plain(&w.target), flavor)?);
+    Ok((opts, chain_ini))
+}
+
+/// [`STEAM_LAUNCH_OPTIONS_DOORSTOP`] when a Steam user's own launch options for `appid` pass
+/// Doorstop options: every Steam install this machine has, the caller's first.
+fn steam_warnings(game: &GameTarget, appid: u32) -> Vec<String> {
+    let caller = game
+        .steam_appinfo
+        .as_deref()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut doorstop = false;
+    for root in caller
+        .into_iter()
+        .chain(crate::steam_appinfo::steam_roots())
+    {
+        let key = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        doorstop |= crate::steam_userconfig::steam_user_launch_options(&root, &[appid])
+            .get(&appid)
+            .is_some_and(|all| {
+                all.iter()
+                    .any(|o| crate::steam_userconfig::launch_options_pass_doorstop(o))
+            });
+    }
+    if doorstop {
+        vec![STEAM_LAUNCH_OPTIONS_DOORSTOP.to_owned()]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Whether the `doorstop_config.ini` Doorstop reads where the game starts (the exe's folder, the

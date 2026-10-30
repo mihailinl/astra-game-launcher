@@ -34,6 +34,7 @@ mod plan;
 mod proton;
 mod running;
 pub mod steam_appinfo;
+mod steam_userconfig;
 
 pub use ctx::{Ctx, Progress};
 pub use detect::{
@@ -45,7 +46,10 @@ pub use fetch::UreqFetch;
 pub use fetch::{Fetch, MAX_DOWNLOAD_BYTES, fetch_verified};
 pub use game::{GameTarget, Platform, proton_prefix_for, steam_appid_of_dir, steam_appids_of_dir};
 pub use install::{UninstallReport, install, installed, uninstall};
-pub use launch::{ProcessPlan, Spawn, StdSpawn, find_steam, launch, prepare_launch};
+pub use launch::{
+    MODS_CHOICE_UNREADABLE, ProcessPlan, STEAM_LAUNCH_OPTIONS_DOORSTOP, Spawn, StdSpawn,
+    find_steam, launch, prepare_launch, prepare_launch_with,
+};
 pub use ledger::{
     LEDGER_SCHEMA, Ledger, LedgerBackup, LedgerFile, LedgerGame, LedgerGameFile, LedgerSource,
     LedgerState, LoaderBaseline, ProtonRecord,
@@ -55,9 +59,10 @@ pub use manifest::{
     Target, wine_dll_overrides,
 };
 pub use mods::{
-    Choice, ChoiceKind, ChoiceSource, LoaderKind, MODS_CHOICE_SCHEMA, ModLoader, ModManager,
-    ModSource, ModsDecl, ModsEnv, ModsLoader, Unplayable, default_mods_source, discover_mods,
-    discover_mods_in, mods_choice, set_mods_choice,
+    ArmedBy, Choice, ChoiceKind, ChoiceSource, LOADER_STATUS_FILE_NAME, LastRun, LoaderKind,
+    LoaderReason, LoaderStatus, MODS_CHOICE_SCHEMA, ModLoader, ModManager, ModSource, ModsDecl,
+    ModsEnv, ModsLoader, Unplayable, default_mods_source, discover_mods, discover_mods_in,
+    loader_status, mods_choice, mods_last_run, set_mods_choice,
 };
 pub use package::{GiPackage, Limits, PackageSummary, SummaryConfigWrite, SummaryGameFile};
 pub use plan::{
@@ -67,6 +72,7 @@ pub use running::is_running;
 pub use steam_appinfo::{
     launch_executable, launch_executables, steam_roots, valve_anti_cheat, valve_anti_cheat_of,
 };
+pub use steam_userconfig::{launch_options_pass_doorstop, steam_user_launch_options};
 
 /// The ledger's file name inside a profile.
 pub const LEDGER_FILE_NAME: &str = paths::LEDGER_FILE;

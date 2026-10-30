@@ -28,6 +28,8 @@ astra-game-launcher launch --profile <dir> --game <dir> --exe <rel> [--appid N]
                            [--proton-prefix P] [--steam <path>] [--var k=v]… [--vars-stdin]
                            [--dry-run] [--json]
 astra-game-launcher uninstall --profile <dir> --game <dir> --exe <rel> [--proton-prefix P] [--json]
+astra-game-launcher mods --profile <dir> --game <dir> --exe <rel> [--appid N]
+                         [--choose without | --choose with --source <root>] [--json]
 ```
 
 - `detect --appid N` asks Steam's `appcache/appinfo.vdf` which program Steam launches for the
@@ -122,6 +124,50 @@ set_mods_choice(&profile_dir, Choice { choice: ChoiceKind::With,
   (`{"schema":1,"choice":"with"|"without","source":{…},"added_roots":[…]}`), written atomically
   under the profile lock by `set_mods_choice` only; its name is reserved like the ledger's. An
   update keeps it, `uninstall` removes it, so a reinstall asks again.
+
+- **Play.** `prepare_launch` reads the choice (its signature is unchanged; `prepare_launch_with`
+  takes the `ModsEnv`). Not asked yet while something could be played together:
+  `mods-choice-needed`. "Without", or an integration with no table: the Play of 0.3.2, argument
+  for argument — and an integration with no table never asks and plays Astra alone whatever was
+  chosen. "With": the proxy beside the game *now* (ours, shared, or relinked by their
+  manager) decides the spelling by its generation — Doorstop 4 `--doorstop-enabled true
+  --doorstop-target-assembly <chain>`, Doorstop 3 `--doorstop-enable true --doorstop-target
+  <chain>` — followed by their pack's own settings from the source's `doorstop_config.ini` (the
+  Mono search path override; `boot_config_override`; for IL2CPP `--doorstop-clr-corlib-dir` and
+  `--doorstop-clr-runtime-coreclr-path`, their `dotnet/` by default), a relative path looked up
+  below their root and then the game folder, a Windows path passed as written, `Z:\…` under
+  Proton; then today's pins (no Mono debugger; `boot.config` when the game folder's ini is not
+  ours and theirs sets none). The manifest's own Doorstop options give way; its other arguments
+  stay. Each path of theirs is one argv element (`steam -applaunch` is spawned with an argv,
+  never a shell string; that Steam hands each one to the game whole is a live-check item, as for
+  Astra's own profile path). Then `chain.ini` (`[Chain] target/source/profile`, UTF-8 without a
+  BOM) at `[integration.mods].chain_config` — which must be `chain.ini` beside the chain, the one
+  file the chain reads — resolved before anything is written and written under the profile lock
+  once nothing can refuse the Play: the only file a Play with mods adds. Uninstall removes it and
+  the chain's `last-run.txt`. Nothing of theirs is ever written: not their profile, not their
+  `doorstop_config.ini`, not their proxy. A `mods-choice.json` that cannot be read (not JSON, too
+  new, not a file) is no answer: `mods-choice-needed`, or Astra alone with the warning
+  `mods-choice-unreadable`, never a failed Play.
+- **Readers.** `mods_last_run` (the chain's `last-run.txt`: `LastRun::Ok`, `Fallback`,
+  `HooksFailed`) and `loader_status` (the Unreal loader's `astra-loader-status.json`, typed; a
+  `reason` or `armed_by` it does not know is `Other`, never refused).
+- **Steam launch options.** `ProcessPlan::warnings` holds `steam-launch-options-doorstop` when a
+  Steam user's own launch options for the game pass `--doorstop-…` (`localconfig.vdf`,
+  `steam_user_launch_options`): Steam adds them to Astra's start and Doorstop may take them over
+  Astra's. Both modes; never a refusal.
+
+| code | from | params | what the person can do |
+|---|---|---|---|
+| `mods-choice-needed` | `prepare_launch` | `sources` (how many could be played together); `choice_unreadable` when `mods-choice.json` could not be read | Answer once (`set_mods_choice`: with which mods, or without), then Play again. |
+| `mods-source-missing` | `prepare_launch` | `profile`, `manager`, `root`; `reason` = `no-preloader`, or `file` (their .NET runtime) | Their mod profile is gone or broken: play without mods, or choose another. |
+| `mods-loader-unsupported` | `prepare_launch` | `have`, `need` (`5.4`, `6.0.0-be.788`), `profile` | Their BepInEx is too old (update it in their manager), or another build than the integration's: play with Astra alone, or with their mods without Astra. |
+| `mods-melonloader` | `prepare_launch` | `profile` | Their mods run through MelonLoader: Astra plays together with BepInEx only. |
+| `mods-unsupported` | `prepare_launch` | `reason` = `platform`, `no-doorstop` | The installed integration declares the table and still cannot play with mods here: choose "without". |
+
+A Play with mods can also answer an existing code: `unknown-key` / `manifest-invalid` /
+`path-escapes` for an `[integration.mods]` this launcher cannot use, `needs-reinstall` (`file`)
+for a chain loader file that changed, `shared-loader-changed` for a proxy that cannot start the
+chain (Doorstop 3 with IL2CPP). The CLI's `mods` command lists the sources and remembers a choice.
 
 ## Which program is the game
 

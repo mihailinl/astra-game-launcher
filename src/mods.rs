@@ -21,6 +21,8 @@
 mod choice;
 mod decl;
 mod games;
+pub(crate) mod play;
+mod status;
 pub(crate) mod version;
 
 use std::fs;
@@ -35,6 +37,10 @@ pub use choice::{
 };
 pub(crate) use choice::{MAX_ADDED_ROOTS, read as read_choice, remove as remove_choice};
 pub use decl::{ModsDecl, ModsLoader};
+pub use status::{
+    ArmedBy, LOADER_STATUS_FILE_NAME, LastRun, LoaderReason, LoaderStatus, loader_status,
+    mods_last_run,
+};
 
 use crate::doorstop;
 use crate::game::{GameTarget, Platform, steam_appid_of_dir};

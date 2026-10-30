@@ -53,6 +53,23 @@ pub mod codes {
     pub const PROTON_PREFIX_MISSING: &str = "proton-prefix-missing";
     // Launch.
     pub const STEAM_NOT_FOUND: &str = "steam-not-found";
+    // Play with the player's own mods.
+    /// Play: the integration can play together with the player's own mods, some are offered
+    /// (`sources`, how many) and the player was never asked — or their answer cannot be read
+    /// (`choice_unreadable`, why): ask once ([`crate::set_mods_choice`]), then Play again.
+    pub const MODS_CHOICE_NEEDED: &str = "mods-choice-needed";
+    /// Play with mods: the chosen mod profile (`profile`, `manager`, `root`) is gone, or no longer
+    /// holds its BepInEx preloader (`reason` = `no-preloader`), or its .NET runtime (`file`).
+    pub const MODS_SOURCE_MISSING: &str = "mods-source-missing";
+    /// Play with mods: their BepInEx (`have`) is not one the integration's chain runs beside
+    /// (`need`: `5.4`, `6.0.0-be.788`); `profile` names it.
+    pub const MODS_LOADER_UNSUPPORTED: &str = "mods-loader-unsupported";
+    /// Play with mods: the chosen mods run through MelonLoader (`profile`).
+    pub const MODS_MELONLOADER: &str = "mods-melonloader";
+    /// Play with mods: the installed integration declares `[integration.mods]` and still cannot
+    /// here (`reason` = `platform`: a native Linux game; `no-doorstop`: its launch goes through no
+    /// Doorstop proxy beside the game). One with no table plays Astra alone, never this.
+    pub const MODS_UNSUPPORTED: &str = "mods-unsupported";
     // Other.
     pub const MISSING_VARIABLE: &str = "missing-variable";
     /// A variable's value holds a character it may not carry (a newline into an INI, a NUL).
@@ -139,6 +156,17 @@ impl LauncherError {
                 "the game's Proton prefix does not exist yet; start the game once from Steam"
             }
             codes::STEAM_NOT_FOUND => "Steam was not found",
+            codes::MODS_CHOICE_NEEDED => {
+                "the game can be played together with your own mods; choose with or without them first"
+            }
+            codes::MODS_SOURCE_MISSING => "the mod profile chosen for this game is no longer there",
+            codes::MODS_LOADER_UNSUPPORTED => {
+                "your mods' BepInEx is not a version this integration can play together with"
+            }
+            codes::MODS_MELONLOADER => {
+                "the mods chosen for this game run through MelonLoader; Astra plays together with BepInEx only"
+            }
+            codes::MODS_UNSUPPORTED => "this integration cannot play together with your own mods",
             codes::MISSING_VARIABLE => "a variable the integration needs was not given",
             codes::INVALID_VARIABLE => "a variable's value holds a forbidden character",
             codes::CANCELLED => "cancelled",

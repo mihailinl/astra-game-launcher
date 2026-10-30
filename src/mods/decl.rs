@@ -142,4 +142,16 @@ impl ModsDecl {
             chain_config,
         })
     }
+
+    /// `chain` below the profile.
+    pub(crate) fn chain_rel(&self) -> Vec<String> {
+        parse_jailed(&self.chain).expect("checked when read").rel
+    }
+
+    /// `chain_config` below the profile.
+    pub(crate) fn chain_config_rel(&self) -> Vec<String> {
+        parse_jailed(&self.chain_config)
+            .expect("checked when read")
+            .rel
+    }
 }

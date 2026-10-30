@@ -461,6 +461,8 @@ pub fn uninstall(profile_dir: &Path, game: &GameTarget) -> Result<UninstallRepor
         // again. An update keeps it (it never comes through here). Best effort: the integration is
         // gone already, and a choice left behind only means the next install does not ask.
         let _ = crate::mods::remove_choice(&profile);
+        // And what Play with mods left in the profile: chain.ini, the chain's last-run.txt.
+        crate::mods::play::remove_play_files(&profile, &ledger);
         report
     };
     let _ = fs::remove_file(profile.join(LOCK_FILE));

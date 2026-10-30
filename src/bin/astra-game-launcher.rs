@@ -33,6 +33,8 @@ USAGE
                              [--var k=v]… [--vars-stdin] [--dry-run] [--json]
   astra-game-launcher uninstall --profile <dir> --game <dir> --exe <rel> [--proton-prefix P]
                                 [--platform …] [--json]
+  astra-game-launcher mods --profile <dir> --game <dir> --exe <rel> [--appid N] [--platform …]
+                           [--choose without | --choose with --source <root>] [--json]
   astra-game-launcher fetch <url> --sha256 <hex> -o <file> [--json]
   astra-game-launcher --version
 
@@ -52,6 +54,10 @@ NOTES
   `install` needs --accept-vac-unchecked besides --yes. `launch` checks VAC again.
   `launch --dry-run` prepares everything (INI keys, the Proton overrides, which uninstall
   reverts) and prints the command without starting it.
+  `mods` lists the player's own mods for the game (r2modman, Thunderstore Mod Manager, Gale, a
+  BepInEx in the game folder) and whether the installed integration can play together with
+  them; `--choose` remembers the answer `launch` reads (it answers `mods-choice-needed` until
+  then, when some can).
   `--vars-stdin` reads `k=v` lines or a JSON object from stdin, so a token stays out of `ps`.
   Errors print {\"code\", \"params\"} as JSON on stdout and exit 1.
 ";
@@ -504,7 +510,7 @@ fn run(argv: &[String]) -> Result<Output, LauncherError> {
             if !dry {
                 gl::launch(&plan, &gl::StdSpawn)?;
             }
-            let text = format!(
+            let mut text = format!(
                 "{} {}\n{}\n",
                 plan.program.display(),
                 serde_json::to_string(&plan.args).unwrap_or_default(),
@@ -514,6 +520,9 @@ fn run(argv: &[String]) -> Result<Output, LauncherError> {
                     "started"
                 }
             );
+            if !plan.warnings.is_empty() {
+                let _ = writeln!(text, "warnings: {}", plan.warnings.join(", "));
+            }
             Ok(Output {
                 json: json!({ "process": plan, "started": !dry }),
                 text,
@@ -531,6 +540,73 @@ fn run(argv: &[String]) -> Result<Output, LauncherError> {
             );
             Ok(Output {
                 json: to_json(&r),
+                text,
+            })
+        }
+        "mods" => {
+            let mut opts = vec!["--profile", "--choose", "--source"];
+            opts.extend_from_slice(GAME_OPTS);
+            let a = Args::parse(argv, &opts, &["--json"])?;
+            let game = game_target(&a)?;
+            let profile = Path::new(a.need("--profile")?);
+            let sources = gl::discover_mods(&game, profile);
+            let choice = match a.one("--choose") {
+                None => None,
+                Some("without") => Some(gl::Choice {
+                    choice: gl::ChoiceKind::Without,
+                    source: None,
+                    added_roots: Vec::new(),
+                }),
+                Some("with") => {
+                    let want = std::fs::canonicalize(a.need("--source")?).map_err(|e| {
+                        LauncherError::io(e).with("path", a.need("--source").unwrap_or_default())
+                    })?;
+                    let s = sources
+                        .iter()
+                        .find(|s| std::fs::canonicalize(&s.root).is_ok_and(|r| r == want))
+                        .ok_or_else(|| usage("--source names none of the mods found"))?;
+                    Some(gl::Choice {
+                        choice: gl::ChoiceKind::With,
+                        source: Some(gl::ChoiceSource::of(s)),
+                        added_roots: Vec::new(),
+                    })
+                }
+                Some(other) => return Err(usage(format!("--choose {other}: with or without"))),
+            };
+            if let Some(c) = &choice {
+                gl::set_mods_choice(profile, c.clone())?;
+            }
+            let chosen = gl::mods_choice(profile)?;
+            let mut text = String::new();
+            for src in &sources {
+                let _ = writeln!(
+                    text,
+                    "{} «{}» {} mods, {} {}: {}",
+                    src.manager.code(),
+                    src.profile,
+                    src.mods,
+                    src.loader.kind.code(),
+                    src.loader.version.as_deref().unwrap_or("?"),
+                    match &src.playable {
+                        Ok(()) => "can play together".to_owned(),
+                        Err(u) => serde_json::to_string(u).unwrap_or_default(),
+                    }
+                );
+                let _ = writeln!(text, "  {}", src.root.display());
+            }
+            if sources.is_empty() {
+                text.push_str("no mods found\n");
+            }
+            let _ = writeln!(
+                text,
+                "choice: {}",
+                chosen
+                    .as_ref()
+                    .map(|c| serde_json::to_string(c).unwrap_or_default())
+                    .unwrap_or_else(|| "not asked yet".to_owned())
+            );
+            Ok(Output {
+                json: json!({ "sources": sources, "choice": chosen }),
                 text,
             })
         }
