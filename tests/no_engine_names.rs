@@ -3,16 +3,19 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Canary K6: engine knowledge leaves the detector's code for data (engine descriptors), and
-//! never comes back. This counts the string literals in `src/engines/**/*.rs` and
-//! `src/detect.rs` that name an engine or one of its tell-tale files, and holds the count to a
-//! ceiling that may only FALL: when a change lowers it, lower [`CEILING`] in the same commit.
-//! Data files (`src/engines/builtin/*.toml`, from L2) are where those names belong and are not
-//! counted; neither are comments.
+//! never comes back. This counts the string literals in `src/engines/**/*.rs`, `src/detect.rs`
+//! and the plan's gates (`src/plan.rs`, `src/manifest.rs`) that name an engine or one of its
+//! tell-tale files, and holds the count to [`CEILING`] EXACTLY: a rise fails, and so does a fall
+//! until the same commit lowers the constant — so the count can only ever fall, on paper and in
+//! fact. Data files (`src/engines/builtin/*.toml`, from L2) are where those names belong and are
+//! not counted; neither are comments, nor the bodies of `#[cfg(test)] mod`s (a test names the
+//! engines it tests). `doorstop.rs`, `mods/` and `former.rs` are loader and history code, not
+//! detection, and are not scanned (plan B §2).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The count at launcher 0.5.0's L1. May only go down.
+/// The count at launcher 0.5.0's L1. May only go down, and equals the count.
 const CEILING: usize = 43;
 
 /// Matched case-insensitively inside each literal.
@@ -38,13 +41,51 @@ const ENGINE_WORDS: &[&str] = &[
     "crashreportclient",
 ];
 
-/// The string literals of Rust source `src` (plain, raw, byte), comments skipped.
+/// The string literals of Rust source `src` (plain, raw, byte), comments and the bodies of
+/// `#[cfg(test)] mod`s skipped.
 fn literals(src: &str) -> Vec<String> {
     let b = src.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
+    // Braces outside literals and comments; inside a test module, the depth its body opened at.
+    let mut depth = 0usize;
+    let mut test_mod: Option<usize> = None;
+    let mut test_mod_next = false;
+    let push = |out: &mut Vec<String>, lit: &str, skipping: bool| {
+        if !skipping {
+            out.push(lit.to_owned());
+        }
+    };
     while i < b.len() {
+        let skipping = test_mod.is_some();
         match b[i] {
+            b'#' if src[i..].starts_with("#[cfg(test)]") => {
+                i += "#[cfg(test)]".len();
+                let rest = src[i..].trim_start();
+                if rest.starts_with("mod ") || rest.starts_with("pub mod ") {
+                    test_mod_next = true;
+                }
+            }
+            b'{' => {
+                depth += 1;
+                if test_mod_next && test_mod.is_none() {
+                    test_mod = Some(depth);
+                }
+                test_mod_next = false;
+                i += 1;
+            }
+            b'}' => {
+                if test_mod == Some(depth) {
+                    test_mod = None;
+                }
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            b';' if test_mod_next => {
+                // `#[cfg(test)] mod x;`: a file of its own, not scanned here.
+                test_mod_next = false;
+                i += 1;
+            }
             b'/' if b.get(i + 1) == Some(&b'/') => {
                 while i < b.len() && b[i] != b'\n' {
                     i += 1;
@@ -96,7 +137,7 @@ fn literals(src: &str) -> Vec<String> {
                     .windows(close.len())
                     .position(|w| w == close.as_slice())
                     .map_or(b.len(), |p| body + p);
-                out.push(src[body..end].to_owned());
+                push(&mut out, &src[body..end], skipping);
                 i = end + close.len();
             }
             b'"' => {
@@ -108,7 +149,7 @@ fn literals(src: &str) -> Vec<String> {
                     }
                     i += 1;
                 }
-                out.push(src[start..i.min(b.len())].to_owned());
+                push(&mut out, &src[start..i.min(b.len())], skipping);
                 i += 1;
             }
             _ => i += 1,
@@ -157,10 +198,14 @@ fn naming(literal: &str) -> bool {
 #[test]
 fn engine_names_in_the_detectors_code_only_ever_fall() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut files = vec![root.join("src/detect.rs")];
+    let mut files = vec![
+        root.join("src/detect.rs"),
+        root.join("src/plan.rs"),
+        root.join("src/manifest.rs"),
+    ];
     rust_files(&root.join("src/engines"), &mut files);
     files.sort();
-    assert!(files.len() >= 4, "{files:?}");
+    assert!(files.len() >= 6, "{files:?}");
     let mut total = 0;
     let mut report = String::new();
     for f in &files {
@@ -177,12 +222,10 @@ fn engine_names_in_the_detectors_code_only_ever_fall() {
         total <= CEILING,
         "engine names crept back into the detector's code: {total} > {CEILING}\n{report}"
     );
-    // A scrape that matches nothing reads as green: the built-in detector still names its
-    // engines, so a count of zero means the scrape is broken, not the work done.
-    assert!(total > 0);
-    if total < CEILING {
-        eprintln!("the count fell: lower CEILING to {total}");
-    }
+    assert_eq!(
+        total, CEILING,
+        "the count fell: lower CEILING to {total} in this commit, so it can never rise back\n{report}"
+    );
 }
 
 #[test]
@@ -199,6 +242,14 @@ fn the_scrape_sees_literals_and_nothing_else() {
         let g = "esc \" Managed";
         let h = 'x';
         let i = r##"a "# b"##;
+        fn f() { let j = "{name}_Data"; let k = '{'; }
+        #[cfg(test)]
+        mod tests {
+            fn t() { let x = "UnityPlayer.so"; if y { let z = r"}"; } }
+        }
+        #[cfg(test)]
+        fn not_a_module() -> &'static str { "il2cpp" }
+        let after = "Managed";
     "####;
     let l = literals(src);
     assert_eq!(
@@ -210,8 +261,11 @@ fn the_scrape_sees_literals_and_nothing_else() {
             "x.pck",
             "plain",
             "esc \\\" Managed",
-            "a \"# b"
+            "a \"# b",
+            "{name}_Data",
+            "il2cpp",
+            "Managed",
         ]
     );
-    assert_eq!(l.iter().filter(|x| naming(x)).count(), 5);
+    assert_eq!(l.iter().filter(|x| naming(x)).count(), 8);
 }
