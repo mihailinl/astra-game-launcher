@@ -943,6 +943,148 @@ fn also_if_never_admits_a_non_program() {
     assert_eq!(d(t.path(), None, &set).exe, p("run"));
 }
 
+/// One code, three rules of three tiers, each matching its own program: `Old.exe` (evidence
+/// `odata/`, depth 1) and `Sub/New.exe` (evidence `Sub/ndata/`, depth 2).
+fn tiered(old: &str, new: &str) -> String {
+    let rule = |tier: &str, anchor: &str, data: &str| {
+        format!(
+            "[[rule]]\n{tier}\nprograms = {{ ext = [\"exe\"], first = 8 }}\nrequire = [ {{ listed = \"{anchor}\", kind = \"file\" }}, {{ listed = \"{data}\", kind = \"dir\", as = \"data\" }} ]\ncode = \"tiers\"\nconfidence = \"high\"\nevidence = \"{{data}}\"\nbinary = \"windows\"\n"
+        )
+    };
+    format!(
+        "schema = \"astra.engine/1\"\nengine = {{ codes = {{ tiers = \"Tiers\" }} }}\n{}{}",
+        rule(old, "tiers.old", "odata"),
+        rule(new, "tiers.new", "ndata")
+    )
+}
+
+fn tiered_game(t: &Tmp) {
+    write(&t.join("Old.exe"), b"MZ");
+    write(&t.join("tiers.old"), b"o");
+    write(&t.join("odata/x"), b"x");
+    write(&t.join("Sub/New.exe"), b"MZ");
+    write(&t.join("Sub/tiers.new"), b"n");
+    write(&t.join("Sub/ndata/x"), &[0u8; 4096]);
+}
+
+/// Pass A's `best()` order, held: the shallowest before one that passes, the rule's tier before
+/// the shallowest, and among weak rules the lowest `weak_order` before the shallowest.
+#[test]
+fn choosing_is_tier_then_depth_then_passes() {
+    let t = Tmp::new("tiers");
+    tiered_game(&t);
+    // Depth before `passes`: a shallower fallback that does not pass beats a deeper rule that
+    // does.
+    let set = one(&tiered(
+        "tier = \"strong-fallback\"\npasses = false",
+        "tier = \"strong\"",
+    ));
+    assert_eq!(set.len(), 1, "{:?}", set.skipped());
+    let got = d(t.path(), None, &set);
+    assert_eq!((got.engine.as_str(), got.exe), ("tiers", p("Old.exe")));
+    // The tier before depth: a deeper strong rule beats a shallower weak one.
+    let set = one(&tiered("tier = \"weak\"", "tier = \"strong\""));
+    assert_eq!(set.len(), 1, "{:?}", set.skipped());
+    assert_eq!(d(t.path(), None, &set).exe, p("Sub/New.exe"));
+    // Among weak rules (first-party: `weak_order`), the lowest order before depth.
+    let set = set_of(&[(
+        Moderation::Moderated,
+        "astra",
+        true,
+        &tiered(
+            "tier = \"weak\"\nweak_order = 130",
+            "tier = \"weak\"\nweak_order = 100",
+        ),
+    )]);
+    assert_eq!(set.len(), 1, "{:?}", set.skipped());
+    assert_eq!(d(t.path(), None, &set).exe, p("Sub/New.exe"));
+    // And with the orders the other way round, the shallower one.
+    let set = set_of(&[(
+        Moderation::Moderated,
+        "astra",
+        true,
+        &tiered(
+            "tier = \"weak\"\nweak_order = 100",
+            "tier = \"weak\"\nweak_order = 130",
+        ),
+    )]);
+    assert_eq!(d(t.path(), None, &set).exe, p("Old.exe"));
+}
+
+/// `strong-fallback` is a strong match that does not pass: `passes` defaults to false for it, so
+/// at one depth a `strong` rule beats it without saying so.
+#[test]
+fn a_strong_fallback_does_not_pass_unless_it_says_so() {
+    let t = Tmp::new("fallback-default");
+    write(&t.join("A/Game.exe"), b"MZ");
+    write(&t.join("A/tiers.old"), b"o");
+    write(&t.join("A/odata/x"), &[0u8; 8192]);
+    write(&t.join("B/Game.exe"), b"MZ");
+    write(&t.join("B/tiers.new"), b"n");
+    write(&t.join("B/ndata/x"), b"x");
+    let set = one(&tiered("tier = \"strong-fallback\"", "tier = \"strong\""));
+    assert_eq!(set.len(), 1, "{:?}", set.skipped());
+    // Both at depth 2; A's evidence is the larger, but A's rule is the fallback.
+    assert_eq!(d(t.path(), None, &set).exe, p("B/Game.exe"));
+    let set = one(&tiered(
+        "tier = \"strong-fallback\"\npasses = true",
+        "tier = \"strong\"",
+    ));
+    assert_eq!(d(t.path(), None, &set).exe, p("A/Game.exe"));
+}
+
+/// Five tied matches of one code: a first-party descriptor's are all sized, as Pass A's own
+/// `best()` sizes them, and the largest wins; a community one sizes at most four folders, so
+/// past that none, and the tie falls to the name, then the path — an answer either way.
+#[test]
+fn five_tied_matches_still_give_an_answer() {
+    let same = r#"
+schema = "astra.engine/1"
+engine = { codes = { same = "Same" } }
+[[rule]]
+tier = "strong"
+programs = { ext = ["exe"], first = 8 }
+require = [ { listed = "same.marker", kind = "file" }, { listed = "{stem}_Data", kind = "dir", as = "data" } ]
+code = "same"
+confidence = "high"
+evidence = "{data}"
+binary = "windows"
+"#;
+    let packs = |n: usize| {
+        let t = Tmp::new(&format!("tied-{n}"));
+        for i in 0..n {
+            write(&t.join(&format!("Pack{i}/Same.exe")), b"MZ");
+            write(&t.join(&format!("Pack{i}/same.marker")), b"m");
+            let size = if i == 3 { 16 * 1024 } else { 1024 + i };
+            write(
+                &t.join(&format!("Pack{i}/Same_Data/blob")),
+                &vec![0u8; size],
+            );
+        }
+        t
+    };
+    let first_party = set_of(&[(Moderation::Moderated, "astra", true, same)]);
+    let community = one(same);
+    assert_eq!((first_party.len(), community.len()), (1, 1));
+
+    let t = packs(5);
+    let got = d(t.path(), None, &first_party);
+    assert_eq!(
+        (got.engine.as_str(), got.exe),
+        ("same", p("Pack3/Same.exe")),
+        "first-party: every folder sized, the largest"
+    );
+    let got = d(t.path(), None, &community);
+    assert_eq!(
+        (got.engine.as_str(), got.exe),
+        ("same", p("Pack0/Same.exe")),
+        "community: none sized past four, the first by path"
+    );
+    // Four fit the bound: sized, the largest.
+    let t = packs(4);
+    assert_eq!(d(t.path(), None, &community).exe, p("Pack3/Same.exe"));
+}
+
 #[test]
 fn the_shallowest_then_the_largest_of_one_code_is_the_game() {
     let t = Tmp::new("one-code");
@@ -1001,6 +1143,17 @@ fn only_the_first_programs_are_considered() {
     );
     write(&t.join("d1/alpha.core"), b"a");
     assert_eq!(d(t.path(), None, &eight).exe, p("d1/Tool.exe"));
+
+    // The ninth of nine is past `first = 8` too: the count stops AT eight.
+    let t = Tmp::new("first-nine");
+    for i in 0..9 {
+        write(&t.join(&format!("d{i}/Tool.exe")), b"MZ");
+    }
+    write(&t.join("d8/alpha.core"), b"a");
+    assert!(
+        d(t.path(), None, &eight).engine.is_unknown(),
+        "d8 is the ninth program"
+    );
 }
 
 #[test]
@@ -1138,6 +1291,23 @@ fn a_claim_carries_its_own_markers_and_anti_cheat_unknown() {
     // Without a claim, nothing is added: the markers are the claim's own.
     std::fs::remove_file(t.join("alpha.core")).unwrap();
     assert!(d(t.path(), None, &set).anti_cheat.is_empty());
+
+    // `engine-ambiguous` carries what every standing descriptor would have: a moderator's
+    // `engine` row may yet resolve it, and must not resolve away a kernel driver.
+    write(&t.join("alpha.core"), b"a");
+    write(&t.join("beta.core"), b"b");
+    let both = set_of(&[
+        (Moderation::Unchecked, "a", false, &with_marker),
+        (
+            Moderation::Unchecked,
+            "b",
+            false,
+            &alpha_like("beta", "beta.core"),
+        ),
+    ]);
+    let got = d(t.path(), None, &both);
+    assert!(got.is_ambiguous(), "{got:?}");
+    assert_eq!(got.anti_cheat, ["alpha-guard", codes::ANTI_CHEAT_UNKNOWN]);
 }
 
 #[test]
@@ -1299,6 +1469,78 @@ fn a_descriptor_whose_anchors_are_absent_costs_nothing() {
     assert_eq!(set.len(), 21, "{:?}", set.skipped());
     let got = d(t.path(), None, &set);
     assert_eq!((got.engine.as_str(), got.exe), ("alpha", p("p3/Tool.exe")));
+    // On Steam's hint too, though the hint skips the walk's prefilter.
+    let got = d(t.path(), Some("p3/Tool.exe"), &set);
+    assert_eq!(
+        (got.engine.as_str(), got.exe, got.hint_used),
+        ("alpha", p("p3/Tool.exe"), true)
+    );
+}
+
+/// "Grief unknown games", on Steam's hint: sixteen descriptors (four publishers, four each)
+/// whose anchors this game does not hold, each rule spending its stats BEFORE naming its
+/// anchor, would drain the game's 1,024 lookups and wipe every Pass B answer of any game Steam
+/// names a program for. A rule's anchors are looked for first, in the listing already read: an
+/// absent one costs nothing, wherever it sits in `require`.
+#[test]
+fn absent_anchors_cost_nothing_on_steams_hint_either() {
+    let t = Tmp::new("hint-grief");
+    write(&t.join("Game.exe"), b"MZ\x90\0");
+    write(&t.join("real.anchor"), b"r");
+    let alpha = alpha_like("alpha", "real.anchor");
+    let spender = |i: usize| {
+        let stats = |k: usize| {
+            (0..8)
+                .map(|j| format!("{{ stat = \"m{k}_{j}\", kind = \"file\" }}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let anys = (0..3)
+            .map(|k| format!("{{ any = [ {} ] }}", stats(k)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let rule = format!(
+            "[[rule]]\ntier = \"strong\"\nprograms = {{ ext = [\"exe\"], first = 8 }}\nrequire = [ {{ any = [ {anys} ] }}, {{ listed = \"absent{i}.anchor\", kind = \"file\" }} ]\ncode = \"spend-{i}\"\nconfidence = \"high\"\nevidence = \"{{program}}\"\nbinary = \"windows\"\n"
+        );
+        format!(
+            "schema = \"astra.engine/1\"\nengine = {{ codes = {{ spend-{i} = \"Spender {i}\" }} }}\n{}",
+            rule.repeat(3)
+        )
+    };
+    let spenders: Vec<String> = (0..16).map(spender).collect();
+    let build = |alpha_standing: Moderation, alpha_first: bool| {
+        let alpha = (
+            origin(alpha_standing, "alpha", false),
+            Descriptor::from_toml(&alpha),
+        );
+        let rest = spenders.iter().enumerate().map(|(i, s)| {
+            (
+                origin(Moderation::Unchecked, &format!("g{}", i / 4), false),
+                Descriptor::from_toml(s),
+            )
+        });
+        let all: Vec<_> = if alpha_first {
+            std::iter::once(alpha).chain(rest).collect()
+        } else {
+            rest.chain(std::iter::once(alpha)).collect()
+        };
+        EngineSet::build(all)
+    };
+    for (standing, first) in [
+        (Moderation::Unchecked, true),
+        (Moderation::Unchecked, false),
+        (Moderation::Local, false),
+    ] {
+        let set = build(standing, first);
+        assert_eq!(set.len(), 17, "{:?}", set.skipped());
+        assert_eq!(d(t.path(), None, &set).engine, "alpha");
+        let got = d(t.path(), Some("Game.exe"), &set);
+        assert_eq!(
+            (got.engine.as_str(), got.hint_used),
+            ("alpha", true),
+            "{standing:?}, alpha first: {first}"
+        );
+    }
 }
 
 #[test]
@@ -1319,6 +1561,22 @@ fn listed_never_resolves_to_a_wrappers_name_and_skip_dirs_skip() {
     );
     write(&t.join("GameSettings.cfg"), b"c");
     assert_eq!(d(t.path(), None, &set).engine, "alpha");
+
+    // An exact name is held to it as a glob is: a wrapper's name never answers `listed`.
+    let exact = alpha_like("alpha", "alpha.core").replace(
+        "{ listed = \"alpha.core\", kind = \"file\", as = \"core\" }",
+        "{ listed = \"alpha.core\", kind = \"file\", as = \"core\" }, { listed = \"GameLauncher.cfg\", kind = \"file\" }",
+    );
+    let exact = one(&exact);
+    assert_eq!(exact.len(), 1, "{:?}", exact.skipped());
+    let t = Tmp::new("listed-wrapper-exact");
+    write(&t.join("Game.exe"), b"MZ");
+    write(&t.join("alpha.core"), b"a");
+    write(&t.join("GameLauncher.cfg"), b"c");
+    assert!(
+        d(t.path(), None, &exact).engine.is_unknown(),
+        "a wrapper's exact name is not found"
+    );
 
     let skipping = one(&alpha_like("alpha", "alpha.core")
         .replace("first = 8 }", "first = 8, skip_dirs = [\"Tools\"] }"));
@@ -1482,6 +1740,102 @@ version = { head = ["{dir}/data/version.txt"], template = "N{1,3}.N{1,3}" }
     symlink(outside.join("version.txt"), t.join("bin/data/version.txt")).unwrap();
     let got = d(t.path(), None, &set);
     assert_eq!((got.engine.as_str(), got.version), ("eps", None));
+}
+
+/// "Read outside the folder", the two guards nothing else stands in front of: a `tail` or a
+/// `version.head` whose FOLDER is a link out of the game (the file itself is no link, so
+/// `O_NOFOLLOW` alone would let it through) with nothing earlier in `require` touching that
+/// folder; and a name placeholder that expands to `..` (a program named `..exe` or `.exe`).
+#[cfg(unix)]
+#[test]
+fn no_probe_leaves_the_folder_through_a_linked_folder_or_a_dotted_name() {
+    use std::os::unix::fs::symlink;
+    let outside = Tmp::new("outside-probe");
+    write(&outside.join("data/tail.bin"), b"..EPS");
+    write(&outside.join("ver/version.txt"), b"v 9.99");
+
+    let text = r#"
+schema = "astra.engine/1"
+engine = { codes = { eps = "Eps" } }
+[[rule]]
+tier = "strong"
+programs = { ext = ["exe"], at = "bin", first = 8 }
+require = [ { listed = "eps.runtime", kind = "file" }, { tail = "{dir}/data/tail.bin", bytes = 3, equals = "EPS" } ]
+code = "eps"
+confidence = "high"
+evidence = "{program}"
+binary = "windows"
+version = { head = ["{dir}/ver/version.txt"], template = "N{1,3}.N{1,3}" }
+"#;
+    let set = one(text);
+    assert_eq!(set.len(), 1, "{:?}", set.skipped());
+    let make = |name: &str| {
+        let t = Tmp::new(name);
+        write(&t.join("bin/Game.exe"), b"MZ");
+        write(&t.join("bin/eps.runtime"), b"r");
+        t
+    };
+    // Real folders: the tail matches and the version is read.
+    let t = make("probe-real");
+    write(&t.join("bin/data/tail.bin"), b"..EPS");
+    write(&t.join("bin/ver/version.txt"), b"v 1.25");
+    let got = d(t.path(), None, &set);
+    assert_eq!(
+        (got.engine.as_str(), got.version.as_deref()),
+        ("eps", Some("1.25"))
+    );
+    // `bin/data` is a link: the tail is never read through it.
+    let t = make("probe-tail-linked-folder");
+    symlink(outside.join("data"), t.join("bin/data")).unwrap();
+    write(&t.join("bin/ver/version.txt"), b"v 1.25");
+    assert!(d(t.path(), None, &set).engine.is_unknown());
+    // `bin/ver` is a link: the version is never read through it.
+    let t = make("probe-version-linked-folder");
+    write(&t.join("bin/data/tail.bin"), b"..EPS");
+    symlink(outside.join("ver"), t.join("bin/ver")).unwrap();
+    let got = d(t.path(), None, &set);
+    assert_eq!((got.engine.as_str(), got.version), ("eps", None));
+
+    // A placeholder that expands to `..`: never a way up. The game is `world/game`, and
+    // `world/outside.flag` sits right above it.
+    let world = Tmp::new("dotted-world");
+    write(&world.join("outside.flag"), b"EPS");
+    let dotted = |require: &str| {
+        one(&format!(
+            "schema = \"astra.engine/1\"\nengine = {{ codes = {{ eps = \"Eps\" }} }}\n[[rule]]\ntier = \"strong\"\nprograms = {{ ext = [\"exe\"], first = 8 }}\nrequire = [ {{ listed = \"eps.runtime\", kind = \"file\" }}{require} ]\ncode = \"eps\"\nconfidence = \"high\"\nevidence = \"{{program}}\"\nbinary = \"windows\"\n"
+        ))
+    };
+    for (program, require) in [
+        (
+            "..exe",
+            ", { stat = \"{stem}./outside.flag\", kind = \"file\" }",
+        ),
+        (
+            "..exe",
+            ", { stat = \".{stem}/outside.flag\", kind = \"file\" }",
+        ),
+        (
+            ".exe",
+            ", { stat = \"{stem}../outside.flag\", kind = \"file\" }",
+        ),
+        (
+            "..exe",
+            ", { tail = \"{stem}./outside.flag\", bytes = 3, equals = \"EPS\" }",
+        ),
+    ] {
+        let set = dotted(require);
+        assert_eq!(set.len(), 1, "{require} {:?}", set.skipped());
+        let game = world.join("game");
+        let _ = std::fs::remove_dir_all(&game);
+        write(&game.join(program), b"MZ");
+        write(&game.join("eps.runtime"), b"r");
+        // Pass B runs on this game at all: the anchor alone answers.
+        assert_eq!(d(&game, None, &dotted("")).engine, "eps", "{program}");
+        assert!(
+            d(&game, None, &set).engine.is_unknown(),
+            "{program} {require}: read above the game"
+        );
+    }
 }
 
 /// A detection saved by 0.4.1 still reads, and every built-in code survives the round trip.

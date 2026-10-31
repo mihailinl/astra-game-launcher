@@ -1793,7 +1793,9 @@ fn parse_rule(r: &RuleSpec, own: &[(EngineCode, String)], field: &str) -> Result
         programs,
         require,
         outcome,
-        passes: r.passes.unwrap_or(true),
+        // `strong-fallback` is a strong match that does not pass (Unity before 2017.2), unless
+        // it says otherwise; at one depth a rule that passes is chosen over it.
+        passes: r.passes.unwrap_or(tier != RuleTier::StrongFallback),
         evidence,
         binary,
         named_alike,
