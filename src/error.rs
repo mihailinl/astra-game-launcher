@@ -70,6 +70,39 @@ pub mod codes {
     /// here (`reason` = `platform`: a native Linux game; `no-doorstop`: its launch goes through no
     /// Doorstop proxy beside the game). One with no table plays Astra alone, never this.
     pub const MODS_UNSUPPORTED: &str = "mods-unsupported";
+    // Engine descriptors (`astra.engine/1`, [`crate::engines`]). Each refusal costs that one
+    // descriptor only; the daemon raises one banner for all of them.
+    /// Not a descriptor this launcher can read (`field`, `reason`): a key the schema does not
+    /// name, a float, a datetime, a null, a duplicate key, a bad path or placeholder, a limit.
+    pub const DESCRIPTOR_INVALID: &str = "descriptor-invalid";
+    /// The descriptor's `schema` (`schema`) is not one this launcher reads (`supported`).
+    pub const DESCRIPTOR_SCHEMA_UNKNOWN: &str = "descriptor-schema-unknown";
+    /// Larger than a descriptor may be (`bytes`).
+    pub const DESCRIPTOR_TOO_LARGE: &str = "descriptor-too-large";
+    /// A rule (`field`) with no usable anchor (`reason` = `no-anchor`, `program`, `wrapper`,
+    /// `ubiquitous-runtime`, `generic-name`, `too-short`): it would claim games it never saw.
+    pub const DESCRIPTOR_TOO_BROAD: &str = "descriptor-too-broad";
+    /// A part of the grammar (`field`) only Astra's own descriptors may use.
+    pub const DESCRIPTOR_FIRST_PARTY_ONLY: &str = "descriptor-first-party-only";
+    /// A part of the grammar (`field`) this launcher parses but does not evaluate yet.
+    pub const DESCRIPTOR_UNSUPPORTED: &str = "descriptor-unsupported";
+    /// The same descriptor (by digest) was admitted already.
+    pub const DESCRIPTOR_DUPLICATE: &str = "descriptor-duplicate";
+    /// Past what Pass B asks (`reason` = `total`: 64 descriptors; `publisher`: 4 from one).
+    pub const DESCRIPTOR_OVER_LIMIT: &str = "descriptor-over-limit";
+    /// The descriptor declares a reserved engine code (`code`): a built-in one, `unknown`, or
+    /// one that reads as either.
+    pub const ENGINE_CODE_RESERVED: &str = "engine-code-reserved";
+    /// The display name (`name`) of `code` reads as a built-in engine's, or as a review.
+    pub const ENGINE_NAME_RESERVED: &str = "engine-name-reserved";
+    /// `code` belongs to another publisher (`owner`), admitted with it first.
+    pub const ENGINE_CODE_TAKEN: &str = "engine-code-taken";
+    /// Not a refusal of the launcher's: the state of a [`crate::Detection`] whose
+    /// `engine_candidates` are not empty — descriptors of one standing disagree.
+    pub const ENGINE_AMBIGUOUS: &str = "engine-ambiguous";
+    /// Not a refusal of the launcher's: the anti-cheat entry a descriptor's claim carries when
+    /// the walk stopped at its cap or a kernel driver (`*.sys`) ships beside the game.
+    pub const ANTI_CHEAT_UNKNOWN: &str = "anti-cheat-unknown";
     // Other.
     pub const MISSING_VARIABLE: &str = "missing-variable";
     /// A variable's value holds a character it may not carry (a newline into an INI, a NUL).
@@ -167,6 +200,27 @@ impl LauncherError {
                 "the mods chosen for this game run through MelonLoader; Astra plays together with BepInEx only"
             }
             codes::MODS_UNSUPPORTED => "this integration cannot play together with your own mods",
+            codes::DESCRIPTOR_INVALID => "an engine descriptor is not valid",
+            codes::DESCRIPTOR_SCHEMA_UNKNOWN => "an engine descriptor needs a newer launcher",
+            codes::DESCRIPTOR_TOO_LARGE => "an engine descriptor is larger than allowed",
+            codes::DESCRIPTOR_TOO_BROAD => {
+                "an engine descriptor's rule names nothing specific enough beside the game"
+            }
+            codes::DESCRIPTOR_FIRST_PARTY_ONLY => {
+                "an engine descriptor uses a part only Astra's own descriptors may use"
+            }
+            codes::DESCRIPTOR_UNSUPPORTED => {
+                "an engine descriptor uses a part this launcher cannot evaluate yet"
+            }
+            codes::DESCRIPTOR_DUPLICATE => "the same engine descriptor was given twice",
+            codes::DESCRIPTOR_OVER_LIMIT => "more engine descriptors than are asked",
+            codes::ENGINE_CODE_RESERVED => "an engine descriptor declares a reserved engine code",
+            codes::ENGINE_NAME_RESERVED => "an engine descriptor's engine name is reserved",
+            codes::ENGINE_CODE_TAKEN => "the engine code belongs to another publisher",
+            codes::ENGINE_AMBIGUOUS => "more than one engine matches this game",
+            codes::ANTI_CHEAT_UNKNOWN => {
+                "whether the game uses anti-cheat cannot be told from its folder"
+            }
             codes::MISSING_VARIABLE => "a variable the integration needs was not given",
             codes::INVALID_VARIABLE => "a variable's value holds a forbidden character",
             codes::CANCELLED => "cancelled",

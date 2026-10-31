@@ -19,6 +19,7 @@ mod ctx;
 mod detect;
 mod digest;
 mod doorstop;
+pub mod engines;
 mod error;
 mod fetch;
 mod former;
@@ -39,7 +40,12 @@ mod steam_userconfig;
 
 pub use ctx::{Ctx, Progress};
 pub use detect::{
-    Binary, Confidence, Detection, Engine, ExePick, detect, detect_with, unity_version_parts,
+    Binary, Confidence, Detection, Engine, ExePick, detect, detect_with, detect_with_engines,
+    unity_version_parts,
+};
+pub use engines::{
+    Descriptor, EngineCode, EngineSet, Moderation, Origin, Skipped, is_reserved_code,
+    is_valid_engine_code,
 };
 pub use error::{LauncherError, Result, codes};
 #[cfg(feature = "cli")]

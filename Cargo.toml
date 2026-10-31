@@ -1,6 +1,6 @@
 [package]
 name = "astra-game-launcher"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MPL-2.0"
@@ -41,6 +41,7 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Registry",
 ] }
@@ -49,3 +50,8 @@ windows-sys = { version = "0.61", features = [
 sha2 = "0.10"
 hex = "0.4"
 
+[dev-dependencies]
+# Canary C1: the detector as launcher 0.4.1 shipped it (main 73bf11e), so a test can hold every
+# Detection this crate makes against the one that commit makes, byte for byte. Never a runtime
+# dependency; never moved: a new pin would compare against itself.
+launcher_legacy = { package = "astra-game-launcher", git = "https://github.com/mihailinl/astra-game-launcher", rev = "73bf11e32d83b88704175411f765806aaa7bac3f", default-features = false }

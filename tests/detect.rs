@@ -3,15 +3,32 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Engine detection on synthetic trees, and the anti-cheat markers.
+//!
+//! Every detection here goes through [`common::identity::checked`]: each tree is also held
+//! against launcher 0.4.1's detector (canary C1) and against a hostile set of engine
+//! descriptors (canary C1c).
 
 mod common;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use astra_game_launcher::{
-    Binary, Confidence, Engine, ExePick, detect, detect_with, unity_version_parts,
+    Binary, Confidence, Detection, Engine, ExePick, Result, unity_version_parts,
 };
 use common::*;
+
+fn detect(dir: &Path) -> Result<Detection> {
+    Ok(identity::checked(dir, None))
+}
+
+fn detect_with(dir: &Path, hint: Option<&str>) -> Result<Detection> {
+    Ok(identity::checked(dir, hint))
+}
+
+/// The built-in engine detected (`Engine::Unknown` included).
+fn eng(d: &Detection) -> Engine {
+    d.engine.builtin().expect("a built-in engine")
+}
 
 #[test]
 fn unity_mono_for_windows() {
@@ -20,7 +37,7 @@ fn unity_mono_for_windows() {
     write(&t.join("UnityCrashHandler64.exe"), b"MZ");
     let d = detect(t.path()).unwrap();
     assert_eq!(
-        (d.engine, d.confidence, d.binary),
+        (eng(&d), d.confidence, d.binary),
         (Engine::UnityMono, Confidence::High, Binary::Windows)
     );
     assert_eq!(d.exe, Some(PathBuf::from("Lethal Company.exe")));
@@ -34,7 +51,7 @@ fn unity_mono_native_linux_is_detected_as_linux() {
     write(&t.join("UnityPlayer.so"), b"\x7fELF");
     write(&t.join("Game_Data/Managed/Assembly-CSharp.dll"), b"MZ");
     let d = detect(t.path()).unwrap();
-    assert_eq!((d.engine, d.binary), (Engine::UnityMono, Binary::Linux));
+    assert_eq!((eng(&d), d.binary), (Engine::UnityMono, Binary::Linux));
     assert_eq!(d.exe, Some(PathBuf::from("Game.x86_64")));
 }
 
@@ -49,7 +66,7 @@ fn the_unity_version_comes_from_the_data_folders_header() {
     header.extend_from_slice(b"6000.3.1f1\0");
     write(&t.join("Game_Data/globalgamemanagers"), &header);
     let d = detect(t.path()).unwrap();
-    assert_eq!(d.engine, Engine::UnityIl2cpp);
+    assert_eq!(eng(&d), Engine::UnityIl2cpp);
     assert_eq!(d.unity_version.as_deref(), Some("6000.3.1f1"));
     assert_eq!(unity_version_parts("6000.3.1f1"), Some((6000, 3)));
 }
@@ -91,7 +108,7 @@ fn unity_il2cpp() {
     );
     let d = detect(t.path()).unwrap();
     assert_eq!(
-        (d.engine, d.confidence, d.binary),
+        (eng(&d), d.confidence, d.binary),
         (Engine::UnityIl2cpp, Confidence::High, Binary::Windows)
     );
 }
@@ -110,7 +127,7 @@ fn unreal() {
     );
     let d = detect(t.path()).unwrap();
     assert_eq!(
-        (d.engine, d.confidence, d.binary),
+        (eng(&d), d.confidence, d.binary),
         (Engine::Unreal, Confidence::High, Binary::Windows)
     );
     assert_eq!(
@@ -125,7 +142,7 @@ fn godot_with_a_pck_beside_the_exe() {
     write(&t.join("Game.exe"), b"MZ");
     write(&t.join("Game.pck"), b"GDPC");
     let d = detect(t.path()).unwrap();
-    assert_eq!((d.engine, d.confidence), (Engine::Godot, Confidence::High));
+    assert_eq!((eng(&d), d.confidence), (Engine::Godot, Confidence::High));
     assert_eq!(d.exe, Some(PathBuf::from("Game.exe")));
 }
 
@@ -139,7 +156,7 @@ fn godot_with_an_embedded_pck_is_low_confidence() {
     write(&t.join("Game.exe"), &exe);
     let d = detect(t.path()).unwrap();
     assert_eq!(
-        (d.engine, d.confidence, d.binary),
+        (eng(&d), d.confidence, d.binary),
         (Engine::Godot, Confidence::Low, Binary::Windows)
     );
 }
@@ -150,7 +167,7 @@ fn something_else_is_unknown() {
     write(&t.join("hl2.exe"), b"MZ");
     write(&t.join("hl2/gameinfo.txt"), b"x");
     let d = detect(t.path()).unwrap();
-    assert_eq!((d.engine, d.confidence), (Engine::Unknown, Confidence::Low));
+    assert_eq!((eng(&d), d.confidence), (Engine::Unknown, Confidence::Low));
     assert_eq!(d.exe, Some(PathBuf::from("hl2.exe")));
 }
 
@@ -205,7 +222,7 @@ fn a_root_game_wins_over_a_mono_tool_in_a_subfolder() {
     write(&t.join("MiSideFull_Data/globalgamemanagers"), b"x");
     unity_game(&t.join("Voice Editor"), "Miside Voice Editor");
     let d = detect(t.path()).unwrap();
-    assert_eq!(d.engine, Engine::UnityIl2cpp);
+    assert_eq!(eng(&d), Engine::UnityIl2cpp);
     assert_eq!(d.exe, Some(PathBuf::from("MiSideFull.exe")));
     assert_eq!(d.confidence, Confidence::High);
 }
@@ -216,7 +233,7 @@ fn a_game_one_level_down_is_found_when_the_root_has_none() {
     let t = Tmp::new("nested");
     unity_game(&t.join("Game"), "Inner");
     let d = detect(t.path()).unwrap();
-    assert_eq!(d.engine, Engine::UnityMono);
+    assert_eq!(eng(&d), Engine::UnityMono);
     assert_eq!(d.exe, Some(PathBuf::from("Game/Inner.exe")));
 }
 
@@ -251,7 +268,7 @@ fn the_miside_layout_is_il2cpp_at_the_root_by_the_general_rule() {
 
     let d = detect(t.path()).unwrap();
     assert_eq!(
-        (d.engine, d.confidence, d.binary),
+        (eng(&d), d.confidence, d.binary),
         (Engine::UnityIl2cpp, Confidence::High, Binary::Windows)
     );
     assert_eq!(d.exe, p("MiSideFull.exe"));
@@ -261,7 +278,7 @@ fn the_miside_layout_is_il2cpp_at_the_root_by_the_general_rule() {
     // What Steam launches for MiSide: the same answer, and the hint is said to be used.
     let d = detect_with(t.path(), Some("MiSideFull.exe")).unwrap();
     assert_eq!(
-        (d.engine, d.exe, d.evidence, d.hint_used),
+        (eng(&d), d.exe, d.evidence, d.hint_used),
         (
             Engine::UnityIl2cpp,
             p("MiSideFull.exe"),
@@ -293,7 +310,7 @@ fn of_two_root_unity_programs_the_larger_data_wins() {
         assert_eq!(d.exe, p(&format!("{big}.exe")), "{big} is larger");
         assert_eq!(d.evidence, p(&format!("{big}_Data")));
         assert_eq!(
-            (d.engine, d.confidence),
+            (eng(&d), d.confidence),
             (Engine::UnityMono, Confidence::High)
         );
     }
@@ -390,7 +407,7 @@ fn unreal_pairs_binaries_with_content_paks_in_one_project() {
 
     let d = detect(t.path()).unwrap();
     assert_eq!(
-        (d.engine, d.confidence, d.binary),
+        (eng(&d), d.confidence, d.binary),
         (Engine::Unreal, Confidence::High, Binary::Windows)
     );
     assert_eq!((d.exe.clone(), d.evidence), (shipping.clone(), p("Game")));
@@ -417,7 +434,7 @@ fn an_unreal_project_folder_need_not_repeat_the_program_name() {
     );
     write(&t.join("Pal/Content/Paks/Pal-Windows.pak"), b"pak");
     let d = detect(t.path()).unwrap();
-    assert_eq!((d.engine, d.confidence), (Engine::Unreal, Confidence::High));
+    assert_eq!((eng(&d), d.confidence), (Engine::Unreal, Confidence::High));
     assert_eq!(d.evidence, p("Pal"));
 }
 
@@ -430,7 +447,7 @@ fn unreal_without_content_paks_is_low() {
         b"MZ",
     );
     let d = detect(t.path()).unwrap();
-    assert_eq!((d.engine, d.confidence), (Engine::Unreal, Confidence::Low));
+    assert_eq!((eng(&d), d.confidence), (Engine::Unreal, Confidence::Low));
     assert_eq!(d.exe, p("Game/Binaries/Win64/Game-Win64-Shipping.exe"));
     assert_eq!(d.evidence, p("Game"));
     // And it does not pass rule 5, so as a hint it is ignored.
@@ -483,7 +500,7 @@ fn an_unreal_project_without_a_shipping_program_is_its_binaries_win64_program() 
 
     let d = detect(t.path()).unwrap();
     assert_eq!(
-        (d.engine, d.confidence, d.binary),
+        (eng(&d), d.confidence, d.binary),
         (Engine::Unreal, Confidence::High, Binary::Windows)
     );
     assert_eq!(
@@ -548,7 +565,7 @@ fn poppy_playtimes_nested_package_finds_the_game_never_the_chapter_launcher() {
 
     let d = detect(t.path()).unwrap();
     assert_eq!(
-        (d.engine, d.confidence, d.binary),
+        (eng(&d), d.confidence, d.binary),
         (Engine::Unreal, Confidence::High, Binary::Windows)
     );
     assert_eq!(
@@ -578,7 +595,7 @@ fn a_package_holding_only_a_launcher_is_unknown() {
         b"pak",
     );
     let d = detect(t.path()).unwrap();
-    assert_eq!((d.engine, d.exe, d.evidence), (Engine::Unknown, None, None));
+    assert_eq!((eng(&d), d.exe, d.evidence), (Engine::Unknown, None, None));
 }
 
 /// A launcher may ALSO have its own matching bootstrapper beside it (so `bootstrap_matched` ties
@@ -743,7 +760,7 @@ fn an_unshipped_program_needs_content_paks_and_is_never_the_engines() {
     let t = Tmp::new("unshipped-no-paks");
     write(&t.join("Game/Binaries/Win64/Game.exe"), b"MZ");
     let d = detect(t.path()).unwrap();
-    assert_eq!((d.engine, d.exe), (Engine::Unknown, None));
+    assert_eq!((eng(&d), d.exe), (Engine::Unknown, None));
     let d = detect_with(t.path(), Some("Game/Binaries/Win64/Game.exe")).unwrap();
     assert!(!d.hint_used);
 
@@ -777,7 +794,7 @@ fn unreal_paks_without_a_program_name_their_platform() {
         write(&t.join(&format!("Gameface/Content/Paks/{pak}")), b"pak");
         let d = detect(t.path()).unwrap();
         assert_eq!(
-            (d.engine, d.confidence, d.exe, d.evidence, d.binary),
+            (eng(&d), d.confidence, d.exe, d.evidence, d.binary),
             (Engine::Unreal, Confidence::Low, None, p("Gameface"), binary),
             "{pak}"
         );
@@ -793,7 +810,7 @@ fn godot_pairs_a_program_with_its_pck() {
     write(&t.join("crash_handler.exe"), b"MZ");
     let d = detect(t.path()).unwrap();
     assert_eq!(
-        (d.engine, d.confidence, d.binary),
+        (eng(&d), d.confidence, d.binary),
         (Engine::Godot, Confidence::High, Binary::Windows)
     );
     assert_eq!((d.exe, d.evidence), (p("Game.exe"), p("Game.pck")));
@@ -808,7 +825,7 @@ fn godot_pairs_a_program_with_its_pck() {
     write(&t.join("Game.x86_64"), b"\x7fELF");
     write(&t.join("Game.pck"), b"GDPC");
     let d = detect(t.path()).unwrap();
-    assert_eq!((d.engine, d.binary), (Engine::Godot, Binary::Linux));
+    assert_eq!((eng(&d), d.binary), (Engine::Godot, Binary::Linux));
     assert_eq!((d.exe, d.evidence), (p("Game.x86_64"), p("Game.pck")));
 }
 
@@ -819,7 +836,7 @@ fn a_pck_named_after_no_program_is_not_godot() {
     write(&t.join("Game.exe"), b"MZ");
     write(&t.join("Audio.pck"), b"AKPK");
     let d = detect(t.path()).unwrap();
-    assert_eq!(d.engine, Engine::Unknown);
+    assert_eq!(eng(&d), Engine::Unknown);
     assert_eq!(d.exe, p("Game.exe"));
     assert_eq!(d.evidence, None);
 }
@@ -835,7 +852,7 @@ fn a_unity_game_from_before_2017_is_mono_at_low_confidence() {
     unity_game(&t.join("Tools"), "Tool");
     let d = detect(t.path()).unwrap();
     assert_eq!(
-        (d.engine, d.confidence),
+        (eng(&d), d.confidence),
         (Engine::UnityMono, Confidence::Low)
     );
     assert_eq!((d.exe, d.evidence), (p("Game.exe"), p("Game_Data")));
@@ -853,7 +870,7 @@ fn a_unity_game_without_a_flavour_is_named_but_unknown() {
     write(&t.join("Game_Data/globalgamemanagers"), b"x");
     unity_game(&t.join("Tools"), "Tool");
     let d = detect(t.path()).unwrap();
-    assert_eq!((d.engine, d.confidence), (Engine::Unknown, Confidence::Low));
+    assert_eq!((eng(&d), d.confidence), (Engine::Unknown, Confidence::Low));
     assert_eq!((d.exe, d.evidence), (p("Game.exe"), p("Game_Data")));
 }
 

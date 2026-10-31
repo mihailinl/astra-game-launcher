@@ -41,6 +41,11 @@
 //! the programs that pass, by depth, after them at the same depth. Only when no game is found at
 //! all do the rest speak: half an Unreal pairing, a Godot pck embedded in the program. A wrapper
 //! is excluded at every tier, not only the full pairing.
+//!
+//! Everything above is **Pass A**, and [`detect_with`] is Pass A alone. [`detect_with_engines`]
+//! adds **Pass B**: engine descriptors ([`crate::EngineSet`]) asked only when Pass A answers
+//! `unknown` with no evidence and no hint used, so a descriptor can name a game nothing here
+//! recognised and can never change one it did (see [`crate::engines`]).
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
@@ -49,12 +54,16 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::engines::{self, EngineCode, EngineSet};
 use crate::error::{LauncherError, Result};
 use crate::paths::relative_components;
 
 const MAX_DEPTH: usize = 4;
-const MAX_ENTRIES: usize = 5000;
+pub(crate) const MAX_ENTRIES: usize = 5000;
 
+/// The engines this launcher recognises by its own code (Pass A). Their codes are reserved: no
+/// engine descriptor may claim one ([`crate::engines`]). Where a [`Detection`] reports an engine
+/// it is an [`EngineCode`], which also carries engines learned from descriptors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Engine {
@@ -66,6 +75,15 @@ pub enum Engine {
 }
 
 impl Engine {
+    /// Every variant, `Unknown` last.
+    pub const ALL: [Engine; 5] = [
+        Engine::UnityMono,
+        Engine::UnityIl2cpp,
+        Engine::Unreal,
+        Engine::Godot,
+        Engine::Unknown,
+    ];
+
     pub fn code(self) -> &'static str {
         match self {
             Engine::UnityMono => "unity-mono",
@@ -130,7 +148,9 @@ impl ExePick {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Detection {
-    pub engine: Engine,
+    /// The engine's code: one of [`Engine`]'s (`"unity-mono"`, … `"unknown"`, spelled exactly as
+    /// before 0.5.0), or a code an engine descriptor declares (Pass B only).
+    pub engine: EngineCode,
     pub confidence: Confidence,
     /// The game's program, relative to the folder detected.
     pub exe: Option<PathBuf>,
@@ -157,6 +177,33 @@ pub struct Detection {
     /// `-Win64-Shipping.exe`, Godot's `.pck`). For support: it says which one and WHY.
     #[serde(default)]
     pub exe_pick: Option<ExePick>,
+    /// The engine's version, read by the engine descriptor that named the game (Pass B only;
+    /// Unity keeps [`Detection::unity_version`]). Absent from the JSON when `None`, so every
+    /// Pass A detection serialises exactly as before 0.5.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// `engine-ambiguous`: two or more descriptors of the same standing name this game with
+    /// different codes, and none is preselected — [`Detection::engine`] stays `unknown` and
+    /// these are the codes, sorted. Empty otherwise, and then absent from the JSON.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engine_candidates: Vec<EngineCode>,
+    /// The SHA-256 (hex, of its canonical JSON) of the engine descriptor that named the game:
+    /// Pass B only, `None` for a built-in rule. An install pins it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub descriptor_sha256: Option<String>,
+}
+
+impl Detection {
+    /// `engine-ambiguous`: see [`Detection::engine_candidates`].
+    pub fn is_ambiguous(&self) -> bool {
+        !self.engine_candidates.is_empty()
+    }
+
+    /// Whether Pass B may speak for this result: Pass A said `unknown`, with no evidence and no
+    /// launch hint used. Everything else Pass A decided is final.
+    pub(crate) fn open_to_descriptors(&self) -> bool {
+        self.engine.is_unknown() && self.evidence.is_none() && !self.hint_used
+    }
 }
 
 /// The `(major, minor)` of a Unity version string: `6000.3.1f1` → `(6000, 3)`.
@@ -188,7 +235,7 @@ fn unity_version_in(data_dir: &Path) -> Option<String> {
 
 /// The first `<digits>.<digits>.<digits><a|b|f|p|x><digits>` in `bytes`. The letter is required:
 /// a bundle header also carries its format as `5.x.x`, which is not the engine's version.
-fn find_unity_version(bytes: &[u8]) -> Option<String> {
+pub(crate) fn find_unity_version(bytes: &[u8]) -> Option<String> {
     fn digits(b: &[u8], i: usize, max: usize) -> usize {
         b[i..]
             .iter()
@@ -230,14 +277,14 @@ fn find_unity_version(bytes: &[u8]) -> Option<String> {
     None
 }
 
-struct Entry {
+pub(crate) struct Entry {
     /// Components below the root, original case.
-    rel: Vec<String>,
-    is_dir: bool,
+    pub(crate) rel: Vec<String>,
+    pub(crate) is_dir: bool,
 }
 
 impl Entry {
-    fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         self.rel.last().map(String::as_str).unwrap_or("")
     }
 
@@ -391,7 +438,7 @@ impl Candidate {
         };
         Detection {
             unity_version,
-            engine: self.engine,
+            engine: self.engine.into(),
             confidence: self.confidence,
             exe: self.exe.as_deref().map(rel_path),
             binary: self.binary,
@@ -399,6 +446,9 @@ impl Candidate {
             evidence: self.evidence.as_deref().map(rel_path),
             hint_used,
             exe_pick: self.exe_pick,
+            version: None,
+            engine_candidates: Vec::new(),
+            descriptor_sha256: None,
         }
     }
 
@@ -418,7 +468,7 @@ fn joined(parent: &[String], name: &str) -> Vec<String> {
     v
 }
 
-fn abs(root: &Path, rel: &[String]) -> PathBuf {
+pub(crate) fn abs(root: &Path, rel: &[String]) -> PathBuf {
     let mut p = root.to_path_buf();
     p.extend(rel);
     p
@@ -426,7 +476,7 @@ fn abs(root: &Path, rel: &[String]) -> PathBuf {
 
 /// `name` in `listing`, of the kind asked for: the exact spelling first, else ignoring ASCII
 /// case (a game built on Windows may not match its own spelling on a Linux disk).
-fn find_in<'a>(listing: &'a Listing, name: &str, dir: bool) -> Option<&'a str> {
+pub(crate) fn find_in<'a>(listing: &'a Listing, name: &str, dir: bool) -> Option<&'a str> {
     let mut it = listing.iter().filter(|(_, d)| *d == dir);
     it.clone()
         .find(|(n, _)| n == name)
@@ -435,7 +485,7 @@ fn find_in<'a>(listing: &'a Listing, name: &str, dir: bool) -> Option<&'a str> {
 }
 
 /// One folder's listing, read from disk. `None` when it cannot be read.
-fn listing_of(dir: &Path) -> Option<Vec<(String, bool)>> {
+pub(crate) fn listing_of(dir: &Path) -> Option<Vec<(String, bool)>> {
     let mut out = Vec::new();
     for item in fs::read_dir(dir).ok()?.flatten() {
         if out.len() >= MAX_ENTRIES {
@@ -453,7 +503,7 @@ fn listing_of(dir: &Path) -> Option<Vec<(String, bool)>> {
 
 /// The child of `dir` named `name` (exact spelling first, else ignoring ASCII case) that is a
 /// real folder or a real file as asked, never a link.
-fn child(dir: &Path, name: &str, want_dir: bool) -> Option<String> {
+pub(crate) fn child(dir: &Path, name: &str, want_dir: bool) -> Option<String> {
     let kind = |p: &Path| if want_dir { is_dir(p) } else { is_file(p) };
     if kind(&dir.join(name)) {
         return Some(name.to_owned());
@@ -469,7 +519,7 @@ fn child(dir: &Path, name: &str, want_dir: bool) -> Option<String> {
 
 /// The stem a program's `_Data` folder or `.pck` repeats: `Game.exe`, `Game.x86_64`,
 /// `Game.x86` → `Game`; any other name is its own stem (`Game` on Linux).
-fn program_stem(name: &str) -> &str {
+pub(crate) fn program_stem(name: &str) -> &str {
     match name.rsplit_once('.') {
         Some((stem, _)) if is_program_name(name) => stem,
         _ => name,
@@ -607,7 +657,7 @@ fn is_shipping_name(name: &str) -> bool {
 /// what a Steam launch hint is followed to. Matched loosely (a substring, lower-cased) because
 /// these ship under many exact names; a real game only collides with one by choosing the same
 /// word for itself, the trade-off this whole rule already accepts (see the module doc).
-fn is_wrapper_name(name: &str) -> bool {
+pub(crate) fn is_wrapper_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.contains("launcher")
         || lower.contains("rockstar")
@@ -780,7 +830,7 @@ fn passes(
 
 /// The bytes below `p`, by a bounded walk that never follows a link. A tie-break, so a walk cut
 /// short by its bounds still answers.
-fn evidence_size(p: &Path) -> u64 {
+pub(crate) fn evidence_size(p: &Path) -> u64 {
     let Ok(m) = fs::symlink_metadata(p) else {
         return 0;
     };
@@ -878,7 +928,7 @@ fn hinted(game_dir: &Path, hint: &str) -> Option<Candidate> {
 /// The file stem of a launch hint's last path component (`WindowsNoEditor\Poppy_Playtime.exe` →
 /// `Poppy_Playtime`), for matching it against a project's own name when the hint itself is a
 /// bootstrapper rather than evidence ([`hinted`] already tried, and failed, to use it directly).
-fn hint_stem(hint: &str) -> &str {
+pub(crate) fn hint_stem(hint: &str) -> &str {
     let name = hint.rsplit(['/', '\\']).next().unwrap_or(hint);
     program_stem(name)
 }
@@ -895,17 +945,52 @@ pub fn detect(game_dir: &Path) -> Result<Detection> {
 /// A hint inside the folder that passes the Unity, Unreal or Godot rule wins outright and
 /// [`Detection::hint_used`] says so. Any other hint (missing, outside the folder, a launcher)
 /// is ignored, and `hint_used` is `false`.
+///
+/// This is Pass A alone: exactly [`detect_with_engines`] with an empty [`EngineSet`].
 pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detection> {
     let entries = walk(game_dir)?;
-    let anti_cheat = anti_cheat_of(&entries);
+    Ok(pass_a(game_dir, launch_hint, &entries))
+}
+
+/// [`detect_with`], then — only when it answers `unknown` with no evidence and no hint used —
+/// Pass B: the engine descriptors in `engines`, evaluated against the same folder within
+/// counted budgets (see [`crate::engines`]). Narrow-only by construction: any other Pass A
+/// result is returned untouched, whatever `engines` holds.
+///
+/// Pass B may name the game with a descriptor's code (and then fills
+/// [`Detection::descriptor_sha256`], perhaps [`Detection::version`]), or find that descriptors of
+/// one standing disagree ([`Detection::engine_candidates`], `engine-ambiguous`), or say nothing,
+/// in which case this is exactly [`detect_with`]'s answer.
+pub fn detect_with_engines(
+    game_dir: &Path,
+    launch_hint: Option<&str>,
+    engines: &EngineSet,
+) -> Result<Detection> {
+    let entries = walk(game_dir)?;
+    let found = pass_a(game_dir, launch_hint, &entries);
+    if engines.is_empty() || !found.open_to_descriptors() {
+        return Ok(found);
+    }
+    Ok(engines::pass_b(
+        game_dir,
+        launch_hint,
+        &entries,
+        engines,
+        found,
+    ))
+}
+
+/// Pass A: the built-in rules (the module doc), over the walk already made.
+fn pass_a(game_dir: &Path, launch_hint: Option<&str>, entries: &[Entry]) -> Detection {
+    let anti_cheat = anti_cheat_of(entries);
 
     if let Some(c) = launch_hint.and_then(|h| hinted(game_dir, h)) {
-        return Ok(c.into_detection(game_dir, anti_cheat, true));
+        return c.into_detection(game_dir, anti_cheat, true);
     }
 
     // Every folder's listing, as the walk saw it.
     let mut folders: HashMap<&[String], Vec<(String, bool)>> = HashMap::new();
-    for e in &entries {
+    for e in entries {
         if let Some((name, parent)) = e.rel.split_last() {
             folders
                 .entry(parent)
@@ -955,7 +1040,7 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
         }
     }
     if let Some(c) = best(game_dir, games) {
-        return Ok(c.into_detection(game_dir, anti_cheat, false));
+        return c.into_detection(game_dir, anti_cheat, false);
     }
 
     // No game found. The weaker signs, each Low.
@@ -966,7 +1051,7 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
         .filter_map(|(parent, listing, name)| unreal(game_dir, parent, listing, name, false))
         .collect();
     if let Some(c) = best(game_dir, half) {
-        return Ok(c.into_detection(game_dir, anti_cheat, false));
+        return c.into_detection(game_dir, anti_cheat, false);
     }
     let shipping = entries.iter().find(|e| {
         !e.is_dir
@@ -993,7 +1078,7 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
         .collect();
     let pak_project = paks.first().map(|(project, _)| project.to_vec());
     if shipping.is_some() || pak_project.is_some() {
-        return Ok(Candidate {
+        return Candidate {
             engine: Engine::Unreal,
             confidence: Confidence::Low,
             exe: shipping.map(|e| e.rel.clone()),
@@ -1016,7 +1101,7 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
             exe_pick: None,
             bootstrap_matched: false,
         }
-        .into_detection(game_dir, anti_cheat, false));
+        .into_detection(game_dir, anti_cheat, false);
     }
 
     // Godot with the pck embedded in the program.
@@ -1029,7 +1114,7 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
         .take(8)
         .find(|e| has_embedded_pck(&e.path(game_dir)))
     {
-        return Ok(Candidate {
+        return Candidate {
             engine: Engine::Godot,
             confidence: Confidence::Low,
             exe: Some(exe.rel.clone()),
@@ -1040,7 +1125,7 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
             exe_pick: None,
             bootstrap_matched: false,
         }
-        .into_detection(game_dir, anti_cheat, false));
+        .into_detection(game_dir, anti_cheat, false);
     }
 
     // Unknown. Name the program when there is exactly one obvious one; never a wrapper.
@@ -1052,8 +1137,8 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
         [one] => (Some(rel_path(&one.rel)), binary_of(one.name())),
         _ => (None, Binary::Unknown),
     };
-    Ok(Detection {
-        engine: Engine::Unknown,
+    Detection {
+        engine: Engine::Unknown.into(),
         confidence: Confidence::Low,
         exe,
         binary,
@@ -1062,7 +1147,10 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
         hint_used: false,
         unity_version: None,
         exe_pick: None,
-    })
+        version: None,
+        engine_candidates: Vec::new(),
+        descriptor_sha256: None,
+    }
 }
 
 /// Godot keeps an embedded pck at the end of the exe, closed by the magic `GDPC`.
@@ -1080,7 +1168,7 @@ fn has_embedded_pck(p: &Path) -> bool {
     f.read_exact(&mut magic).is_ok() && &magic == b"GDPC"
 }
 
-fn ext_lower(name: &str) -> String {
+pub(crate) fn ext_lower(name: &str) -> String {
     name.rsplit_once('.')
         .map(|(_, e)| e.to_ascii_lowercase())
         .unwrap_or_default()
@@ -1116,7 +1204,7 @@ fn binary_of(name: &str) -> Binary {
     }
 }
 
-fn rel_path(rel: &[String]) -> PathBuf {
+pub(crate) fn rel_path(rel: &[String]) -> PathBuf {
     rel.iter().collect()
 }
 

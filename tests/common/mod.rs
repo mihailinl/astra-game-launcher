@@ -6,6 +6,8 @@
 
 #![allow(dead_code)]
 
+pub mod identity;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Cursor, Write};

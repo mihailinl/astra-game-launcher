@@ -263,6 +263,40 @@ the rules on real Steam libraries (`cargo run --example detection_survey`).
 The engine a package is checked against at `plan` is the target program's own, by the same
 rules: a launcher beside a Unity game is not a Unity game.
 
+## Engines learned from data (0.5.0, in progress)
+
+An engine the rules above do not know is described by data, an **engine descriptor**
+(`astra.engine/1`, `astra_game_launcher::engines`): which program, and what sits beside it.
+The descriptor is JSON in the signed games catalogue, or the same object as TOML under a
+foundation's `[integration.engine]`; its digest is `sha256(JCS(object))`, so both spellings
+have one digest.
+
+```rust
+let engines = EngineSet::build(offered);                 // (Origin, Descriptor::from_json(..)) pairs
+let d = detect_with_engines(&dir, hint, &engines)?;      // Pass A, then perhaps Pass B
+```
+
+- `Detection::engine` is an `EngineCode` (`^[a-z][a-z0-9-]{1,31}$`), serialised exactly as the
+  old `Engine` was: `"unity-mono"`, `"unity-il2cpp"`, `"unreal"`, `"godot"`, `"unknown"`, or a
+  descriptor's code. `engine.builtin()` gives the `Engine` back for the built-in ones.
+- **Narrow-only.** Pass A is `detect_with`, unchanged. Pass B (the descriptors) runs only when
+  Pass A says `unknown` with no evidence and no hint used, so a descriptor can name a game
+  nothing recognised and never change one that was. `detect_with_engines` with an empty set is
+  `detect_with`; both are held to launcher 0.4.1's answers by the tests (canary C1).
+- Built-in codes, `unknown` and anything that reads as them are reserved
+  (`engine-code-reserved`); a code belongs to the first publisher admitted with it
+  (`engine-code-taken`); Pass B asks at most 64 descriptors, 4 per publisher, moderated before
+  unchecked before local, and a lower standing never replaces or ambiguates a higher one.
+  Two of one standing that disagree leave `engine` `unknown` and list
+  `Detection::engine_candidates` (`engine-ambiguous`).
+- Every community rule names a literal anchor beside the program that is neither a program nor
+  a runtime every game ships (`descriptor-too-broad` otherwise). Nothing follows a link or
+  blocks on a FIFO; every lookup and byte is counted (64 lookups and 8 probes per descriptor,
+  1,024 lookups and 64 KiB per game), and over budget means no answer, never a slow one.
+- A Pass B answer carries `Detection::descriptor_sha256`, perhaps `Detection::version`, and
+  `anti-cheat-unknown` in `anti_cheat` when the walk stopped at its cap or a `*.sys` ships.
+  None of these fields appear in a Pass A detection's JSON.
+
 ## Safety rules the code enforces
 
 - **Verified input.** A zip is used only when its SHA-256 matches the one the caller expects.
@@ -429,7 +463,8 @@ rules: a launcher beside a Unity game is not a Unity game.
 
 ```
 cargo build
-cargo test        # no network; every fixture zip is built by the tests
+cargo test        # every fixture is built by the tests; the first build fetches launcher
+                  # 0.4.1 (main 73bf11e), the dev-dependency canary C1 compares against
 ```
 
 ## Verifying a release against what Astra compiles in
