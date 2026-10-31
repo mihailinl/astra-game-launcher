@@ -11,12 +11,14 @@
 //! `vac-unchecked` warning, and `engine-mismatch`'s `got` (the detector's `engine_of_exe`, which
 //! planning alone exposes).
 //!
-//! The tests in `tests/detect.rs` go through the same check, fixture by fixture.
+//! The tests in `tests/detect.rs` go through the same check, fixture by fixture. Where 0.5.0
+//! knowingly answers otherwise (a link, a FIFO, a name the launcher refuses), C1 has declared
+//! exceptions, each pinned by `tests/divergence.rs` against `tests/corpus/divergence.txt`, where
+//! 0.4.1 runs in a child process with a timeout. The corpus holds links but no FIFO, and no link
+//! a read would follow, so 0.4.1 runs in-process here.
 //!
 //! **Against plan B §2's C1** this is the generated corpus at its full size; the `bin/list-shape`
-//! recordings (`tests/corpus/recorded/`), `divergence.txt` and running 0.4.1 in a child with a
-//! timeout arrive with L2, when the built-ins leave the code that 0.4.1 shares with this crate
-//! byte for byte (docs/ENGINE-DESCRIPTORS-DEBT.md).
+//! recordings (`tests/corpus/recorded/`) are not here yet (docs/ENGINE-DESCRIPTORS-DEBT.md).
 
 mod common;
 #[path = "corpus/gen.rs"]

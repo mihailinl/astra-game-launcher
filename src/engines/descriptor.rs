@@ -47,6 +47,16 @@
 //! first match of `template` (`N{1,4}` digits, `[abf]` one of, any other printable ASCII
 //! itself), never starting right after a digit. Every file is opened without following a link
 //! and without blocking on a FIFO, and read only when it is a regular file.
+//!
+//! **First-party only** (Astra's own descriptors; the built-in Unity, Godot and Unreal ones in
+//! `builtin/*.toml` are written with them): `weak_order`; `walk.list_at_limit`; `scope = "anywhere"` (the first
+//! match in walk order answers, unranked) and `scope = "named"` (asked only about a program the
+//! caller names, never in detection), both on weak rules; `programs = "none"` (or `{ none = true,
+//! skip_dirs = … }`), with `scope = "anywhere"` and a first `listed` that begins `{project}`;
+//! `skip_wrappers = false` and `"folders"`; the `name` check (a `*` glob over the program's own
+//! name, ignoring ASCII case); rules with no literal anchor. Pass B admits `weak_order`,
+//! `skip_wrappers = false` and anchorless rules from a first-party descriptor; the rest only the
+//! built-ins use, and Pass B refuses them as `descriptor-unsupported`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -670,6 +680,7 @@ enum TierSpec {
 #[serde(rename_all = "kebab-case")]
 enum ScopeSpec {
     Anywhere,
+    Named,
 }
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -727,6 +738,9 @@ enum NoneWord {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SelectSpec {
+    /// `true`: the rule names no program (`programs = "none"`, with folders to skip).
+    #[serde(default)]
+    none: Option<bool>,
     #[serde(default)]
     ext: Option<Vec<String>>,
     #[serde(default)]
@@ -738,9 +752,22 @@ struct SelectSpec {
     #[serde(default)]
     also_if: Option<AlsoIfSpec>,
     #[serde(default)]
-    skip_wrappers: Option<bool>,
+    skip_wrappers: Option<SkipWrappersSpec>,
     #[serde(default)]
     skip_dirs: Vec<String>,
+}
+
+#[derive(Deserialize, Clone, Copy)]
+#[serde(untagged)]
+enum SkipWrappersSpec {
+    Bool(bool),
+    Word(FoldersWord),
+}
+
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+enum FoldersWord {
+    Folders,
 }
 
 #[derive(Deserialize)]
@@ -766,6 +793,8 @@ struct CheckSpec {
     all: Option<Vec<CheckSpec>>,
     #[serde(default)]
     none: Option<Vec<CheckSpec>>,
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     kind: Option<KindSpec>,
     #[serde(default, rename = "as")]
@@ -826,8 +855,10 @@ enum NamedAlikeSpec {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BootstrapSpec {
-    listed: String,
-    hint_stem: String,
+    #[serde(default)]
+    listed: Option<String>,
+    #[serde(default)]
+    hint_stem: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -948,6 +979,9 @@ pub(crate) enum Check {
         equals: Vec<u8>,
         min_len: u64,
     },
+    /// The program's own name, ignoring ASCII case, against a `*` glob (lower case; first-party
+    /// only). Reads nothing.
+    Name(Vec<Piece>),
     Any(Vec<Check>),
     All(Vec<Check>),
     None(Vec<Check>),
@@ -977,10 +1011,12 @@ pub(crate) enum NamedAlike {
     Template(Vec<Piece>),
 }
 
+/// A bootstrapper naming the rule's project: on disk (`listed`), or as Steam's launch hint's stem
+/// (`hint_stem`), or either. At least one.
 #[derive(Debug, Clone)]
 pub(crate) struct Bootstrap {
-    pub(crate) listed: PathT,
-    pub(crate) hint_stem: Vec<Piece>,
+    pub(crate) listed: Option<PathT>,
+    pub(crate) hint_stem: Option<Vec<Piece>>,
 }
 
 /// One token of a version template.
@@ -1019,17 +1055,48 @@ pub(crate) struct Programs {
     pub(crate) at: Option<At>,
     pub(crate) first: Option<u32>,
     pub(crate) also_if: Option<Vec<Piece>>,
-    pub(crate) skip_wrappers: bool,
-    pub(crate) skip_dirs: Vec<String>,
+}
+
+/// `skip_wrappers`: which wrapper names keep a rule from looking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WrapperSkip {
+    /// The program's own name, and every folder on its way (`true`, the default).
+    All,
+    /// Only the folders on its way (`"folders"`; first-party only).
+    Folders,
+    /// Neither (`false`; first-party only).
+    None,
+}
+
+/// Where a rule never looks: below a wrapper's folder (and, unless [`WrapperSkip::Folders`], at a
+/// wrapper's program), or below a folder named in `skip_dirs` (ignoring ASCII case).
+#[derive(Debug, Clone)]
+pub(crate) struct Skip {
+    pub(crate) wrappers: WrapperSkip,
+    pub(crate) dirs: Vec<String>,
+}
+
+/// Where a rule is asked (`scope`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Scope {
+    /// About each program it selects, from what sits around it: the default.
+    Beside,
+    /// Over the whole walk, the first match in walk order answering, unranked (first-party,
+    /// weak rules only).
+    Anywhere,
+    /// Only about a program the caller names (planning's engine check), never in detection
+    /// (first-party, weak rules only).
+    Named,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct Rule {
     pub(crate) tier: RuleTier,
     pub(crate) weak_order: Option<u32>,
-    pub(crate) anywhere: bool,
+    pub(crate) scope: Scope,
     /// `None`: `programs = "none"`.
     pub(crate) programs: Option<Programs>,
+    pub(crate) skip: Skip,
     pub(crate) require: Vec<Check>,
     pub(crate) outcome: Outcome,
     pub(crate) passes: bool,
@@ -1042,6 +1109,32 @@ pub(crate) struct Rule {
     /// The top-level literal `listed` names in the program's folder (lower case, with their
     /// kind): every one must be somewhere in the walk for the rule to be tried at all.
     pub(crate) anchors: Vec<(String, Kind)>,
+}
+
+impl Rule {
+    /// Every check the rule makes, nested ones and `classify`'s included.
+    pub(crate) fn checks(&self) -> impl Iterator<Item = &Check> {
+        fn flat<'c>(c: &'c Check, out: &mut Vec<&'c Check>) {
+            out.push(c);
+            if let Check::Any(l) | Check::All(l) | Check::None(l) = c {
+                for x in l {
+                    flat(x, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for c in &self.require {
+            flat(c, &mut out);
+        }
+        if let Outcome::Classify(list) = &self.outcome {
+            for (w, _, _) in list {
+                if let Some(c) = w {
+                    flat(c, &mut out);
+                }
+            }
+        }
+        out.into_iter()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1448,12 +1541,41 @@ fn parse_check(
         spec.any.is_some(),
         spec.all.is_some(),
         spec.none.is_some(),
+        spec.name.is_some(),
     ];
     if primaries.iter().filter(|p| **p).count() != 1 {
         return Err(invalid(
             field,
-            "exactly one of listed, child, stat, tail, any, all, none",
+            "exactly one of listed, child, stat, tail, name, any, all, none",
         ));
+    }
+    if let Some(n) = &spec.name {
+        if spec.kind.is_some()
+            || spec.capture.is_some()
+            || spec.bytes.is_some()
+            || spec.equals.is_some()
+            || spec.min_len.is_some()
+        {
+            return Err(invalid(field, "name takes its glob only"));
+        }
+        if !vars.program {
+            return Err(invalid(field, "a name check needs a program"));
+        }
+        if n.is_empty() || n.len() > limits::TEMPLATE_BYTES || n.contains('/') {
+            return Err(invalid(field, "one name"));
+        }
+        let mut glob = Vec::new();
+        for p in raw_pieces(n, field)? {
+            match p {
+                RawPiece::Lit(l) => glob.push(Piece::Lit(l.to_ascii_lowercase())),
+                RawPiece::Star => glob.push(Piece::Star),
+                RawPiece::Var(_) => return Err(invalid(field, "no placeholder in a name check")),
+            }
+        }
+        if glob.iter().filter(|p| **p == Piece::Star).count() > limits::STARS {
+            return Err(invalid(field, "too many globs"));
+        }
+        return Ok(Check::Name(glob));
     }
     let lookup = |path: &str, glob: bool, vars: &Vars| -> Result<(PathT, Kind)> {
         if spec.bytes.is_some() || spec.equals.is_some() || spec.min_len.is_some() {
@@ -1627,15 +1749,35 @@ fn parse_rule(r: &RuleSpec, own: &[(EngineCode, String)], field: &str) -> Result
     if r.weak_order.is_some() && tier != RuleTier::Weak {
         return Err(invalid(format!("{field}.weak_order"), "weak rules only"));
     }
-    let programs = match &r.programs {
-        ProgramsSpec::Word(NoneWord::None) => None,
-        ProgramsSpec::Select(s) => Some(parse_programs(s, &format!("{field}.programs"))?),
+    let scope = match r.scope {
+        None => Scope::Beside,
+        Some(ScopeSpec::Anywhere) => Scope::Anywhere,
+        Some(ScopeSpec::Named) => Scope::Named,
     };
+    if scope != Scope::Beside && tier != RuleTier::Weak {
+        return Err(invalid(format!("{field}.scope"), "weak rules only"));
+    }
+    let (programs, skip) = match &r.programs {
+        ProgramsSpec::Word(NoneWord::None) => (
+            None,
+            Skip {
+                wrappers: WrapperSkip::All,
+                dirs: Vec::new(),
+            },
+        ),
+        ProgramsSpec::Select(s) => parse_programs(s, &format!("{field}.programs"))?,
+    };
+    if programs.is_none() && scope != Scope::Anywhere {
+        return Err(invalid(
+            format!("{field}.programs"),
+            "a rule with no program looks anywhere (scope = \"anywhere\")",
+        ));
+    }
     let has_program = programs.is_some();
+    // With no program, `{project}` is what the first `listed` finds it to be, anywhere in the walk.
     let has_project = programs
         .as_ref()
-        .and_then(|p| p.at.as_ref())
-        .is_some_and(|a| a.project);
+        .is_none_or(|p| p.at.as_ref().is_some_and(|a| a.project));
 
     let mut ctx = RuleCtx { own, atoms: 0 };
     let mut captures: Vec<String> = Vec::new();
@@ -1659,6 +1801,23 @@ fn parse_rule(r: &RuleSpec, own: &[(EngineCode, String)], field: &str) -> Result
             &format!("{field}.require[{i}]"),
             &mut ctx,
         )?);
+    }
+    if !has_program
+        && !matches!(
+            require.first(),
+            Some(Check::Listed {
+                path: PathT {
+                    base: Some(PathVar::Project),
+                    ..
+                },
+                ..
+            })
+        )
+    {
+        return Err(invalid(
+            format!("{field}.require"),
+            "a rule with no program begins with a `listed` below {project}",
+        ));
     }
     let vars = Vars {
         program: has_program,
@@ -1795,26 +1954,30 @@ fn parse_rule(r: &RuleSpec, own: &[(EngineCode, String)], field: &str) -> Result
         .bootstrap
         .as_ref()
         .map(|b| -> Result<Bootstrap> {
-            let listed = parse_path(
-                &b.listed,
-                &vars,
-                false,
-                &format!("{field}.bootstrap.listed"),
-            )?;
-            if listed.segs.is_empty() {
+            if b.listed.is_none() && b.hint_stem.is_none() {
                 return Err(invalid(
-                    format!("{field}.bootstrap.listed"),
-                    "names nothing",
+                    format!("{field}.bootstrap"),
+                    "listed, hint_stem, or both",
                 ));
             }
-            Ok(Bootstrap {
-                listed,
-                hint_stem: parse_name(
-                    &b.hint_stem,
-                    &vars,
-                    &format!("{field}.bootstrap.hint_stem"),
-                )?,
-            })
+            let listed = b
+                .listed
+                .as_deref()
+                .map(|l| -> Result<PathT> {
+                    let f = format!("{field}.bootstrap.listed");
+                    let listed = parse_path(l, &vars, false, &f)?;
+                    if listed.segs.is_empty() {
+                        return Err(invalid(f, "names nothing"));
+                    }
+                    Ok(listed)
+                })
+                .transpose()?;
+            let hint_stem = b
+                .hint_stem
+                .as_deref()
+                .map(|h| parse_name(h, &vars, &format!("{field}.bootstrap.hint_stem")))
+                .transpose()?;
+            Ok(Bootstrap { listed, hint_stem })
         })
         .transpose()?;
 
@@ -1857,8 +2020,9 @@ fn parse_rule(r: &RuleSpec, own: &[(EngineCode, String)], field: &str) -> Result
     Ok(Rule {
         tier,
         weak_order: r.weak_order,
-        anywhere: matches!(r.scope, Some(ScopeSpec::Anywhere)),
+        scope,
         programs,
+        skip,
         require,
         outcome,
         // `strong-fallback` is a strong match that does not pass (Unity before 2017.2), unless
@@ -1874,7 +2038,38 @@ fn parse_rule(r: &RuleSpec, own: &[(EngineCode, String)], field: &str) -> Result
     })
 }
 
-fn parse_programs(s: &SelectSpec, field: &str) -> Result<Programs> {
+fn parse_programs(s: &SelectSpec, field: &str) -> Result<(Option<Programs>, Skip)> {
+    if s.skip_dirs.len() > limits::SKIP_DIRS || !s.skip_dirs.iter().all(|d| check_component(d)) {
+        return Err(invalid(
+            format!("{field}.skip_dirs"),
+            "at most 8 folder names",
+        ));
+    }
+    let skip = Skip {
+        wrappers: match s.skip_wrappers {
+            None | Some(SkipWrappersSpec::Bool(true)) => WrapperSkip::All,
+            Some(SkipWrappersSpec::Bool(false)) => WrapperSkip::None,
+            Some(SkipWrappersSpec::Word(FoldersWord::Folders)) => WrapperSkip::Folders,
+        },
+        dirs: s.skip_dirs.clone(),
+    };
+    match s.none {
+        None | Some(false) => {}
+        Some(true) => {
+            if s.ext.is_some()
+                || s.suffix.is_some()
+                || s.at.is_some()
+                || s.first.is_some()
+                || s.also_if.is_some()
+            {
+                return Err(invalid(
+                    field,
+                    "none = true takes skip_wrappers and skip_dirs only",
+                ));
+            }
+            return Ok((None, skip));
+        }
+    }
     let select = match (&s.ext, &s.suffix) {
         (Some(ext), None) => {
             if ext.is_empty() || ext.len() > limits::EXTS {
@@ -1936,20 +2131,15 @@ fn parse_programs(s: &SelectSpec, field: &str) -> Result<Programs> {
             )
         })
         .transpose()?;
-    if s.skip_dirs.len() > limits::SKIP_DIRS || !s.skip_dirs.iter().all(|d| check_component(d)) {
-        return Err(invalid(
-            format!("{field}.skip_dirs"),
-            "at most 8 folder names",
-        ));
-    }
-    Ok(Programs {
-        select,
-        at,
-        first: s.first,
-        also_if,
-        skip_wrappers: s.skip_wrappers.unwrap_or(true),
-        skip_dirs: s.skip_dirs.clone(),
-    })
+    Ok((
+        Some(Programs {
+            select,
+            at,
+            first: s.first,
+            also_if,
+        }),
+        skip,
+    ))
 }
 
 fn model(spec: Spec) -> Result<Model> {
@@ -2274,8 +2464,9 @@ impl Descriptor {
     /// `engine-name-reserved`); the first-party-only parts of the grammar only when it is
     /// (`descriptor-first-party-only`); `programs.first` given and the programs ones Pass B
     /// considers (`descriptor-invalid`); `evidence` given and every rule anchored when it is not
-    /// (`descriptor-invalid`, `descriptor-too-broad`). The parts this launcher parses but does
-    /// not yet evaluate (`walk`, `scope`, `programs = "none"`) are `descriptor-unsupported`.
+    /// (`descriptor-invalid`, `descriptor-too-broad`). The parts only the built-ins are evaluated
+    /// with (`walk.list_at_limit`, `scope`, `programs = "none"`, the `name` check,
+    /// `skip_wrappers = "folders"`) are `descriptor-unsupported` here.
     pub fn check_pass_b(&self, first_party: bool) -> Result<()> {
         let m = &self.model;
         let families = builtin_families();
@@ -2300,13 +2491,14 @@ impl Descriptor {
         };
         let unsupported =
             |field: String| LauncherError::new(codes::DESCRIPTOR_UNSUPPORTED).with("field", field);
+        // Built-in only: it would reshape the one walk Pass A has already made.
         if !m.list_at_limit.is_empty() {
             first_party_only("walk.list_at_limit".into())?;
             return Err(unsupported("walk.list_at_limit".into()));
         }
         for (i, r) in m.rules.iter().enumerate() {
             let f = |k: &str| format!("rule[{i}].{k}");
-            if r.anywhere {
+            if r.scope != Scope::Beside {
                 first_party_only(f("scope"))?;
                 return Err(unsupported(f("scope")));
             }
@@ -2317,8 +2509,17 @@ impl Descriptor {
             if r.weak_order.is_some() {
                 first_party_only(f("weak_order"))?;
             }
-            if !p.skip_wrappers {
-                first_party_only(f("programs.skip_wrappers"))?;
+            match r.skip.wrappers {
+                WrapperSkip::All => {}
+                WrapperSkip::None => first_party_only(f("programs.skip_wrappers"))?,
+                WrapperSkip::Folders => {
+                    first_party_only(f("programs.skip_wrappers"))?;
+                    return Err(unsupported(f("programs.skip_wrappers")));
+                }
+            }
+            if r.checks().any(|c| matches!(c, Check::Name(_))) {
+                first_party_only(f("require"))?;
+                return Err(unsupported(f("require")));
             }
             if p.first.is_none() {
                 return Err(invalid(f("programs.first"), "required in Pass B"));

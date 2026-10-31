@@ -9,9 +9,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::detect::{anti_cheat_scan, engine_of_exe};
+use crate::detect::{anti_cheat_scan, engine_of_exe_with};
 use crate::digest::sha256_hex;
 use crate::doorstop;
+use crate::engines::EngineSet;
 use crate::error::{LauncherError, Result, codes};
 use crate::former::{self, FormerKind};
 use crate::game::{GameTarget, Platform};
@@ -639,7 +640,9 @@ pub(crate) fn plan_install_with(
     // only add a refusal. No trusted appid is UNCHECKED, never clear.
     let vac = vac_check(game, trusted, m.target.steam_appid)?;
     if let Some(want) = m.engine() {
-        let got = engine_of_exe(&game_dir, &exe)?;
+        // L3 passes the catalogue's descriptors here (`plan_install_in`); until then, the
+        // built-in ones alone.
+        let got = engine_of_exe_with(&EngineSet::empty(), &game_dir, &exe);
         if got != want {
             return Err(LauncherError::new(codes::ENGINE_MISMATCH)
                 .with("want", want.code())

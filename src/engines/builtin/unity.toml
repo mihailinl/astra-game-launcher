@@ -1,0 +1,55 @@
+# Built-in engine descriptor: Unity. Astra's own (first-party), asked in Pass A before any other
+# descriptor, and held byte for byte to launcher 0.4.1's src/detect.rs (canary C1). The 0.4.1
+# function each rule replaces is named beside it.
+schema = "astra.engine/1"
+
+[engine]
+codes = { unity-mono = "Unity (Mono)", unity-il2cpp = "Unity (IL2CPP)" }
+
+# `unity()`: `<stem>_Data/` and `UnityPlayer.dll` (or `.so`) beside the program; the flavour from
+# that same folder. A Unity player whose data names neither flavour is still the game: `unknown`,
+# with its evidence, and it passes.
+[[rule]]
+tier = "strong"
+# A program by its extension, or any file with a `<name>_Data/` beside it (a Linux build's
+# extension-less program). Never a wrapper, nothing under the engine's own `Engine/`.
+programs = { ext = ["exe", "x86_64", "x86"], also_if = { dir = "{name}_Data" }, skip_dirs = ["Engine"] }
+require = [
+  # A program with nothing before its extension has no stem to pair with.
+  { none = [ { name = ".exe" }, { name = ".x86_64" }, { name = ".x86" } ] },
+  { listed = "{stem}_Data", kind = "dir", as = "data" },
+  { any = [ { listed = "UnityPlayer.dll", kind = "file" }, { listed = "UnityPlayer.so", kind = "file" } ] },
+]
+classify = [
+  { when = { any = [ { listed = "GameAssembly.dll", kind = "file" }, { listed = "GameAssembly.so", kind = "file" } ] }, code = "unity-il2cpp", confidence = "high" },
+  { when = { stat = "{data}/Managed/Assembly-CSharp.dll", kind = "file" }, code = "unity-mono", confidence = "high" },
+  { when = { stat = "{data}/il2cpp_data", kind = "dir" }, code = "unity-il2cpp", confidence = "low" },
+  # Mono with all its code in other assemblies.
+  { when = { stat = "{data}/Managed", kind = "dir" }, code = "unity-mono", confidence = "low" },
+  { code = "unknown", confidence = "low" },
+]
+evidence = "{data}"
+binary = "by-ext"
+named_alike = true
+# `unity_version_in()`: the first of these files whose head names a version. Read only when the
+# rule names a flavour.
+version = { head = ["{data}/globalgamemanagers", "{data}/data.unity3d", "{data}/mainData"], template = "N{1,4}.N{1,2}.N{1,3}[abfpx]N{1,3}" }
+
+# `legacy_unity()`: before Unity 2017.2 the player was linked into the program, so there is no
+# `UnityPlayer`; `<stem>_Data/Managed/Assembly-CSharp.dll` still proves a Mono game. Ranked with the
+# strong rule by depth, after a program that passes at the same depth.
+[[rule]]
+tier = "strong-fallback"
+programs = { ext = ["exe", "x86_64", "x86"], also_if = { dir = "{name}_Data" }, skip_dirs = ["Engine"] }
+require = [
+  { none = [ { name = ".exe" }, { name = ".x86_64" }, { name = ".x86" } ] },
+  { listed = "{stem}_Data", kind = "dir", as = "data" },
+  { stat = "{data}/Managed/Assembly-CSharp.dll", kind = "file" },
+]
+code = "unity-mono"
+confidence = "low"
+passes = false
+evidence = "{data}"
+binary = "by-ext"
+named_alike = true
+version = { head = ["{data}/globalgamemanagers", "{data}/data.unity3d", "{data}/mainData"], template = "N{1,4}.N{1,2}.N{1,3}[abfpx]N{1,3}" }

@@ -2,30 +2,54 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Pass B: the engine descriptors of an [`EngineSet`], asked about one game folder that Pass A
-//! left `unknown` with no evidence and no hint used.
+//! The one evaluator of engine descriptors, under two policies: the built-in set (Pass A) and an
+//! [`EngineSet`] (Pass B). Both read a game folder through the same lookups — never through a
+//! link, never blocking on a FIFO — and choose among matches the same way; they differ in what
+//! they are allowed, which is what each section below says.
 //!
-//! **Order.** Standing by standing — moderated, then unchecked, then local — and the first
+//! **Pass A: the built-in descriptors** (`builtin/*.toml`; Unity, Godot, Unreal, in that order).
+//! Astra's own, so nothing is counted against a budget and no program's magic is asked, and a
+//! rule whose `classify` ends at `unknown` (a Unity player whose data names neither flavour) still
+//! names its program. In order:
+//!
+//! 1. Steam's launch hint, jailed: the first strong rule (descriptor order, then rule order) that
+//!    matches it wins outright.
+//! 2. The folder search: every file of the walk asks the strong rules, then the strong-fallback
+//!    ones, in that order, and the first that matches speaks for it. Of all those matches, `best`
+//!    chooses one (below).
+//! 3. The weak rules, by `weak_order`: a rule of the default scope as in 2, chosen by `best`; a
+//!    rule of scope `anywhere` by the first match in walk order. The first order with a match
+//!    answers. Rules of scope `named` are never asked here.
+//!
+//! **Pass B: an [`EngineSet`]**, asked only about a game Pass A left `unknown` with no evidence
+//! and no hint used. Standing by standing — moderated, then unchecked, then local — and the first
 //! standing with any match decides: a lower one is never asked, so it can neither replace nor
 //! make ambiguous a match above it. Within a standing, Steam's launch hint first (a descriptor
-//! matching the hint wins over every folder-search match), then the folder search.
+//! matching the hint wins over every folder-search match), then the folder search. A program
+//! must be what its name says (a PE or ELF image), and a `classify` ending at `unknown` names
+//! nothing. Among one standing's matches: those from the hint; then strong rules over weak ones
+//! (and the lowest `weak_order` among weak ones); the shallowest; one that `passes` over one
+//! that does not. If more than one engine code is still standing that is `engine-ambiguous`:
+//! nothing is preselected. One code: `best`.
 //!
-//! **Choosing.** Among one standing's matches: those from the hint; then strong rules over weak
-//! ones (and the lowest `weak_order` among weak ones); the shallowest (by evidence, else the
-//! program); one that `passes` over one that does not. If more than one engine code is still
-//! standing that is `engine-ambiguous`: nothing is preselected. One code: Pass A's own order —
-//! a matching bootstrapper, the largest evidence, the name repeating its evidence's, the first
-//! by path. A first-party descriptor's tie sizes every evidence folder, as Pass A does; any
-//! other sizes at most [`limits::SIZINGS_PER_GAME`] folders, and past that sizes none and falls
-//! to the name and the path — an answer either way.
+//! **`best`** (Pass A's own order, 0.4.1's `best()`): the shallowest (by evidence, else the
+//! program); one that passes over one that does not; a matching bootstrapper; the largest
+//! evidence; the name repeating its evidence's; the first by path. A first-party tie sizes every
+//! evidence folder; any other sizes at most [`limits::SIZINGS_PER_GAME`] folders, and past that
+//! sizes none and falls to the name and the path — an answer either way.
 //!
-//! **Bounds.** Everything is counted ([`limits`]): a descriptor over its own lookups or probes
-//! yields nothing for this game; the game over its lookups or bytes gets no Pass B answer at
-//! all. A rule's anchors are looked for before anything else it asks, in the listing already in
-//! memory: absent beside the program — or anywhere in the walk — the rule costs nothing, on
+//! **Bounds** (Pass B). Everything is counted ([`limits`]): a descriptor over its own lookups or
+//! probes yields nothing for this game; the game over its lookups or bytes gets no Pass B answer
+//! at all. A rule's anchors are looked for before anything else it asks, in the listing already
+//! in memory: absent beside the program — or anywhere in the walk — the rule costs nothing, on
 //! Steam's hint as in the folder search. Choosing programs is linear in the walk per rule:
 //! `also_if` and the anchors are answered from per-folder name sets built once per game, never
 //! by scanning a listing ([`Folder`]).
+//!
+//! **A named program** ([`engine_of_program`], planning's engine check): the rules asked about
+//! the one program the caller names, read from a fresh listing of its folder — strong, then
+//! strong-fallback, then weak by `weak_order` (scope default or `named`) — the first that matches
+//! giving the engine; only when no built-in rule matches, the set's descriptors.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -34,21 +58,26 @@ use std::path::Path;
 use std::rc::Rc;
 
 use super::descriptor::{
-    At, BinaryRule, Check, Kind, Model, NameVar, NamedAlike, PASS_B_PROGRAM_EXTS, PathT, PathVar,
-    Piece, Programs, Rule, RuleTier, Select, Tok, limits,
+    At, BinaryRule, Check, Kind, Model, NameVar, NamedAlike, Outcome, PASS_B_PROGRAM_EXTS, PathT,
+    PathVar, Piece, Programs, Rule, RuleTier, Scope, Select, Tok, WrapperSkip, limits,
 };
 use super::{EngineCode, EngineSet, Moderation, reads};
 use crate::detect::{
-    self, Binary, Confidence, Detection, Entry, ExePick, MAX_ENTRIES, abs, rel_path,
+    self, Binary, Confidence, Detection, Entry, ExePick, MAX_ENTRIES, Walk, abs, rel_path,
 };
 use crate::error::codes;
 use crate::paths::{check_component, relative_components};
 
 type Listing = Vec<(String, bool)>;
 
+/// A path below the game's root, one component per name.
+type Rel = Vec<String>;
+/// Folders read once per game, by path below the root: `None` when not a real folder.
+type Memo<T> = RefCell<HashMap<Rel, Option<Rc<T>>>>;
+
 use folder::Folder;
 
-/// Its own module so that its listing is private: Pass B reads a listing only through
+/// Its own module so that its listing is private: the evaluator reads a listing only through
 /// [`Folder::scan`], which charges every name of it to the game's work counter — a scan nobody
 /// counts cannot be written by accident.
 mod folder {
@@ -98,6 +127,15 @@ mod folder {
     }
 }
 
+/// What the evaluator is allowed: see the module doc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Policy {
+    /// The built-in descriptors (Pass A, and a named program's engine).
+    BuiltIn,
+    /// An [`EngineSet`]'s descriptors (Pass B).
+    Descriptors,
+}
+
 /// A walk file a Pass B rule may take for a program: extension-less, or one of
 /// [`PASS_B_PROGRAM_EXTS`]. Found once per game.
 struct ProgramLike {
@@ -132,22 +170,26 @@ struct Prog {
     name: String,
     project: Option<Vec<String>>,
     /// The program's folder: as the walk listed it (the folder search), or read afresh (the
-    /// hint).
+    /// hint, a named program).
     folder: Rc<Folder>,
+    /// Steam's hint, or the caller, named it: `pick` takes it as it is.
     from_hint: bool,
 }
 
-/// One descriptor of the standing being asked.
+/// One descriptor being asked.
 struct Member<'s> {
     desc: usize,
     model: &'s Model,
     first_party: bool,
 }
 
-/// One rule's view while it is evaluated: its program and what its checks captured.
-struct Scope<'p> {
-    prog: &'p Prog,
-    captures: Vec<(String, Vec<String>)>,
+/// One rule's view while it is evaluated: its program (none for `programs = "none"`), its
+/// `{project}`, and what its checks captured — each capture with every path it stands for, the
+/// first being the one a template reads (`programs = "none"` captures every match of its project).
+struct View<'p> {
+    prog: Option<&'p Prog>,
+    project: Option<Vec<String>>,
+    captures: Vec<(String, Vec<Vec<String>>)>,
 }
 
 /// A template part, expanded.
@@ -162,14 +204,14 @@ enum GPart {
     Star,
 }
 
-/// One match: a program a rule names, with everything Pass B reports for it.
+/// One match: a program a rule names (or none), with everything a detection reports for it.
 struct Cand {
     desc: usize,
     /// Its descriptor is Astra's own: a tie among its matches is sized without a bound.
     first_party: bool,
     code: EngineCode,
     confidence: Confidence,
-    exe: Vec<String>,
+    exe: Option<Vec<String>>,
     binary: Binary,
     evidence: Option<Vec<String>>,
     passes: bool,
@@ -184,8 +226,12 @@ struct Cand {
 }
 
 impl Cand {
+    /// How deep the game sits: its evidence's depth, else its program's.
     fn depth(&self) -> usize {
-        self.evidence.as_ref().unwrap_or(&self.exe).len()
+        self.evidence
+            .as_ref()
+            .or(self.exe.as_ref())
+            .map_or(usize::MAX, Vec::len)
     }
 }
 
@@ -198,22 +244,131 @@ enum Resolution {
 struct Game<'a> {
     root: &'a Path,
     entries: &'a [Entry],
+    policy: Policy,
     /// Every folder's listing, as the walk saw it.
     walk_dirs: HashMap<&'a [String], Rc<Folder>>,
-    /// The walk's files a rule may take for a program, in walk order.
+    /// The walk's files Pass B may take for a program, in walk order.
     programs: Vec<ProgramLike>,
     /// Every name in the walk, lower case, with whether it is a folder: the anchors' prefilter.
     names: HashSet<(String, bool)>,
     /// Folders read afresh, memoised: by path below the root; `None` when not a real folder.
-    folders: RefCell<HashMap<Vec<String>, Option<Rc<Folder>>>>,
+    folders: Memo<Folder>,
+    /// The names `child` looks through ignoring case, memoised: see [`Game::window`].
+    windows: Memo<Vec<String>>,
     lookups: Cell<u32>,
     bytes: Cell<u64>,
     sizings: Cell<u32>,
+    /// The walk stopped at its cap with more left to list.
+    capped: bool,
     /// Names examined: walk entries, set lookups, and every name of a listing scanned. Not a
     /// bound — the budgets above are — but a measure, so a test can hold Pass B's work to its
     /// structural ceiling without a clock ([`pass_b_counted`]).
     work: Cell<u64>,
     hint: Option<&'a str>,
+}
+
+/// The descriptors of `set` as the evaluator asks them, each with its index.
+fn members(set: &EngineSet) -> Vec<Member<'_>> {
+    set.entries
+        .iter()
+        .enumerate()
+        .map(|(desc, a)| Member {
+            desc,
+            model: &a.descriptor.model,
+            first_party: a.origin.first_party,
+        })
+        .collect()
+}
+
+/// The rules of `members` that `keep` admits, as Pass A asks them: strong ones first, then
+/// strong-fallback, then weak by `weak_order` — each in descriptor order, then rule order.
+fn ordered<'m, 's>(
+    members: &'m [Member<'s>],
+    keep: impl Fn(&Rule) -> bool,
+) -> Vec<(&'m Member<'s>, &'s Rule)> {
+    let mut out: Vec<(&Member, &Rule)> = members
+        .iter()
+        .flat_map(|mb| mb.model.rules.iter().map(move |r| (mb, r)))
+        .filter(|(_, r)| keep(r))
+        .collect();
+    // Stable: descriptor order, then rule order, within one tier and order.
+    out.sort_by_key(|(_, r)| (r.tier, r.weak_order.unwrap_or(0)));
+    out
+}
+
+/// Pass A: the built-in descriptors (`set`, see [`super::builtin`]) over a walk already made.
+/// `None` when no rule names a game: the caller's one-program fallback answers then.
+pub(crate) fn pass_a(
+    root: &Path,
+    hint: Option<&str>,
+    entries: &[Entry],
+    set: &EngineSet,
+) -> Option<Detection> {
+    let game = Game::new(root, entries, hint, Policy::BuiltIn);
+    let c = game.builtin(&members(set))?;
+    Some(game.builtin_detection(c, detect::anti_cheat_of(entries)))
+}
+
+/// The engine of the program `exe_rel` (below `root`) by the rules asked about it alone (the
+/// module doc's "named program"): the built-in descriptors (`builtin`), and only when none of
+/// their rules matches, `set`'s. `unknown` when nothing matches, or when the program's folder is
+/// not a real folder below `root` (a link on its way is never followed).
+pub(crate) fn engine_of_program(
+    root: &Path,
+    exe_rel: &[String],
+    builtin: &EngineSet,
+    set: &EngineSet,
+) -> EngineCode {
+    let Some((_, dir)) = exe_rel.split_last() else {
+        return EngineCode::unknown();
+    };
+    let game = Game::new(root, &[], None, Policy::BuiltIn);
+    let Some(folder) = game.folder(dir) else {
+        return EngineCode::unknown();
+    };
+    let builtins = members(builtin);
+    let mut spent = Spent::default();
+    for (mb, rule) in ordered(&builtins, |r| r.scope != Scope::Anywhere) {
+        if let Ok(Some(c)) = game.on_program(mb, rule, exe_rel, &folder, &mut spent) {
+            return c.code;
+        }
+    }
+    if set.is_empty() {
+        return EngineCode::unknown();
+    }
+    // The set's descriptors, as Pass B would ask them about this one program: the first
+    // standing with a match answers, and only with one code.
+    let game = Game::new(root, &[], None, Policy::Descriptors);
+    let described = members(set);
+    for standing in [
+        Moderation::Moderated,
+        Moderation::Unchecked,
+        Moderation::Local,
+    ] {
+        let mut found: BTreeSet<EngineCode> = BTreeSet::new();
+        for mb in described
+            .iter()
+            .filter(|mb| set.entries[mb.desc].origin.moderation == standing)
+        {
+            let mut spent = Spent::default();
+            for rule in mb.model.rules.iter().filter(|r| r.scope != Scope::Anywhere) {
+                match game.on_program(mb, rule, exe_rel, &folder, &mut spent) {
+                    Ok(Some(c)) => {
+                        found.insert(c.code);
+                    }
+                    Ok(None) => {}
+                    Err(Halt::Descriptor) => break,
+                    Err(Halt::Game) => return EngineCode::unknown(),
+                }
+            }
+        }
+        match found.len() {
+            0 => continue,
+            1 => return found.into_iter().next().unwrap_or_else(EngineCode::unknown),
+            _ => return EngineCode::unknown(),
+        }
+    }
+    EngineCode::unknown()
 }
 
 /// Pass B over a game whose Pass A answer is `base` (`unknown`, no evidence, no hint used).
@@ -222,11 +377,11 @@ struct Game<'a> {
 pub(crate) fn pass_b(
     root: &Path,
     hint: Option<&str>,
-    entries: &[Entry],
+    walk: &Walk,
     set: &EngineSet,
     base: Detection,
 ) -> Detection {
-    pass_b_counted(root, hint, entries, set, base).0
+    pass_b_counted(root, hint, &walk.entries, walk.capped, set, base).0
 }
 
 /// [`pass_b`], with the names it examined ([`Game::work`]).
@@ -234,19 +389,26 @@ pub(crate) fn pass_b_counted(
     root: &Path,
     hint: Option<&str>,
     entries: &[Entry],
+    capped: bool,
     set: &EngineSet,
     base: Detection,
 ) -> (Detection, u64) {
     if set.is_empty() || !base.open_to_descriptors() {
         return (base, 0);
     }
-    let game = Game::new(root, entries, hint);
+    let mut game = Game::new(root, entries, hint, Policy::Descriptors);
+    game.capped = capped;
     let answer = game.answer(set, base);
     (answer, game.work.get())
 }
 
 impl<'a> Game<'a> {
-    fn new(root: &'a Path, entries: &'a [Entry], hint: Option<&'a str>) -> Game<'a> {
+    fn new(
+        root: &'a Path,
+        entries: &'a [Entry],
+        hint: Option<&'a str>,
+        policy: Policy,
+    ) -> Game<'a> {
         let mut dirs: HashMap<&'a [String], Listing> = HashMap::new();
         let mut names = HashSet::new();
         let mut programs = Vec::new();
@@ -268,6 +430,7 @@ impl<'a> Game<'a> {
         Game {
             root,
             entries,
+            policy,
             walk_dirs: dirs
                 .into_iter()
                 .map(|(k, v)| (k, Rc::new(Folder::new(v))))
@@ -275,12 +438,18 @@ impl<'a> Game<'a> {
             programs,
             names,
             folders: RefCell::new(HashMap::new()),
+            windows: RefCell::new(HashMap::new()),
             lookups: Cell::new(0),
             bytes: Cell::new(0),
             sizings: Cell::new(0),
+            capped: false,
             work: Cell::new(entries.len() as u64),
             hint,
         }
+    }
+
+    fn builtin_policy(&self) -> bool {
+        self.policy == Policy::BuiltIn
     }
 
     fn answer(&self, set: &EngineSet, base: Detection) -> Detection {
@@ -289,16 +458,9 @@ impl<'a> Game<'a> {
             Moderation::Unchecked,
             Moderation::Local,
         ] {
-            let members: Vec<Member> = set
-                .entries
-                .iter()
-                .enumerate()
-                .filter(|(_, a)| a.origin.moderation == standing)
-                .map(|(desc, a)| Member {
-                    desc,
-                    model: &a.descriptor.model,
-                    first_party: a.origin.first_party,
-                })
+            let members: Vec<Member> = members(set)
+                .into_iter()
+                .filter(|mb| set.entries[mb.desc].origin.moderation == standing)
                 .collect();
             if members.is_empty() {
                 continue;
@@ -330,12 +492,22 @@ impl<'a> Game<'a> {
         detect::find_in(f.scan(&self.work), name, dir)
     }
 
-    // ---- budgets ----
+    // ---- budgets (Pass B only: the built-ins are bounded by the walk alone) ----
 
     fn lookup(&self, spent: &mut Spent) -> Step<()> {
+        if self.builtin_policy() {
+            return Ok(());
+        }
         spent.lookups += 1;
         if spent.lookups > limits::LOOKUPS_PER_DESCRIPTOR {
             return Err(Halt::Descriptor);
+        }
+        self.game_lookup()
+    }
+
+    fn game_lookup(&self) -> Step<()> {
+        if self.builtin_policy() {
+            return Ok(());
         }
         self.lookups.set(self.lookups.get() + 1);
         if self.lookups.get() > limits::LOOKUPS_PER_GAME {
@@ -345,6 +517,9 @@ impl<'a> Game<'a> {
     }
 
     fn probe(&self, spent: &mut Spent, bytes: u64) -> Step<()> {
+        if self.builtin_policy() {
+            return Ok(());
+        }
         spent.probes += 1;
         if spent.probes > limits::PROBES_PER_DESCRIPTOR {
             return Err(Halt::Descriptor);
@@ -353,6 +528,9 @@ impl<'a> Game<'a> {
     }
 
     fn read_bytes(&self, bytes: u64) -> Step<()> {
+        if self.builtin_policy() {
+            return Ok(());
+        }
         self.bytes.set(self.bytes.get() + bytes);
         if self.bytes.get() > limits::BYTES_PER_GAME {
             return Err(Halt::Game);
@@ -375,8 +553,8 @@ impl<'a> Game<'a> {
         true
     }
 
-    /// A folder read afresh — truncated before it is sorted, exactly as Pass A's own
-    /// `listing_of` — when it is a real folder. Memoised.
+    /// A folder read afresh — truncated before it is sorted, exactly as `detect::listing_of`
+    /// — when it is a real folder. Memoised.
     fn folder(&self, comps: &[String]) -> Option<Rc<Folder>> {
         if let Some(v) = self.folders.borrow().get(comps) {
             return v.clone();
@@ -393,17 +571,41 @@ impl<'a> Game<'a> {
         v
     }
 
+    /// What `child` looks through for a name spelled otherwise, when `comps` is a real folder:
+    /// the names (UTF-8 ones) among the first [`MAX_ENTRIES`] a fresh `read_dir` returns, in
+    /// its order, links and all — exactly `detect::child`'s. Memoised.
+    fn window(&self, comps: &[String]) -> Option<Rc<Vec<String>>> {
+        if let Some(v) = self.windows.borrow().get(comps) {
+            return v.clone();
+        }
+        let v = if self.real_dir(comps) {
+            fs::read_dir(abs(self.root, comps)).ok().map(|read| {
+                let names: Vec<String> = read
+                    .flatten()
+                    .take(MAX_ENTRIES)
+                    .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+                    .collect();
+                self.worked(names.len());
+                Rc::new(names)
+            })
+        } else {
+            None
+        };
+        self.windows.borrow_mut().insert(comps.to_vec(), v.clone());
+        v
+    }
+
     // ---- templates ----
 
-    fn name_value(v: NameVar, sc: &Scope) -> Option<String> {
+    fn name_value(v: NameVar, sc: &View) -> Option<String> {
         match v {
-            NameVar::Name => Some(sc.prog.name.clone()),
-            NameVar::Stem => Some(detect::program_stem(&sc.prog.name).to_owned()),
-            NameVar::ProjectLeaf => sc.prog.project.as_ref()?.last().cloned(),
+            NameVar::Name => Some(sc.prog?.name.clone()),
+            NameVar::Stem => Some(detect::program_stem(&sc.prog?.name).to_owned()),
+            NameVar::ProjectLeaf => sc.project.as_ref()?.last().cloned(),
         }
     }
 
-    fn name_of(pieces: &[Piece], sc: &Scope) -> Option<String> {
+    fn name_of(pieces: &[Piece], sc: &View) -> Option<String> {
         let mut s = String::new();
         for p in pieces {
             match p {
@@ -417,17 +619,18 @@ impl<'a> Game<'a> {
 
     /// The template's base (below the root) and its own parts, expanded; `None` when a
     /// placeholder has no value here or a part expands to a name no folder may hold.
-    fn expand(t: &PathT, sc: &Scope) -> Option<(Vec<String>, Vec<Seg>)> {
-        let prog = sc.prog;
+    fn expand(t: &PathT, sc: &View) -> Option<(Vec<String>, Vec<Seg>)> {
         let base = match &t.base {
-            None | Some(PathVar::Dir) => prog.dir.clone(),
-            Some(PathVar::Program) => prog.rel.clone(),
-            Some(PathVar::Project) => prog.project.clone()?,
+            None | Some(PathVar::Dir) => sc.prog?.dir.clone(),
+            Some(PathVar::Program) => sc.prog?.rel.clone(),
+            Some(PathVar::Project) => sc.project.clone()?,
             Some(PathVar::ProjectParent) => {
-                let p = prog.project.as_ref()?;
+                let p = sc.project.as_ref()?;
                 p[..p.len().checked_sub(1)?].to_vec()
             }
-            Some(PathVar::Capture(n)) => sc.captures.iter().find(|(k, _)| k == n)?.1.clone(),
+            Some(PathVar::Capture(n)) => {
+                sc.captures.iter().find(|(k, _)| k == n)?.1.first()?.clone()
+            }
         };
         let mut segs = Vec::new();
         for seg in &t.segs {
@@ -449,7 +652,7 @@ impl<'a> Game<'a> {
     }
 
     /// A template with no glob, as one path below the root.
-    fn full_path(t: &PathT, sc: &Scope) -> Option<Vec<String>> {
+    fn full_path(t: &PathT, sc: &View) -> Option<Vec<String>> {
         let (mut base, segs) = Game::expand(t, sc)?;
         for s in segs {
             match s {
@@ -467,7 +670,7 @@ impl<'a> Game<'a> {
     fn listed(
         &self,
         m: &Model,
-        sc: &Scope,
+        sc: &View,
         path: &PathT,
         kind: Kind,
         fresh: bool,
@@ -486,13 +689,12 @@ impl<'a> Game<'a> {
                 Seg::Glob(_) => return Ok(None),
             }
         }
-        let folder = if !fresh && parent == sc.prog.dir {
-            sc.prog.folder.clone()
-        } else {
-            match self.folder(&parent) {
+        let folder = match sc.prog {
+            Some(prog) if !fresh && parent == prog.dir => prog.folder.clone(),
+            _ => match self.folder(&parent) {
                 Some(f) => f,
                 None => return Ok(None),
-            }
+            },
         };
         let want_dir = kind.is_dir();
         let found = match &last {
@@ -512,11 +714,10 @@ impl<'a> Game<'a> {
 
     /// `child`: each part below the base resolved ignoring ASCII case, one at a time, each a
     /// real folder (the last a real folder or a regular file, as `kind` asks), never through a
-    /// link. One lookup per part: a part that is not spelled exactly is looked for in its
-    /// folder's listing, read once per game.
+    /// link. One lookup per part.
     fn child(
         &self,
-        sc: &Scope,
+        sc: &View,
         path: &PathT,
         kind: Kind,
         spent: &mut Spent,
@@ -551,16 +752,20 @@ impl<'a> Game<'a> {
         Ok(Some(real))
     }
 
-    /// `name` in the real folder `dir`: the exact spelling, else the listing's first spelling
-    /// ignoring ASCII case — a real folder or a regular file as asked, never a link.
+    /// `name` in the real folder `dir`, a real folder or a regular file as asked, never a link:
+    /// the exact spelling, else the least (by byte order) of the names spelled otherwise among
+    /// what [`Game::window`] holds — `detect::child`, the hint's jail, exactly.
     fn child_named(&self, dir: &[String], name: &str, want_dir: bool) -> Option<String> {
         if self.is_kind(dir, name, want_dir) {
             return Some(name.to_owned());
         }
-        let folder = self.folder(dir)?;
-        self.find_in(&folder, name, want_dir)
-            .filter(|n| self.is_kind(dir, n, want_dir))
-            .map(str::to_owned)
+        let window = self.window(dir)?;
+        self.worked(window.len());
+        window
+            .iter()
+            .filter(|n| n.eq_ignore_ascii_case(name) && self.is_kind(dir, n, want_dir))
+            .min()
+            .cloned()
     }
 
     fn is_kind(&self, dir: &[String], name: &str, want_dir: bool) -> bool {
@@ -572,7 +777,7 @@ impl<'a> Game<'a> {
     /// `stat`: the exact spelling, every component a real folder and the last of `kind`.
     fn stat(
         &self,
-        sc: &Scope,
+        sc: &View,
         path: &PathT,
         kind: Kind,
         spent: &mut Spent,
@@ -612,7 +817,7 @@ impl<'a> Game<'a> {
 
     fn tail(
         &self,
-        sc: &Scope,
+        sc: &View,
         path: &PathT,
         equals: &[u8],
         min_len: u64,
@@ -626,8 +831,11 @@ impl<'a> Game<'a> {
     }
 
     /// The program is what its name says: a PE image (`MZ`) for `.exe`, an ELF image for any
-    /// other. One lookup, four bytes.
+    /// other. One lookup, four bytes. Pass B only.
     fn magic(&self, prog: &Prog, spent: &mut Spent) -> Step<bool> {
+        if self.builtin_policy() {
+            return Ok(true);
+        }
         self.lookup(spent)?;
         self.read_bytes(4)?;
         let want: &[u8] = if detect::ext_lower(&prog.name) == "exe" {
@@ -641,7 +849,7 @@ impl<'a> Game<'a> {
         Ok(reads::head(&p, 4).is_some_and(|b| b.starts_with(want)))
     }
 
-    fn check(&self, m: &Model, c: &Check, sc: &mut Scope, spent: &mut Spent) -> Step<bool> {
+    fn check(&self, m: &Model, c: &Check, sc: &mut View, spent: &mut Spent) -> Step<bool> {
         let (found, capture) = match c {
             Check::Listed {
                 path,
@@ -663,6 +871,11 @@ impl<'a> Game<'a> {
                 equals,
                 min_len,
             } => return self.tail(sc, path, equals, *min_len, spent),
+            Check::Name(glob) => {
+                return Ok(sc
+                    .prog
+                    .is_some_and(|p| glob_match(&glob_parts(glob), &p.name.to_ascii_lowercase())));
+            }
             Check::Any(list) => {
                 for x in list {
                     if self.check(m, x, sc, spent)? {
@@ -689,24 +902,25 @@ impl<'a> Game<'a> {
             }
         };
         if let (Some(p), Some(name)) = (&found, capture) {
-            sc.captures.push((name.clone(), p.clone()));
+            sc.captures.push((name.clone(), vec![p.clone()]));
         }
         Ok(found.is_some())
     }
 
     // ---- programs ----
 
-    /// Whether the program-like `name` (`lower`: the same, lower case) in `dir` is a program `p`
+    /// Whether the file `name` (`lower`: the same, lower case) in `dir` is a program `rule`
     /// considers; with the `{project}` it captures. One set lookup for `also_if`, never a scan.
     fn fits(
         &self,
         m: &Model,
-        p: &Programs,
+        rule: &Rule,
         dir: &[String],
         name: &str,
         lower: &str,
         folder: &Folder,
     ) -> Option<Option<Vec<String>>> {
+        let p = rule.programs.as_ref()?;
         self.worked(1);
         let selected = selects_lower(p, lower)
             || p.also_if.as_ref().is_some_and(|t| {
@@ -719,13 +933,10 @@ impl<'a> Game<'a> {
         if !selected {
             return None;
         }
-        if p.skip_wrappers && (m.is_wrapper(name) || dir.iter().any(|c| m.is_wrapper(c))) {
+        if !self.where_ok(m, rule, dir) {
             return None;
         }
-        if dir
-            .iter()
-            .any(|c| p.skip_dirs.iter().any(|s| c.eq_ignore_ascii_case(s)))
-        {
+        if rule.skip.wrappers == WrapperSkip::All && m.is_wrapper(name) {
             return None;
         }
         match &p.at {
@@ -734,38 +945,56 @@ impl<'a> Game<'a> {
         }
     }
 
-    /// The programs a rule considers in the folder search: the first `programs.first` of the
-    /// walk's files, in walk order, that it fits.
-    fn walk_programs(&self, m: &Model, p: &Programs) -> Vec<Prog> {
-        let first = p.first.unwrap_or(limits::FIRST) as usize;
+    /// Whether `rule` may look below the folders `dir`: none of them a wrapper's (unless it skips
+    /// no wrappers), none named in its `skip_dirs`.
+    fn where_ok(&self, m: &Model, rule: &Rule, dir: &[String]) -> bool {
+        if rule.skip.wrappers != WrapperSkip::None && dir.iter().any(|c| m.is_wrapper(c)) {
+            return false;
+        }
+        !dir.iter()
+            .any(|c| rule.skip.dirs.iter().any(|s| c.eq_ignore_ascii_case(s)))
+    }
+
+    /// The programs a Pass B rule considers in the folder search: the first `programs.first` of
+    /// the walk's program-like files, in walk order, that it fits.
+    fn walk_programs(&self, m: &Model, rule: &Rule) -> Vec<Prog> {
+        let first = rule
+            .programs
+            .as_ref()
+            .and_then(|p| p.first)
+            .unwrap_or(limits::FIRST) as usize;
         let mut out = Vec::new();
         for pl in &self.programs {
             let e = &self.entries[pl.at];
-            let Some((name, dir)) = e.rel.split_last() else {
+            let Some(prog) = self.walk_prog(m, rule, e, &pl.lower) else {
                 continue;
             };
-            let Some(folder) = self.walk_dirs.get(dir) else {
-                continue;
-            };
-            if let Some(project) = self.fits(m, p, dir, name, &pl.lower, folder) {
-                out.push(Prog {
-                    rel: e.rel.clone(),
-                    dir: dir.to_vec(),
-                    name: name.clone(),
-                    project,
-                    folder: folder.clone(),
-                    from_hint: false,
-                });
-                if out.len() >= first {
-                    break;
-                }
+            out.push(prog);
+            if out.len() >= first {
+                break;
             }
         }
         out
     }
 
-    /// Steam's launch hint as a program: jailed exactly as Pass A's (relative, no `..`, no link
-    /// on the way, matched ignoring ASCII case), never a wrapper; its folder read afresh.
+    /// The walk file `e` as a program `rule` considers, with the folder the walk listed.
+    fn walk_prog(&self, m: &Model, rule: &Rule, e: &Entry, lower: &str) -> Option<Prog> {
+        let (name, dir) = e.rel.split_last()?;
+        let folder = self.walk_dirs.get(dir)?;
+        let project = self.fits(m, rule, dir, name, lower, folder)?;
+        Some(Prog {
+            rel: e.rel.clone(),
+            dir: dir.to_vec(),
+            name: name.clone(),
+            project,
+            folder: folder.clone(),
+            from_hint: false,
+        })
+    }
+
+    /// Steam's launch hint as a program: jailed exactly as 0.4.1's `hinted()` (relative, no `..`,
+    /// no link on the way, matched ignoring ASCII case), never a wrapper; for Pass B also only a
+    /// program-like name. Its folder read afresh.
     fn hint_program(&self) -> Option<(Vec<String>, Rc<Folder>)> {
         let mut h = self.hint?.trim();
         while let Some(rest) = h.strip_prefix("./").or_else(|| h.strip_prefix(".\\")) {
@@ -778,7 +1007,9 @@ impl<'a> Game<'a> {
             real.push(detect::child(&abs(self.root, &real), c, !is_last)?);
         }
         let (name, parent) = real.split_last()?;
-        if detect::is_wrapper_name(name) || !program_like(&name.to_ascii_lowercase()) {
+        if detect::is_wrapper_name(name)
+            || (!self.builtin_policy() && !program_like(&name.to_ascii_lowercase()))
+        {
             return None;
         }
         let folder = self.folder(parent)?;
@@ -794,7 +1025,6 @@ impl<'a> Game<'a> {
         prog: &Prog,
         spent: &mut Spent,
     ) -> Step<Option<Cand>> {
-        let m = mb.model;
         // The anchors before anything else: each is a literal `listed` name beside the program,
         // so absent from the listing already in memory it fails its own check anyway — and
         // here it costs nothing, wherever it sits in `require`, on Steam's hint as in the walk.
@@ -806,21 +1036,35 @@ impl<'a> Game<'a> {
         {
             return Ok(None);
         }
-        let mut sc = Scope {
-            prog,
+        let mut sc = View {
+            prog: Some(prog),
+            project: prog.project.clone(),
             captures: Vec::new(),
         };
         for c in &rule.require {
-            if !self.check(m, c, &mut sc, spent)? {
+            if !self.check(mb.model, c, &mut sc, spent)? {
                 return Ok(None);
             }
         }
         if !self.magic(prog, spent)? {
             return Ok(None);
         }
+        self.matched(mb, rule, sc, spent)
+    }
+
+    /// A rule whose `require` held, from its outcome on: the candidate, or `None` when its
+    /// outcome names nothing.
+    fn matched(
+        &self,
+        mb: &Member,
+        rule: &Rule,
+        mut sc: View,
+        spent: &mut Spent,
+    ) -> Step<Option<Cand>> {
+        let m = mb.model;
         let (code, confidence) = match &rule.outcome {
-            super::descriptor::Outcome::Fixed(c, f) => (c.clone(), *f),
-            super::descriptor::Outcome::Classify(list) => {
+            Outcome::Fixed(c, f) => (c.clone(), *f),
+            Outcome::Classify(list) => {
                 let mut chosen = None;
                 for (when, c, f) in list {
                     let ok = match when {
@@ -838,16 +1082,17 @@ impl<'a> Game<'a> {
                 }
             }
         };
-        if code.is_unknown() {
+        // A built-in rule that ends at `unknown` still names its program (a Unity player whose
+        // data names neither flavour is the game); a descriptor's names nothing.
+        if code.is_unknown() && !self.builtin_policy() {
             return Ok(None);
         }
-        let exe_pick = if rule.pick {
-            match self.pick(m, rule, prog, spent)? {
+        let exe_pick = match sc.prog {
+            Some(prog) if rule.pick => match self.pick(m, rule, prog, spent)? {
                 Some(p) => Some(p),
                 None => return Ok(None),
-            }
-        } else {
-            None
+            },
+            _ => None,
         };
         let evidence = match &rule.evidence {
             None => None,
@@ -858,18 +1103,24 @@ impl<'a> Game<'a> {
             },
         };
         let binary = self.binary(&rule.binary, &sc);
-        let named_alike = match &rule.named_alike {
-            NamedAlike::No => false,
-            NamedAlike::Yes => true,
-            NamedAlike::Template(t) => Game::name_of(t, &sc)
+        let named_alike = match (&rule.named_alike, sc.prog) {
+            (NamedAlike::No, _) => false,
+            (NamedAlike::Yes, _) => true,
+            (NamedAlike::Template(t), Some(prog)) => Game::name_of(t, &sc)
                 .is_some_and(|want| program_base(rule, &prog.name).eq_ignore_ascii_case(&want)),
+            (NamedAlike::Template(_), None) => false,
         };
         let bootstrap_matched = match &rule.bootstrap {
             None => false,
             Some(b) => {
-                self.listed(m, &sc, &b.listed, Kind::File, true, spent)?
-                    .is_some()
-                    || self.hint_stem_matches(&b.hint_stem, &sc)
+                let on_disk = match &b.listed {
+                    Some(l) => self.listed(m, &sc, l, Kind::File, true, spent)?.is_some(),
+                    None => false,
+                };
+                on_disk
+                    || b.hint_stem
+                        .as_ref()
+                        .is_some_and(|t| self.hint_stem_matches(t, &sc))
             }
         };
         let version = rule.version.as_ref().map(|v| {
@@ -886,7 +1137,7 @@ impl<'a> Game<'a> {
             first_party: mb.first_party,
             code,
             confidence,
-            exe: prog.rel.clone(),
+            exe: sc.prog.map(|p| p.rel.clone()),
             binary,
             evidence,
             passes: rule.passes,
@@ -895,14 +1146,14 @@ impl<'a> Game<'a> {
             bootstrap_matched,
             tier: rule.tier,
             weak_order: rule.weak_order.unwrap_or(u32::MAX),
-            from_hint: prog.from_hint,
+            from_hint: sc.prog.is_some_and(|p| p.from_hint),
             version,
         }))
     }
 
-    /// `pick = "hint-else-largest"`: the program the hint names; else, of the programs the
-    /// rule selects in that folder, only the largest (the first by name of equal sizes)
-    /// answers — one lookup per program sized.
+    /// `pick = "hint-else-largest"`: the program the hint (or the caller) names; else, of the
+    /// programs the rule selects in that folder, only the largest (the first by name of equal
+    /// sizes) answers — one lookup per program sized.
     fn pick(
         &self,
         m: &Model,
@@ -945,39 +1196,44 @@ impl<'a> Game<'a> {
         })
     }
 
-    fn binary(&self, b: &BinaryRule, sc: &Scope) -> Binary {
+    fn binary(&self, b: &BinaryRule, sc: &View) -> Binary {
         match b {
             BinaryRule::Windows => Binary::Windows,
             BinaryRule::Linux => Binary::Linux,
-            BinaryRule::ByExt => {
-                let name = &sc.prog.name;
-                match detect::ext_lower(name).as_str() {
-                    "exe" => Binary::Windows,
-                    "x86_64" | "x86" => Binary::Linux,
-                    _ if !name.contains('.') => Binary::Linux,
-                    _ => Binary::Unknown,
-                }
-            }
+            // `.exe` is a Windows program; any other a rule takes for one is a Linux program.
+            BinaryRule::ByExt => match sc.prog {
+                Some(p) if detect::ext_lower(&p.name) == "exe" => Binary::Windows,
+                Some(_) => Binary::Linux,
+                None => Binary::Unknown,
+            },
+            // The first of the names the placeholder stands for whose last `-` part begins with
+            // a key of the map.
             BinaryRule::FromName { var, map } => {
-                let t = PathT {
-                    base: Some(var.clone()),
-                    segs: Vec::new(),
+                let names: Vec<String> = match var {
+                    PathVar::Capture(n) => sc
+                        .captures
+                        .iter()
+                        .find(|(k, _)| k == n)
+                        .map(|(_, all)| all.iter().filter_map(|p| p.last().cloned()).collect())
+                        .unwrap_or_default(),
+                    PathVar::Program => sc.prog.map(|p| p.name.clone()).into_iter().collect(),
+                    _ => Vec::new(),
                 };
-                let Some(name) = Game::full_path(&t, sc).and_then(|p| p.last().cloned()) else {
-                    return Binary::Unknown;
-                };
-                let lower = name.to_ascii_lowercase();
-                let Some(i) = lower.rfind('-') else {
-                    return Binary::Unknown;
-                };
-                map.iter()
-                    .find(|(k, _)| lower[i..].starts_with(k.as_str()))
-                    .map_or(Binary::Unknown, |(_, v)| *v)
+                names
+                    .iter()
+                    .find_map(|name| {
+                        let lower = name.to_ascii_lowercase();
+                        let i = lower.rfind('-')?;
+                        map.iter()
+                            .find(|(k, _)| lower[i..].starts_with(k.as_str()))
+                            .map(|(_, v)| *v)
+                    })
+                    .unwrap_or(Binary::Unknown)
             }
         }
     }
 
-    fn hint_stem_matches(&self, t: &[Piece], sc: &Scope) -> bool {
+    fn hint_stem_matches(&self, t: &[Piece], sc: &View) -> bool {
         let Some(h) = self.hint else {
             return false;
         };
@@ -987,7 +1243,261 @@ impl<'a> Game<'a> {
         Game::name_of(t, sc).is_some_and(|want| detect::hint_stem(h).eq_ignore_ascii_case(&want))
     }
 
-    // ---- one descriptor ----
+    // ---- Pass A: the built-in descriptors ----
+
+    /// The built-ins' answer for this game (the module doc's three steps), before the
+    /// one-program fallback.
+    fn builtin(&self, members: &[Member]) -> Option<Cand> {
+        let mut spent = Spent::default();
+        // 1. Steam's hint: the first strong rule that matches it.
+        if let Some((rel, folder)) = self.hint_program() {
+            let strong = ordered(members, |r| {
+                r.tier == RuleTier::Strong && r.scope == Scope::Beside
+            });
+            for (mb, rule) in strong {
+                if let Ok(Some(c)) = self.on_program(mb, rule, &rel, &folder, &mut spent) {
+                    return Some(c);
+                }
+            }
+        }
+        // 2. The folder search: strong and strong-fallback rules, the first per program.
+        let rules = ordered(members, |r| r.tier != RuleTier::Weak);
+        if let Some(c) = self.best_per_program(&rules) {
+            return Some(c);
+        }
+        // 3. The weak rules, one `weak_order` at a time.
+        let weak = ordered(members, |r| {
+            r.tier == RuleTier::Weak && r.scope != Scope::Named
+        });
+        let mut orders: Vec<u32> = weak
+            .iter()
+            .map(|(_, r)| r.weak_order.unwrap_or(0))
+            .collect();
+        orders.dedup();
+        for order in orders {
+            let at: Vec<(&Member, &Rule)> = weak
+                .iter()
+                .filter(|(_, r)| r.weak_order.unwrap_or(0) == order)
+                .copied()
+                .collect();
+            let beside: Vec<(&Member, &Rule)> = at
+                .iter()
+                .filter(|(_, r)| r.scope == Scope::Beside)
+                .copied()
+                .collect();
+            if let Some(c) = self.best_per_program(&beside) {
+                return Some(c);
+            }
+            for (mb, rule) in at.iter().filter(|(_, r)| r.scope == Scope::Anywhere) {
+                if let Some(c) = self.first_anywhere(mb, rule) {
+                    return Some(c);
+                }
+            }
+        }
+        None
+    }
+
+    /// The program `rel` that Steam's hint or the caller names, its folder read afresh, asked of
+    /// one rule: `pick` takes it as it is.
+    fn on_program(
+        &self,
+        mb: &Member,
+        rule: &Rule,
+        rel: &[String],
+        folder: &Rc<Folder>,
+        spent: &mut Spent,
+    ) -> Step<Option<Cand>> {
+        let Some((name, dir)) = rel.split_last() else {
+            return Ok(None);
+        };
+        let lower = name.to_ascii_lowercase();
+        let Some(project) = self.fits(mb.model, rule, dir, name, &lower, folder) else {
+            return Ok(None);
+        };
+        let prog = Prog {
+            rel: rel.to_vec(),
+            dir: dir.to_vec(),
+            name: name.clone(),
+            project,
+            folder: folder.clone(),
+            from_hint: true,
+        };
+        self.rule_on(mb, rule, &prog, spent)
+    }
+
+    /// Every file of the walk asks `rules` in their order, and the first that matches speaks
+    /// for it; of those matches, [`Game::resolve`]'s `best`.
+    fn best_per_program(&self, rules: &[(&Member, &Rule)]) -> Option<Cand> {
+        if rules.is_empty() {
+            return None;
+        }
+        let mut spent = Spent::default();
+        let mut taken = vec![0usize; rules.len()];
+        let mut cands = Vec::new();
+        for e in self.entries.iter().filter(|e| !e.is_dir) {
+            let lower = e.name().to_ascii_lowercase();
+            for (i, (mb, rule)) in rules.iter().enumerate() {
+                let first = rule
+                    .programs
+                    .as_ref()
+                    .and_then(|p| p.first)
+                    .map_or(usize::MAX, |f| f as usize);
+                if taken[i] >= first {
+                    continue;
+                }
+                let Some(prog) = self.walk_prog(mb.model, rule, e, &lower) else {
+                    continue;
+                };
+                taken[i] += 1;
+                if let Ok(Some(c)) = self.rule_on(mb, rule, &prog, &mut spent) {
+                    cands.push(c);
+                    break;
+                }
+            }
+        }
+        match self.resolve(cands) {
+            Ok(Resolution::One(c)) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// A rule of scope `anywhere`: the first match in walk order — of the programs it selects
+    /// (the first `programs.first` of them), or, with no program, of the walk's entries its
+    /// first `listed` names below some `{project}`.
+    fn first_anywhere(&self, mb: &Member, rule: &Rule) -> Option<Cand> {
+        let mut spent = Spent::default();
+        if rule.programs.is_none() {
+            return self.first_project(mb, rule, &mut spent);
+        }
+        let first = rule
+            .programs
+            .as_ref()
+            .and_then(|p| p.first)
+            .map_or(usize::MAX, |f| f as usize);
+        let mut taken = 0;
+        for e in self.entries.iter().filter(|e| !e.is_dir) {
+            if taken >= first {
+                break;
+            }
+            let Some(prog) = self.walk_prog(mb.model, rule, e, &e.name().to_ascii_lowercase())
+            else {
+                continue;
+            };
+            taken += 1;
+            if let Ok(Some(c)) = self.rule_on(mb, rule, &prog, &mut spent) {
+                return Some(c);
+            }
+        }
+        None
+    }
+
+    /// `programs = "none"`, scope `anywhere`: the first walk entry, in walk order, that the
+    /// rule's first `listed` names below some `{project}` (never the root, never below a folder
+    /// it skips) gives the project; the capture stands for every entry it names below that same
+    /// project, in walk order. Then the rest of `require`, and the outcome.
+    fn first_project(&self, mb: &Member, rule: &Rule, spent: &mut Spent) -> Option<Cand> {
+        let Some(Check::Listed {
+            path,
+            kind,
+            capture,
+        }) = rule.require.first()
+        else {
+            return None;
+        };
+        let k = path.segs.len();
+        let below = |e: &Entry| -> Option<Vec<String>> {
+            if e.is_dir != kind.is_dir() || e.rel.len() <= k {
+                return None;
+            }
+            let (project, tail) = e.rel.split_at(e.rel.len() - k);
+            if !self.where_ok(mb.model, rule, project) {
+                return None;
+            }
+            let sc = View {
+                prog: None,
+                project: Some(project.to_vec()),
+                captures: Vec::new(),
+            };
+            let (_, segs) = Game::expand(path, &sc)?;
+            segs.iter()
+                .zip(tail)
+                .all(|(s, n)| match s {
+                    Seg::Name(want) => n.eq_ignore_ascii_case(want),
+                    Seg::Glob(g) => glob_match(g, &n.to_ascii_lowercase()),
+                })
+                .then(|| project.to_vec())
+        };
+        let (at, project) = self
+            .entries
+            .iter()
+            .enumerate()
+            .find_map(|(i, e)| below(e).map(|p| (i, p)))?;
+        let all: Vec<Vec<String>> = self.entries[at..]
+            .iter()
+            .filter(|e| below(e).as_ref() == Some(&project))
+            .map(|e| e.rel.clone())
+            .collect();
+        let mut sc = View {
+            prog: None,
+            project: Some(project),
+            captures: Vec::new(),
+        };
+        if let Some(name) = capture {
+            sc.captures.push((name.clone(), all));
+        }
+        for c in &rule.require[1..] {
+            if !self.check(mb.model, c, &mut sc, spent).ok()? {
+                return None;
+            }
+        }
+        self.matched(mb, rule, sc, spent).ok().flatten()
+    }
+
+    /// The detection a built-in match makes: Pass A's, the Unity version in `unity_version`
+    /// (read only when the rule names an engine).
+    fn builtin_detection(&self, c: Cand, anti_cheat: Vec<String>) -> Detection {
+        let unity_version = if c.code.is_unknown() {
+            None
+        } else {
+            self.read_version(&c)
+        };
+        Detection {
+            engine: c.code,
+            confidence: c.confidence,
+            exe: c.exe.as_deref().map(rel_path),
+            binary: c.binary,
+            anti_cheat,
+            evidence: c.evidence.as_deref().map(rel_path),
+            hint_used: c.from_hint,
+            unity_version,
+            exe_pick: c.exe_pick,
+            version: None,
+            engine_candidates: Vec::new(),
+            descriptor_sha256: None,
+        }
+    }
+
+    /// The version a match's `version` rule reads: the first of its files whose head names one.
+    fn read_version(&self, c: &Cand) -> Option<String> {
+        let (heads, template) = c.version.as_ref()?;
+        for h in heads {
+            if self.read_bytes(limits::HEAD_BYTES).is_err() {
+                return None;
+            }
+            let Some(p) = self.readable(h) else {
+                continue;
+            };
+            if let Some(v) = reads::head(&p, limits::HEAD_BYTES)
+                .as_deref()
+                .and_then(|b| find_version(template, b))
+            {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    // ---- Pass B: one descriptor ----
 
     /// Every match of descriptor `desc` on Steam's hint. No prefilter: the hint's folder may lie
     /// past the walk.
@@ -998,27 +1508,9 @@ impl<'a> Game<'a> {
         spent: &mut Spent,
     ) -> Step<Vec<Cand>> {
         let (rel, folder) = hint;
-        let Some((name, dir)) = rel.split_last() else {
-            return Ok(Vec::new());
-        };
-        let lower = name.to_ascii_lowercase();
         let mut out = Vec::new();
         for rule in &mb.model.rules {
-            let Some(p) = &rule.programs else {
-                continue;
-            };
-            let Some(project) = self.fits(mb.model, p, dir, name, &lower, folder) else {
-                continue;
-            };
-            let prog = Prog {
-                rel: rel.clone(),
-                dir: dir.to_vec(),
-                name: name.clone(),
-                project,
-                folder: folder.clone(),
-                from_hint: true,
-            };
-            if let Some(c) = self.rule_on(mb, rule, &prog, spent)? {
+            if let Some(c) = self.on_program(mb, rule, rel, folder, spent)? {
                 out.push(c);
             }
         }
@@ -1038,10 +1530,10 @@ impl<'a> Game<'a> {
             {
                 continue;
             }
-            let Some(p) = &rule.programs else {
+            if rule.programs.is_none() {
                 continue;
-            };
-            for prog in self.walk_programs(mb.model, p) {
+            }
+            for prog in self.walk_programs(mb.model, rule) {
                 if let Some(c) = self.rule_on(mb, rule, &prog, spent)? {
                     out.push(c);
                 }
@@ -1084,6 +1576,7 @@ impl<'a> Game<'a> {
 
     // ---- choosing ----
 
+    /// The module doc's choosing: Pass B's filters, then (one code, or the built-ins) `best`.
     fn resolve(&self, mut cands: Vec<Cand>) -> Step<Resolution> {
         if cands.is_empty() {
             return Ok(Resolution::Nothing);
@@ -1102,15 +1595,17 @@ impl<'a> Game<'a> {
         if cands.iter().any(|c| c.passes) {
             cands.retain(|c| c.passes);
         }
-        let codes: BTreeSet<&EngineCode> = cands.iter().map(|c| &c.code).collect();
-        if codes.len() > 1 {
-            return Ok(Resolution::Ambiguous(cands));
+        if !self.builtin_policy() {
+            let codes: BTreeSet<&EngineCode> = cands.iter().map(|c| &c.code).collect();
+            if codes.len() > 1 {
+                return Ok(Resolution::Ambiguous(cands));
+            }
         }
         if cands.iter().any(|c| c.bootstrap_matched) {
             cands.retain(|c| c.bootstrap_matched);
         }
         // The same program found twice (two rules, two descriptors of one code): once.
-        let mut seen: Vec<(Vec<String>, Option<Vec<String>>)> = Vec::new();
+        let mut seen: Vec<(Option<Rel>, Option<Rel>)> = Vec::new();
         cands.retain(|c| {
             let key = (c.exe.clone(), c.evidence.clone());
             if seen.contains(&key) {
@@ -1177,10 +1672,7 @@ impl<'a> Game<'a> {
                     detect::evidence_size(&abs(self.root, e))
                 }
                 m => {
-                    self.lookups.set(self.lookups.get() + 1);
-                    if self.lookups.get() > limits::LOOKUPS_PER_GAME {
-                        return Err(Halt::Game);
-                    }
+                    self.game_lookup()?;
                     m.filter(fs::Metadata::is_file).map_or(0, |m| m.len())
                 }
             };
@@ -1208,12 +1700,11 @@ impl<'a> Game<'a> {
                 }
             }
         }
-        let capped = self.entries.len() >= MAX_ENTRIES;
         let driver = self
             .entries
             .iter()
             .any(|e| !e.is_dir && detect::ext_lower(e.name()) == "sys");
-        if capped || driver {
+        if self.capped || driver {
             add(codes::ANTI_CHEAT_UNKNOWN);
         }
         out
@@ -1221,28 +1712,12 @@ impl<'a> Game<'a> {
 
     fn finish(&self, set: &EngineSet, base: Detection, c: Cand) -> Detection {
         let admitted = &set.entries[c.desc];
-        let version = c.version.as_ref().and_then(|(heads, template)| {
-            for h in heads {
-                if self.read_bytes(limits::HEAD_BYTES).is_err() {
-                    return None;
-                }
-                let Some(p) = self.readable(h) else {
-                    continue;
-                };
-                if let Some(v) = reads::head(&p, limits::HEAD_BYTES)
-                    .as_deref()
-                    .and_then(|b| find_version(template, b))
-                {
-                    return Some(v);
-                }
-            }
-            None
-        });
+        let version = self.read_version(&c);
         Detection {
             anti_cheat: self.anti_cheat(&base.anti_cheat, &[&admitted.descriptor.model]),
             engine: c.code,
             confidence: c.confidence,
-            exe: Some(rel_path(&c.exe)),
+            exe: c.exe.as_deref().map(rel_path),
             binary: c.binary,
             evidence: c.evidence.as_deref().map(rel_path),
             hint_used: c.from_hint,
@@ -1351,6 +1826,17 @@ fn match_at(at: &At, dir: &[String]) -> Option<Option<Vec<String>>> {
                 .all(|(a, b)| a.eq_ignore_ascii_case(b)))
         .then_some(None)
     }
+}
+
+/// A `name` check's glob as [`glob_match`] reads it.
+fn glob_parts(pieces: &[Piece]) -> Vec<GPart> {
+    pieces
+        .iter()
+        .map(|p| match p {
+            Piece::Lit(l) => GPart::Lit(l.clone()),
+            _ => GPart::Star,
+        })
+        .collect()
 }
 
 /// A `*` glob against a lower-case name: literal runs in order, the first anchored to the start
@@ -1499,6 +1985,7 @@ mod tests {
                 Path::new("/nonexistent/agl-counted"),
                 None,
                 &entries,
+                false,
                 &set,
                 unknown(),
             );
@@ -1509,6 +1996,50 @@ mod tests {
                 "{n} descriptors: Pass B's work must stay linear in the walk per rule"
             );
         }
+    }
+
+    /// 0.4.1's own reader of a Unity version (src/detect.rs `find_unity_version` at 73bf11e),
+    /// verbatim: the oracle the template is held to.
+    fn find_unity_version(bytes: &[u8]) -> Option<String> {
+        fn digits(b: &[u8], i: usize, max: usize) -> usize {
+            b[i..]
+                .iter()
+                .take(max)
+                .take_while(|c| c.is_ascii_digit())
+                .count()
+        }
+        for start in 0..bytes.len() {
+            if start > 0 && bytes[start - 1].is_ascii_digit() {
+                continue;
+            }
+            let mut i = start;
+            let mut ok = true;
+            for (max, sep) in [(4, Some(b'.')), (2, Some(b'.')), (3, None)] {
+                let n = digits(bytes, i, max);
+                if n == 0 {
+                    ok = false;
+                    break;
+                }
+                i += n;
+                if let Some(sep) = sep {
+                    if bytes.get(i) != Some(&sep) {
+                        ok = false;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            if !ok || !matches!(bytes.get(i), Some(b'a' | b'b' | b'f' | b'p' | b'x')) {
+                continue;
+            }
+            i += 1;
+            let n = digits(bytes, i, 3);
+            if n == 0 {
+                continue;
+            }
+            return Some(String::from_utf8_lossy(&bytes[start..i + n]).into_owned());
+        }
+        None
     }
 
     /// The template plan B writes for the built-in version reader finds exactly what Pass A's
@@ -1540,7 +2071,7 @@ mod tests {
                 .collect();
             assert_eq!(
                 find_version(&tokens, &bytes),
-                crate::detect::find_unity_version(&bytes),
+                find_unity_version(&bytes),
                 "{:?}",
                 String::from_utf8_lossy(&bytes)
             );
@@ -1556,11 +2087,99 @@ mod tests {
             b"20211.3.4f1",
             b"1.2.3",
         ] {
-            assert_eq!(
-                find_version(&tokens, real),
-                crate::detect::find_unity_version(real)
-            );
+            assert_eq!(find_version(&tokens, real), find_unity_version(real));
         }
+    }
+
+    /// The built-ins parse, are Astra's own, fit every limit, and are asked in 0.4.1's order:
+    /// Unity, then Godot, then Unreal.
+    #[test]
+    fn the_built_ins_parse_and_are_asked_in_0_4_1s_order() {
+        let set = crate::engines::builtin();
+        let codes: Vec<Vec<&str>> = set
+            .descriptors()
+            .map(|(d, _)| d.codes().map(|(c, _)| c.as_str()).collect())
+            .collect();
+        assert_eq!(
+            codes,
+            [
+                vec!["unity-il2cpp", "unity-mono"],
+                vec!["godot"],
+                vec!["unreal"]
+            ]
+        );
+        for (d, o) in set.descriptors() {
+            assert!(o.first_party && o.moderation == Moderation::Moderated);
+            assert!(d.canonical_json().len() <= limits::DESCRIPTOR_BYTES);
+            // Built-in codes are reserved: no set may admit them, the built-ins included.
+            assert!(d.check_pass_b(true).is_err());
+        }
+        let paths: Vec<Vec<&str>> = set
+            .list_at_limit()
+            .iter()
+            .map(|p| p.iter().map(String::as_str).collect())
+            .collect();
+        assert_eq!(paths, [vec!["Binaries", "Win64"]]);
+    }
+
+    /// Planning's engine check asks a set's descriptors only when no built-in rule matches the
+    /// program, the first standing with a match answering — with one code, or none.
+    #[test]
+    fn a_named_program_asks_the_set_after_the_built_ins() {
+        let root = std::env::temp_dir().join(format!("agl-eval-named-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let put = |rel: &str, bytes: &[u8]| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, bytes).unwrap();
+        };
+        put("game/bin/win64/cs2.exe", b"MZ\x90\0 a program");
+        put("game/bin/win64/engine2.dll", b"MZ");
+        put("game/core/pak01_dir.vpk", b"vpk");
+        put("Tool.exe", b"MZ tool");
+        put("Tool_Data/Managed/Assembly-CSharp.dll", b"MZ");
+        put("UnityPlayer.dll", b"MZ");
+        let text = |code: &str| {
+            format!(
+                "schema = \"astra.engine/1\"\nengine = {{ codes = {{ {code} = \"S {code}\" }} }}\n[[rule]]\ntier = \"strong\"\nprograms = {{ ext = [\"exe\"], at = \"{{project}}/bin/win64\", first = 8 }}\nrequire = [ {{ listed = \"engine2.dll\", kind = \"file\" }}, {{ child = \"{{project}}/core\", kind = \"dir\", as = \"core\" }} ]\ncode = \"{code}\"\nconfidence = \"high\"\nbinary = \"windows\"\nevidence = \"{{core}}\"\n"
+            )
+        };
+        let set = |items: &[(&str, Moderation, &str)]| {
+            EngineSet::build(items.iter().map(|(code, m, publisher)| {
+                (
+                    Origin {
+                        moderation: *m,
+                        publisher: (*publisher).to_owned(),
+                        first_party: false,
+                    },
+                    Descriptor::from_toml(&text(code)),
+                )
+            }))
+        };
+        let rel = |s: &str| s.split('/').map(str::to_owned).collect::<Vec<_>>();
+        let builtin = crate::engines::builtin();
+        let ask = |exe: &str, set: &EngineSet| engine_of_program(&root, &rel(exe), builtin, set);
+
+        let one = set(&[("source2", Moderation::Unchecked, "a")]);
+        assert_eq!(
+            ask("game/bin/win64/cs2.exe", &EngineSet::empty()),
+            "unknown"
+        );
+        assert_eq!(ask("game/bin/win64/cs2.exe", &one), "source2");
+        // A built-in rule that matches decides: the set is not asked.
+        assert_eq!(ask("Tool.exe", &one), "unity-mono");
+        // A lower standing never overrules a higher one; two codes of one standing are none.
+        let two = set(&[
+            ("source2", Moderation::Local, "a"),
+            ("vapor", Moderation::Moderated, "b"),
+        ]);
+        assert_eq!(ask("game/bin/win64/cs2.exe", &two), "vapor");
+        let tied = set(&[
+            ("source2", Moderation::Unchecked, "a"),
+            ("vapor", Moderation::Unchecked, "b"),
+        ]);
+        assert_eq!(ask("game/bin/win64/cs2.exe", &tied), "unknown");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

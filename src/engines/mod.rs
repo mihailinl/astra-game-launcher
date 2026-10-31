@@ -9,10 +9,11 @@
 //! a developer's local folder, an installed foundation) into an [`EngineSet`] and hands it to
 //! [`crate::detect_with_engines`]. Three rules make that safe to do with strangers' data:
 //!
-//! - **Narrow-only.** The built-in rules ([`crate::detect`], Pass A) run first and unchanged.
-//!   Descriptors (Pass B) are asked only when Pass A says `unknown` with no evidence and no hint
-//!   used, so no descriptor can take or change a game Unity, Unreal or Godot already recognised;
-//!   their codes, and `unknown`, are reserved ([`EngineCode::is_reserved`]).
+//! - **Narrow-only.** The built-in descriptors (`builtin/*.toml`: Unity, Godot, Unreal; Pass A)
+//!   run first, through the same evaluator (`eval.rs`), under their own policy. Descriptors
+//!   (Pass B) are asked only when Pass A says `unknown` with no evidence and no hint used, so no
+//!   descriptor can take or change a game Unity, Unreal or Godot already recognised; their codes,
+//!   and `unknown`, are reserved ([`EngineCode::is_reserved`]).
 //! - **Anchored.** Every rule of a descriptor that is not first-party names a literal file or
 //!   folder beside the program (`listed`, at the top of `require`) that is neither a program nor a
 //!   runtime every game ships (`steam_api64.dll`, `vcruntime140.dll`, …). It is also the O(1)
@@ -20,9 +21,8 @@
 //! - **Counted, never timed.** Each descriptor has a budget of lookups and probes per game
 //!   ([`descriptor::limits`]); a descriptor over its budget yields nothing, and a game over its
 //!   own budget gets no Pass B answer at all. Choosing programs is linear in the walk per rule.
-//!   Nothing in Pass B waits on a clock, follows a link, or blocks on a FIFO. (Pass A, the
-//!   built-in rules, still reads a top-level program's tail and a Unity data header with a plain
-//!   open, as 0.4.1 did; L2 moves the built-ins to Pass B's reads.)
+//!   Nothing in either pass waits on a clock, follows a link, or blocks on a FIFO — the built-ins
+//!   included, which 0.4.1 read with a plain open (`tests/corpus/divergence.txt`).
 //!
 //! The schema, every limit and the reserved names live in [`descriptor`], one module, so the
 //! public specification's goldens can be pinned against it.
@@ -33,11 +33,45 @@ mod reads;
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
 pub use descriptor::{Descriptor, is_reserved_code, is_valid_engine_code};
-pub(crate) use eval::pass_b;
+pub(crate) use eval::{engine_of_program, pass_a, pass_b};
+
+/// The built-in descriptors, as text, in the order Pass A asks them: 0.4.1's `passes()` asked
+/// Unity, then Godot, then Unreal of each program.
+const BUILTIN: [&str; 3] = [
+    include_str!("builtin/unity.toml"),
+    include_str!("builtin/godot.toml"),
+    include_str!("builtin/unreal.toml"),
+];
+
+/// The built-in descriptors (`builtin/*.toml`): Astra's own, asked in Pass A before any other,
+/// and held to launcher 0.4.1's detector by canary C1. Parsed once; a built-in that does not
+/// parse is a build defect, and every test fails on it.
+pub(crate) fn builtin() -> &'static EngineSet {
+    static SET: LazyLock<EngineSet> = LazyLock::new(|| {
+        let entries = BUILTIN
+            .iter()
+            .map(|text| Admitted {
+                descriptor: Descriptor::from_toml(text)
+                    .unwrap_or_else(|e| panic!("a built-in engine descriptor does not parse: {e}")),
+                origin: Origin {
+                    moderation: Moderation::Moderated,
+                    publisher: "astra".to_owned(),
+                    first_party: true,
+                },
+            })
+            .collect();
+        EngineSet {
+            entries,
+            skipped: Vec::new(),
+        }
+    });
+    &SET
+}
 
 use crate::detect::Engine;
 use crate::error::{LauncherError, Result, codes};
@@ -339,6 +373,15 @@ impl EngineSet {
         let mut v: Vec<&Skipped> = self.skipped.iter().collect();
         v.sort_by_key(|s| s.index);
         v
+    }
+
+    /// The folders the walk still lists at its depth bound (`walk.list_at_limit`), from every
+    /// descriptor here: only the built-in set's ever name any.
+    pub(crate) fn list_at_limit(&self) -> Vec<&[String]> {
+        self.entries
+            .iter()
+            .flat_map(|a| a.descriptor.model.list_at_limit.iter().map(Vec::as_slice))
+            .collect()
     }
 
     /// The display name of `code`, from the descriptor that declares it.

@@ -1,0 +1,102 @@
+# Built-in engine descriptor: Unreal Engine. Astra's own (first-party), asked in Pass A before any
+# other descriptor, and held byte for byte to launcher 0.4.1's src/detect.rs (canary C1). The 0.4.1
+# function each rule replaces is named beside it.
+schema = "astra.engine/1"
+
+[engine]
+codes = { unreal = "Unreal Engine" }
+
+# `walk()`'s one exception to its depth bound: a project one package level deeper than the flat
+# layout (`<root>/<Package>/<Project>/Binaries/Win64/…`) still has its program listed.
+[walk]
+list_at_limit = ["Binaries/Win64"]
+
+# `unreal()`: `<Project>/Binaries/Win64/<Name>-Win64-Shipping.exe` with `<Project>/Content/Paks/`.
+# The name need not repeat the project's (Palworld's `Pal/…/Palworld-Win64-Shipping.exe`); when it
+# does, that breaks a tie. A bootstrapper named after the project beside its folder, or Steam's
+# hint naming one, ranks the project ahead of a larger one (Poppy Playtime's chapter launcher).
+[[rule]]
+tier = "strong"
+programs = { suffix = "-win64-shipping.exe", at = "{project}/Binaries/Win64", skip_dirs = ["Engine"] }
+require = [ { child = "{project}/Content/Paks", kind = "dir" } ]
+code = "unreal"
+confidence = "high"
+binary = "windows"
+evidence = "{project}"
+named_alike = "{project.leaf}"
+bootstrap = { listed = "{project.parent}/{project.leaf}.exe", hint_stem = "{project.leaf}" }
+
+# `unreal_unshipped()`: a project that ships no `-Win64-Shipping.exe` (GTA III – The Definitive
+# Edition: `Gameface/Binaries/Win64/LibertyCity.exe`). The program Steam launches, else the largest
+# `.exe` there; the pairing must be whole. Its own name is judged by `pick`, which never takes a
+# wrapper unless the caller names it, so only the folders on its way are skipped as wrappers'.
+[[rule]]
+tier = "strong"
+programs = { ext = ["exe"], at = "{project}/Binaries/Win64", skip_wrappers = "folders", skip_dirs = ["Engine"] }
+require = [
+  { none = [ { name = "*-win64-shipping.exe" } ] },
+  { none = [ { listed = "*-win64-shipping.exe", kind = "file" } ] },
+  { child = "{project}/Content/Paks", kind = "dir" },
+]
+pick = "hint-else-largest"
+code = "unreal"
+confidence = "high"
+binary = "windows"
+evidence = "{project}"
+named_alike = "{project.leaf}"
+bootstrap = { hint_stem = "{project.leaf}" }
+
+# `pass_a()`'s half pairing: when no rule above named a game, the shipping program without
+# `Content/Paks/`.
+[[rule]]
+tier = "weak"
+weak_order = 100
+programs = { suffix = "-win64-shipping.exe", at = "{project}/Binaries/Win64", skip_dirs = ["Engine"] }
+code = "unreal"
+confidence = "low"
+passes = false
+binary = "windows"
+evidence = "{project}"
+named_alike = "{project.leaf}"
+bootstrap = { listed = "{project.parent}/{project.leaf}.exe" }
+
+# `pass_a()`'s any shipping program: the first in walk order, wherever it sits. It says nothing
+# about a project, so it names no evidence.
+[[rule]]
+tier = "weak"
+weak_order = 110
+scope = "anywhere"
+programs = { ext = ["exe"], skip_dirs = ["Engine"] }
+require = [ { name = "*-win64-shipping.exe" } ]
+code = "unreal"
+confidence = "low"
+passes = false
+binary = "windows"
+
+# `pass_a()`'s cooked project with no program at all: the first `<Project>/Content/Paks/*.pak` in
+# walk order names the project; the platform its paks were cooked for (`pakchunk0-WindowsNoEditor`,
+# `-WinGDK`, `-LinuxNoEditor`), from the first of that project's paks that carries one (`pak_binary()`).
+[[rule]]
+tier = "weak"
+weak_order = 120
+scope = "anywhere"
+programs = { none = true, skip_dirs = ["Engine"] }
+require = [ { listed = "{project}/Content/Paks/*.pak", kind = "file", as = "pak" } ]
+code = "unreal"
+confidence = "low"
+passes = false
+evidence = "{project}"
+binary = { from_name = "{pak}", map = { "-windows" = "windows", "-wingdk" = "windows", "-linux" = "linux" } }
+
+# `engine_of_exe()`'s suffix fallback, for planning only: a program the caller names whose name ends
+# `-Win64-Shipping.exe` is Unreal, wherever it sits and whatever is beside it.
+[[rule]]
+tier = "weak"
+weak_order = 140
+scope = "named"
+programs = { ext = ["exe"], skip_wrappers = false }
+require = [ { name = "*-win64-shipping.exe" } ]
+code = "unreal"
+confidence = "low"
+passes = false
+binary = "windows"

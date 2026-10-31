@@ -618,23 +618,38 @@ fn first_party_only_and_unsupported_parts_are_refused_as_such() {
             1
         );
     }
-    let later = [
+    // The built-ins' own (L2): parsed and evaluated in the built-in set, refused in Pass B —
+    // first-party only, and from a first-party descriptor `descriptor-unsupported`.
+    let weak = |extra: &str| {
+        SOURCE2.replace(
+            "tier = \"strong\"",
+            &format!("tier = \"weak\"\nweak_order = 200\n{extra}"),
+        )
+    };
+    let built_in_only = [
         SOURCE2.replace(
             "[[rule]]",
             "[walk]\nlist_at_limit = [\"Binaries/Win64\"]\n[[rule]]",
         ),
-        SOURCE2.replace("tier = \"strong\"", "tier = \"weak\"\nscope = \"anywhere\""),
-        SOURCE2
+        weak("scope = \"anywhere\""),
+        weak("scope = \"named\""),
+        weak("scope = \"anywhere\"")
             .replace(
                 "programs = { ext = [\"exe\"], at = \"{project}/bin/win64\", first = 8 }",
-                "programs = \"none\"",
+                "programs = { none = true, skip_dirs = [\"Engine\"] }",
             )
             .replace(
-                "{ child = \"{project}/core\", kind = \"dir\", as = \"core\" }",
-                "{ child = \"core\", kind = \"dir\", as = \"core\" }",
-            ),
+                "require = [ { listed = \"engine2.dll\", kind = \"file\" },\n            { child = \"{project}/core\", kind = \"dir\", as = \"core\" } ]",
+                "require = [ { listed = \"{project}/core/*.vpk\", kind = \"file\", as = \"core\" } ]",
+            )
+            .replace("binary = \"windows\"", "binary = { from_name = \"{core}\", map = { \"-win\" = \"windows\" } }"),
+        SOURCE2.replace(
+            "{ listed = \"engine2.dll\", kind = \"file\" },",
+            "{ listed = \"engine2.dll\", kind = \"file\" }, { name = \"cs*.exe\" },",
+        ),
+        SOURCE2.replace("first = 8 }", "first = 8, skip_wrappers = \"folders\" }"),
     ];
-    for t in &later {
+    for t in &built_in_only {
         Descriptor::from_toml(t).unwrap_or_else(|e| panic!("{t}\n{e}"));
         assert_eq!(
             refusal(t, false).code,
@@ -642,6 +657,46 @@ fn first_party_only_and_unsupported_parts_are_refused_as_such() {
             "{t}"
         );
         assert_eq!(refusal(t, true).code, codes::DESCRIPTOR_UNSUPPORTED, "{t}");
+    }
+    // Their grammar: a rule with no program looks anywhere and begins below `{project}`; a scope
+    // is a weak rule's; a bootstrap names at least one of its two parts; a name check is a glob
+    // of one name with a program to compare.
+    let bad = [
+        SOURCE2.replace(
+            "programs = { ext = [\"exe\"], at = \"{project}/bin/win64\", first = 8 }",
+            "programs = \"none\"",
+        ),
+        SOURCE2.replace(
+            "tier = \"strong\"",
+            "tier = \"strong\"\nscope = \"anywhere\"",
+        ),
+        weak("scope = \"anywhere\"").replace(
+            "programs = { ext = [\"exe\"], at = \"{project}/bin/win64\", first = 8 }",
+            "programs = { none = true, ext = [\"exe\"] }",
+        ),
+        weak("scope = \"anywhere\"").replace(
+            "programs = { ext = [\"exe\"], at = \"{project}/bin/win64\", first = 8 }",
+            "programs = \"none\"",
+        ),
+        SOURCE2.replace(
+            "evidence = \"{core}\"",
+            "evidence = \"{core}\"\nbootstrap = { }",
+        ),
+        SOURCE2.replace(
+            "{ listed = \"engine2.dll\", kind = \"file\" },",
+            "{ listed = \"engine2.dll\", kind = \"file\" }, { name = \"{stem}.exe\" },",
+        ),
+        SOURCE2.replace(
+            "{ listed = \"engine2.dll\", kind = \"file\" },",
+            "{ listed = \"engine2.dll\", kind = \"file\" }, { name = \"a/b.exe\" },",
+        ),
+        SOURCE2.replace(
+            "{ listed = \"engine2.dll\", kind = \"file\" },",
+            "{ listed = \"engine2.dll\", kind = \"file\" }, { name = \"*.exe\", kind = \"file\" },",
+        ),
+    ];
+    for t in &bad {
+        assert_eq!(parse_err(t).code, codes::DESCRIPTOR_INVALID, "{t}");
     }
     // Pass B's own: `first` given, programs it considers, evidence given.
     let pass_b = [
@@ -1414,6 +1469,14 @@ fn a_walk_cut_at_its_cap_cannot_vouch_for_anti_cheat() {
     let got = d(t.path(), None, &set);
     assert_eq!(got.engine, "alpha");
     assert_eq!(got.anti_cheat, [codes::ANTI_CHEAT_UNKNOWN]);
+    // A walk of exactly its cap (Game.exe, alpha.core, zz/ and 4,997 files) listed everything,
+    // so it vouches as any other does.
+    for i in 4997..5001 {
+        std::fs::remove_file(t.join(&format!("zz/{i:05}.dat"))).unwrap();
+    }
+    let got = d(t.path(), None, &set);
+    assert_eq!(got.engine, "alpha");
+    assert!(got.anti_cheat.is_empty(), "{:?}", got.anti_cheat);
 }
 
 // ---- Pass B: budgets ----
@@ -1930,13 +1993,12 @@ version = { head = ["{dir}/ver/version.txt"], template = "N{1,3}.N{1,3}" }
     }
 }
 
-/// L2's gate, written now (docs/ENGINE-DESCRIPTORS-DEBT.md, row 2): a FIFO where a top-level
-/// program would be blocks Pass A today — its embedded-pck check opens the first programs with
-/// a plain open, exactly as 0.4.1 does, and C1 holds this crate to 0.4.1. L2 moves the built-ins
-/// to Pass B's reads, declares the divergence, and turns this on.
+/// A FIFO where a top-level program would be: 0.4.1's embedded-pck check opened it with a plain
+/// open and blocked for good; the built-in Godot rule reads its tail as every probe does
+/// (`O_NONBLOCK`, regular files only), and finds nothing. A declared divergence
+/// (`tests/corpus/divergence.txt`, `fifo-top-program`).
 #[cfg(unix)]
 #[test]
-#[ignore = "L2: Pass A still opens a top-level program plainly, as 0.4.1 does"]
 fn a_top_level_fifo_never_blocks_detection() {
     let t = Tmp::new("top-fifo");
     let c = std::ffi::CString::new(t.join("Game.exe").as_os_str().as_encoded_bytes()).unwrap();

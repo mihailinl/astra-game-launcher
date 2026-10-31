@@ -7,16 +7,22 @@
 //! and the plan's gates (`src/plan.rs`, `src/manifest.rs`) that name an engine or one of its
 //! tell-tale files, and holds the count to [`CEILING`] EXACTLY: a rise fails, and so does a fall
 //! until the same commit lowers the constant — so the count can only ever fall, on paper and in
-//! fact. Data files (`src/engines/builtin/*.toml`, from L2) are where those names belong and are
-//! not counted; neither are comments, nor the bodies of `#[cfg(test)] mod`s (a test names the
+//! fact. Data files (`src/engines/builtin/*.toml`) are where those names belong and are not
+//! counted; neither are comments, nor the bodies of `#[cfg(test)] mod`s (a test names the
 //! engines it tests). `doorstop.rs`, `mods/` and `former.rs` are loader and history code, not
 //! detection, and are not scanned (plan B §2).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The count at launcher 0.5.0's L1. May only go down, and equals the count.
-const CEILING: usize = 43;
+/// The count at launcher 0.5.0's L2 (43 at L1): the built-in rules left `src/detect.rs` for
+/// `src/engines/builtin/*.toml`. What is left: [`Engine`]'s own codes (8, `code()` and
+/// `from_code()`), the wrapper name `crashreportclient` (1), the three built-ins' file names in
+/// `include_str!` (3), and descriptor.rs's reserved words (5). May only go down, and equals the
+/// count.
+///
+/// [`Engine`]: astra_game_launcher::Engine
+const CEILING: usize = 17;
 
 /// Matched case-insensitively inside each literal.
 const ENGINE_WORDS: &[&str] = &[

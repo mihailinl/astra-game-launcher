@@ -263,6 +263,12 @@ the rules on real Steam libraries (`cargo run --example detection_survey`).
 The engine a package is checked against at `plan` is the target program's own, by the same
 rules: a launcher beside a Unity game is not a Unity game.
 
+Since 0.5.0 these rules are data: the built-in engine descriptors
+[`src/engines/builtin/`](src/engines/builtin) (`unity.toml`, `godot.toml`, `unreal.toml`), read
+by the same evaluator as any descriptor below and held to launcher 0.4.1's answers by canary C1.
+Where 0.5.0 answers otherwise — it follows no link and waits on no FIFO, where 0.4.1 did both in
+a few reads — is listed in [`tests/corpus/divergence.txt`](tests/corpus/divergence.txt).
+
 ## Engines learned from data (0.5.0, in progress)
 
 An engine the rules above do not know is described by data, an **engine descriptor**
@@ -279,10 +285,11 @@ let d = detect_with_engines(&dir, hint, &engines)?;      // Pass A, then perhaps
 - `Detection::engine` is an `EngineCode` (`^[a-z][a-z0-9-]{1,31}$`), serialised exactly as the
   old `Engine` was: `"unity-mono"`, `"unity-il2cpp"`, `"unreal"`, `"godot"`, `"unknown"`, or a
   descriptor's code. `engine.builtin()` gives the `Engine` back for the built-in ones.
-- **Narrow-only.** Pass A is `detect_with`, unchanged. Pass B (the descriptors) runs only when
-  Pass A says `unknown` with no evidence and no hint used, so a descriptor can name a game
-  nothing recognised and never change one that was. `detect_with_engines` with an empty set is
-  `detect_with`; both are held to launcher 0.4.1's answers by the tests (canary C1).
+- **Narrow-only.** Pass A is `detect_with`: the built-in descriptors. Pass B (the descriptors
+  in the set) runs only when Pass A says `unknown` with no evidence and no hint used, so a
+  descriptor can name a game nothing recognised and never change one that was.
+  `detect_with_engines` with an empty set is `detect_with`; both are held to launcher 0.4.1's
+  answers by the tests (canary C1).
 - Built-in codes, `unknown` and anything that reads as them are reserved
   (`engine-code-reserved`); a code belongs to the first publisher admitted with it
   (`engine-code-taken`); Pass B asks at most 64 descriptors, 4 per publisher, moderated before
@@ -294,10 +301,8 @@ let d = detect_with_engines(&dir, hint, &engines)?;      // Pass A, then perhaps
   costs nothing, on Steam's hint as in the folder search. Pass B follows no link and blocks on
   no FIFO; every lookup and byte it makes is counted (64 lookups and 8 probes per descriptor,
   1,024 lookups and 64 KiB per game), choosing its programs is linear in the walk, and over
-  budget means no answer, never a slow one. (Pass A — the built-in rules, unchanged since
-  0.4.1 — still opens the first top-level programs and a Unity data folder's headers with a
-  plain open, so a FIFO there blocks `detect_with` as it always has; the built-ins move to the
-  same reads with L2.)
+  budget means no answer, never a slow one. Pass A reads the same way, without the budgets:
+  the built-ins are Astra's own, bounded by the walk alone.
 - A Pass B answer carries `Detection::descriptor_sha256`, perhaps `Detection::version`, and
   `anti-cheat-unknown` in `anti_cheat` when the walk stopped at its cap or a `*.sys` ships.
   None of these fields appear in a Pass A detection's JSON.

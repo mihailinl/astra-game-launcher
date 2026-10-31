@@ -2,17 +2,23 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The only way Pass B reads a file's bytes: opened without following a link (`O_NOFOLLOW`;
-//! Windows `FILE_FLAG_OPEN_REPARSE_POINT`), without waiting on a FIFO (`O_NONBLOCK`), and read
-//! only when what was opened is a regular file on disk (`S_ISREG`; Windows: no reparse point and
-//! `FILE_TYPE_DISK`). Any doubt reads as "nothing there".
+//! The only way detection reads a file's bytes, the built-in descriptors' and Pass B's alike:
+//! opened only when it is a regular file as looked at, then opened without following a link
+//! (`O_NOFOLLOW`; Windows `FILE_FLAG_OPEN_REPARSE_POINT`), without waiting on a FIFO
+//! (`O_NONBLOCK`), and read only when what was opened is a regular file on disk (`S_ISREG`;
+//! Windows: no reparse point and `FILE_TYPE_DISK`). Any doubt reads as "nothing there".
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-/// `path`, opened as described above, with its length.
+/// `path`, opened as described above, with its length. Anything that is not a regular file when
+/// looked at (a link, a FIFO, a device node) is not opened at all; one swapped in between the
+/// look and the open is refused by the checks on what was opened.
 fn open_regular(path: &Path) -> Option<(File, u64)> {
+    if !std::fs::symlink_metadata(path).ok()?.is_file() {
+        return None;
+    }
     let mut opts = OpenOptions::new();
     opts.read(true);
     #[cfg(unix)]

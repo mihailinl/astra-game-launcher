@@ -1,0 +1,48 @@
+# Built-in engine descriptor: Godot. Astra's own (first-party), asked in Pass A before any other
+# descriptor, and held byte for byte to launcher 0.4.1's src/detect.rs (canary C1). The 0.4.1
+# function each rule replaces is named beside it.
+schema = "astra.engine/1"
+
+[engine]
+codes = { godot = "Godot" }
+
+# `godot()`: `<stem>.pck` beside the program.
+[[rule]]
+tier = "strong"
+programs = { ext = ["exe", "x86_64", "x86"], skip_dirs = ["Engine"] }
+require = [ { listed = "{stem}.pck", kind = "file", as = "pck" } ]
+code = "godot"
+confidence = "high"
+evidence = "{pck}"
+binary = "by-ext"
+named_alike = true
+
+# `pass_a()`'s embedded pck: when nothing else named a game, the first of the first eight
+# top-level programs (in walk order, wrappers included) whose last four bytes close a pck.
+[[rule]]
+tier = "weak"
+weak_order = 130
+scope = "anywhere"
+programs = { ext = ["exe", "x86_64", "x86"], at = "", first = 8, skip_wrappers = false }
+require = [ { tail = "{program}", bytes = 4, equals = "GDPC", min_len = 12 } ]
+code = "godot"
+confidence = "low"
+passes = false
+evidence = "{program}"
+binary = "by-ext"
+named_alike = true
+
+# `engine_of_exe()`'s last fallback, for planning only: a program the caller names, wherever it
+# sits and whatever its name, with a pck embedded in it.
+[[rule]]
+tier = "weak"
+weak_order = 150
+scope = "named"
+programs = { ext = ["exe", "x86_64", "x86"], skip_wrappers = false }
+require = [ { tail = "{program}", bytes = 4, equals = "GDPC", min_len = 12 } ]
+code = "godot"
+confidence = "low"
+passes = false
+evidence = "{program}"
+binary = "by-ext"
+named_alike = true
