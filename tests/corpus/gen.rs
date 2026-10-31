@@ -85,6 +85,8 @@ pub struct Tree {
     /// sorting reads differently from a cut after ([`extras`]).
     pub truncation: bool,
     pub app: Option<App>,
+    /// The streams after the first that laid something in this tree, by name.
+    pub streams: Vec<&'static str>,
 }
 
 const NAMES: &[&str] = &[
@@ -569,6 +571,7 @@ pub fn tree(seed: u64) -> Tree {
         programs: g.programs,
         truncation: false,
         app: None,
+        streams: Vec::new(),
     };
     extras(seed, &mut t);
     strays(seed, &mut t);
@@ -586,6 +589,7 @@ fn crowds(seed: u64, t: &mut Tree) {
     if !c.chance(3) {
         return;
     }
+    t.streams.push("crowds");
     let n = 9 + c.below(4);
     let packed = c.below(n);
     for i in 0..n {
@@ -636,6 +640,7 @@ fn odd_names(seed: u64, t: &mut Tree) {
     if !z.chance(6) {
         return;
     }
+    t.streams.push("odd_names");
     let file = |t: &mut Tree, path: String, bytes: &[u8]| {
         t.nodes.push(Node::File(path, bytes.to_vec()));
     };
@@ -735,6 +740,7 @@ fn extras(seed: u64, t: &mut Tree) {
     // by a hash of each name (ext4) puts one name at the same place in every tree, so only
     // names that change from tree to tree land on both sides of the cut.
     t.truncation = true;
+    t.streams.push("extras");
     let mut stem = || -> String {
         let tail: String = (0..3).map(|_| (b'A' + x.below(26) as u8) as char).collect();
         format!("A{tail}")
@@ -814,6 +820,7 @@ fn strays(seed: u64, t: &mut Tree) {
     if !y.chance(10) {
         return;
     }
+    t.streams.push("strays");
     for _ in 0..1 + y.below(3) {
         match y.below(8) {
             0 => {

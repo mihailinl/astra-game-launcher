@@ -1061,3 +1061,31 @@ fn only_the_first_eight_top_level_programs_are_asked_for_an_embedded_pck() {
         }
     }
 }
+
+/// A Unity game's name always repeats its evidence's (`<stem>_Data`): of a Unity game and an
+/// Unreal project that ship their program under another name (`Pal/…/Palworld-Win64-Shipping.exe`)
+/// at one depth, both passing, of equal size and with no bootstrapper, the Unity game wins —
+/// though the project sorts first by path.
+#[test]
+fn of_equal_games_the_one_whose_name_repeats_its_evidence_wins() {
+    let t = Tmp::new("named-alike-unity");
+    write(&t.join("Zed.exe"), b"MZ zed");
+    write(&t.join("UnityPlayer.dll"), b"MZ player");
+    write(
+        &t.join("Zed_Data/Managed/Assembly-CSharp.dll"),
+        &[b'c'; 100],
+    );
+    write(
+        &t.join("Pal/Binaries/Win64/Palworld-Win64-Shipping.exe"),
+        b"MZ",
+    );
+    write(
+        &t.join("Pal/Content/Paks/pakchunk0-Windows.pak"),
+        &[0u8; 98],
+    );
+    let d = detect(t.path()).unwrap();
+    assert_eq!(
+        (eng(&d), d.exe, d.evidence),
+        (Engine::UnityMono, p("Zed.exe"), p("Zed_Data"))
+    );
+}

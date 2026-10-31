@@ -97,6 +97,13 @@ struct Counts {
     /// Answers only a weak built-in rule gives: any shipping program (no evidence), paks with
     /// no program, a pck embedded in a top-level program.
     weak_shipping: AtomicUsize,
+    /// Half a pairing (weak 100): a shipping program in `<P>/Binaries/Win64/` without paks.
+    weak_half: AtomicUsize,
+    /// Planning's engine check answered by a planning-only rule: a shipping program outside any
+    /// `<P>/Binaries/Win64/` (140), a program below the top with a pck embedded and none beside
+    /// it (150).
+    plan_shipping_anywhere: AtomicUsize,
+    plan_embedded_below: AtomicUsize,
     paks_only: AtomicUsize,
     embedded_pck: AtomicUsize,
     /// A built-in engine named for a game whose evidence holds a name only a Linux disk holds
@@ -514,6 +521,13 @@ fn one_tree(
         if d.engine == Engine::Unreal && d.evidence.is_none() && d.exe.is_some() {
             bump(&counts.weak_shipping);
         }
+        if d.engine == Engine::Unreal
+            && d.confidence == astra_game_launcher::Confidence::Low
+            && d.evidence.is_some()
+            && d.exe.is_some()
+        {
+            bump(&counts.weak_half);
+        }
         if d.engine == Engine::Unreal && d.exe.is_none() {
             bump(&counts.paks_only);
         }
@@ -623,9 +637,42 @@ fn one_tree(
             if new.starts_with("engine-mismatch ") {
                 bump(&counts.mismatch);
             }
+            let seen = engine_seen(&new, *engine);
+            let parts: Vec<String> = exe
+                .iter()
+                .map(|c| c.to_string_lossy().to_ascii_lowercase())
+                .collect();
+            let name = parts.last().map_or("", String::as_str);
+            let in_binaries = parts.len() >= 4
+                && parts[parts.len() - 3] == "binaries"
+                && parts[parts.len() - 2] == "win64";
+            if seen.as_deref() == Some("unreal")
+                && name.ends_with("-win64-shipping.exe")
+                && !in_binaries
+            {
+                bump(&counts.plan_shipping_anywhere);
+            }
+            if seen.as_deref() == Some("godot")
+                && parts.len() >= 2
+                && !t.path().join(exe).with_extension("pck").exists()
+                && fs::read(t.path().join(exe)).is_ok_and(|b| b.len() >= 12 && b.ends_with(b"GDPC"))
+            {
+                bump(&counts.plan_embedded_below);
+            }
         }
         c1b_plan(seed, k, &p, fixtures, counts);
     }
+}
+
+/// The engine planning's engine check saw for the probe `probe`: its own when it planned, `got`
+/// when it refused as a mismatch, nothing when it refused before the check.
+fn engine_seen(plan: &str, probe: Engine) -> Option<String> {
+    if plan.starts_with('{') {
+        return Some(probe.code().to_owned());
+    }
+    let params = plan.strip_prefix("engine-mismatch ")?;
+    let got = params.split("\"got\": \"").nth(1)?;
+    Some(got.split('"').next()?.to_owned())
 }
 
 /// C1b for one program: one of Astra's own manifests, turning with the seed, its game files laid
@@ -756,6 +803,15 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
         ("trees with 5+ ties", get(&c.tied)),
         ("bootstrapper ties", get(&c.bootstrap_tie)),
         ("weak: any shipping program", get(&c.weak_shipping)),
+        ("weak: half a pairing", get(&c.weak_half)),
+        (
+            "plan: a shipping program anywhere",
+            get(&c.plan_shipping_anywhere),
+        ),
+        (
+            "plan: a pck embedded below the top",
+            get(&c.plan_embedded_below),
+        ),
         ("weak: paks, no program", get(&c.paks_only)),
         ("weak: embedded pck", get(&c.embedded_pck)),
         ("odd names named", get(&c.odd_named)),
@@ -793,6 +849,9 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
         ("trees with 5+ ties", 380),
         ("bootstrapper ties", 45),
         ("weak: any shipping program", 130),
+        ("weak: half a pairing", 2_000),
+        ("plan: a shipping program anywhere", 140),
+        ("plan: a pck embedded below the top", 390),
         ("weak: paks, no program", 400),
         ("weak: embedded pck", 280),
         ("odd names named", 1_400),
@@ -986,4 +1045,32 @@ fn the_corpus_is_deterministic() {
         assert_eq!(shape(seed), shape(seed));
     }
     assert_ne!(shape(SEED), shape(SEED + 1));
+    // Pinned across commits: a generator edit changes the corpus C1 was proven on only when
+    // this constant changes with it, in the same commit, and says so. Unix: the odd names are
+    // laid there only.
+    let first: String = (0..PINNED).map(|i| shape(SEED + i)).collect();
+    // Every stream lays something within the pinned range, or the pin would not see it change.
+    let mut streams: Vec<&str> = (0..PINNED)
+        .flat_map(|i| corpus::tree(SEED + i).streams)
+        .collect();
+    streams.sort_unstable();
+    streams.dedup();
+    let want: &[&str] = if cfg!(unix) {
+        &["crowds", "extras", "odd_names", "strays"]
+    } else {
+        &["crowds", "extras", "strays"]
+    };
+    assert_eq!(streams, want);
+    if cfg!(unix) {
+        assert_eq!(
+            sha(first.as_bytes()),
+            CORPUS_SHA256,
+            "the corpus changed: update CORPUS_SHA256 deliberately"
+        );
+    }
 }
+
+/// How many trees, from [`SEED`] on, [`CORPUS_SHA256`] pins.
+const PINNED: u64 = 2_000;
+/// `sha256` of the first [`PINNED`] trees' shapes ([`the_corpus_is_deterministic`]), on Unix.
+const CORPUS_SHA256: &str = "c01a2c920f86762eb1f9e1de5df4b4461bb23317862457b84813109f1bb66a1a";

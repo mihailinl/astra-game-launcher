@@ -2168,7 +2168,10 @@ mod tests {
             assert!(o.first_party && o.moderation == Moderation::Moderated);
             assert!(d.canonical_json().len() <= limits::DESCRIPTOR_BYTES);
             // Built-in codes are reserved: no set may admit them, the built-ins included.
-            assert!(d.check_pass_b(true).is_err());
+            assert_eq!(
+                d.check_pass_b(true).map_err(|e| e.code),
+                Err(codes::ENGINE_CODE_RESERVED)
+            );
         }
         let paths: Vec<Vec<&str>> = set
             .list_at_limit()

@@ -648,6 +648,26 @@ fn first_party_only_and_unsupported_parts_are_refused_as_such() {
             "{ listed = \"engine2.dll\", kind = \"file\" },",
             "{ listed = \"engine2.dll\", kind = \"file\" }, { name = \"cs*.exe\" },",
         ),
+        // The name check nested anywhere a check may sit: in `any`, `all` and `none`, two levels
+        // down, and in a classify `when`.
+        SOURCE2.replace(
+            "{ listed = \"engine2.dll\", kind = \"file\" },",
+            "{ listed = \"engine2.dll\", kind = \"file\" }, { any = [ { name = \"cs*.exe\" }, { listed = \"x.dll\", kind = \"file\" } ] },",
+        ),
+        SOURCE2.replace(
+            "{ listed = \"engine2.dll\", kind = \"file\" },",
+            "{ listed = \"engine2.dll\", kind = \"file\" }, { all = [ { listed = \"x.dll\", kind = \"file\" }, { none = [ { name = \"cs*.exe\" } ] } ] },",
+        ),
+        SOURCE2.replace(
+            "{ listed = \"engine2.dll\", kind = \"file\" },",
+            "{ listed = \"engine2.dll\", kind = \"file\" }, { none = [ { name = \"cs*.exe\" } ] },",
+        ),
+        SOURCE2
+            .replace("code = \"source2\"\nconfidence = \"high\"\n", "")
+            .replace(
+                "binary = \"windows\"",
+                "binary = \"windows\"\nclassify = [ { when = { name = \"cs*.exe\" }, code = \"source2\", confidence = \"high\" }, { code = \"source2\", confidence = \"low\" } ]",
+            ),
         SOURCE2.replace("first = 8 }", "first = 8, skip_wrappers = \"folders\" }"),
     ];
     for t in &built_in_only {
@@ -2014,6 +2034,97 @@ fn a_top_level_fifo_never_blocks_detection() {
         .recv_timeout(Duration::from_secs(20))
         .expect("detection blocked on a FIFO");
     assert!(got.engine.is_unknown());
+}
+
+/// The names of the files below `dir` that something opened while `run` ran (inotify `IN_OPEN`,
+/// the folder's own opens left out).
+#[cfg(target_os = "linux")]
+fn opened_below(dir: &Path, run: impl FnOnce()) -> Vec<String> {
+    use std::os::unix::ffi::OsStrExt;
+    // SAFETY: plain syscalls on a descriptor this function owns and closes; every event is read
+    // unaligned out of the buffer the kernel filled, its name bounded by its own length.
+    unsafe {
+        let fd = libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC);
+        assert!(fd >= 0, "inotify_init1");
+        let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).unwrap();
+        assert!(libc::inotify_add_watch(fd, c.as_ptr(), libc::IN_OPEN) >= 0);
+        run();
+        let head = std::mem::size_of::<libc::inotify_event>();
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut names = Vec::new();
+        loop {
+            let n = libc::read(fd, buf.as_mut_ptr().cast(), buf.len());
+            if n <= 0 {
+                break;
+            }
+            let mut off = 0;
+            while off + head <= n as usize {
+                let ev: libc::inotify_event =
+                    std::ptr::read_unaligned(buf.as_ptr().add(off).cast());
+                let name = &buf[off + head..off + head + ev.len as usize];
+                let name = name.split(|b| *b == 0).next().unwrap_or(&[]);
+                if !name.is_empty() {
+                    names.push(String::from_utf8_lossy(name).into_owned());
+                }
+                off += head + ev.len as usize;
+            }
+        }
+        libc::close(fd);
+        names
+    }
+}
+
+/// A FIFO is never OPENED, not merely never waited on: every read looks before it opens and
+/// opens only a regular file. `O_NONBLOCK` beside that look is defence in depth for a FIFO
+/// swapped in between the two, a race no test can make. Pinned where a FIFO stands for a
+/// top-level program (the weak Godot rule's tail, Pass B's magic) and for a Unity version
+/// header, with a positive control: opening the FIFO here is seen.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_fifo_is_never_opened() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let fifo = |p: &Path| {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path, as mkfifo wants.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+    };
+    let top = Tmp::new("fifo-unopened-top");
+    fifo(&top.join("Game.exe"));
+    let opened = opened_below(top.path(), || {
+        assert!(detect_with(top.path(), None).unwrap().engine.is_unknown());
+        let with = detect_with_engines(top.path(), None, hostile_set()).unwrap();
+        assert!(with.descriptor_sha256.is_none(), "{with:?}");
+    });
+    assert!(!opened.iter().any(|n| n == "Game.exe"), "{opened:?}");
+    let control = opened_below(top.path(), || {
+        let _ = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(top.join("Game.exe"))
+            .unwrap();
+    });
+    assert!(
+        control.iter().any(|n| n == "Game.exe"),
+        "the watch sees a FIFO opened"
+    );
+
+    let unity = Tmp::new("fifo-unopened-header");
+    write(&unity.join("Game.exe"), b"MZ game");
+    write(&unity.join("UnityPlayer.dll"), b"MZ player");
+    write(
+        &unity.join("Game_Data/Managed/Assembly-CSharp.dll"),
+        b"MZ cs",
+    );
+    fifo(&unity.join("Game_Data/globalgamemanagers"));
+    let opened = opened_below(&unity.join("Game_Data"), || {
+        let d = detect_with(unity.path(), None).unwrap();
+        assert_eq!((d.engine.as_str(), d.unity_version), ("unity-mono", None));
+    });
+    assert!(
+        !opened.iter().any(|n| n == "globalgamemanagers"),
+        "{opened:?}"
+    );
 }
 
 /// A detection saved by 0.4.1 still reads, and every built-in code survives the round trip.
