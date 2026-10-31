@@ -1930,6 +1930,29 @@ version = { head = ["{dir}/ver/version.txt"], template = "N{1,3}.N{1,3}" }
     }
 }
 
+/// L2's gate, written now (docs/ENGINE-DESCRIPTORS-DEBT.md, row 2): a FIFO where a top-level
+/// program would be blocks Pass A today — its embedded-pck check opens the first programs with
+/// a plain open, exactly as 0.4.1 does, and C1 holds this crate to 0.4.1. L2 moves the built-ins
+/// to Pass B's reads, declares the divergence, and turns this on.
+#[cfg(unix)]
+#[test]
+#[ignore = "L2: Pass A still opens a top-level program plainly, as 0.4.1 does"]
+fn a_top_level_fifo_never_blocks_detection() {
+    let t = Tmp::new("top-fifo");
+    let c = std::ffi::CString::new(t.join("Game.exe").as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: a NUL-terminated path, as mkfifo wants.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+    let (tx, rx) = mpsc::channel();
+    let dir = t.path().to_path_buf();
+    std::thread::spawn(move || {
+        let _ = tx.send(detect_with_engines(&dir, None, &EngineSet::empty()).unwrap());
+    });
+    let got = rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("detection blocked on a FIFO");
+    assert!(got.engine.is_unknown());
+}
+
 /// A detection saved by 0.4.1 still reads, and every built-in code survives the round trip.
 #[test]
 fn engine_codes_serialise_as_the_bare_string() {

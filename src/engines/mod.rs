@@ -19,8 +19,10 @@
 //!   prefilter: a descriptor whose anchors the folder does not hold costs nothing.
 //! - **Counted, never timed.** Each descriptor has a budget of lookups and probes per game
 //!   ([`descriptor::limits`]); a descriptor over its budget yields nothing, and a game over its
-//!   own budget gets no Pass B answer at all. Nothing waits on a clock, nothing follows a link,
-//!   nothing blocks on a FIFO.
+//!   own budget gets no Pass B answer at all. Choosing programs is linear in the walk per rule.
+//!   Nothing in Pass B waits on a clock, follows a link, or blocks on a FIFO. (Pass A, the
+//!   built-in rules, still reads a top-level program's tail and a Unity data header with a plain
+//!   open, as 0.4.1 did; L2 moves the built-ins to Pass B's reads.)
 //!
 //! The schema, every limit and the reserved names live in [`descriptor`], one module, so the
 //! public specification's goldens can be pinned against it.

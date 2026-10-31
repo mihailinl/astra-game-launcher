@@ -290,9 +290,14 @@ let d = detect_with_engines(&dir, hint, &engines)?;      // Pass A, then perhaps
   Two of one standing that disagree leave `engine` `unknown` and list
   `Detection::engine_candidates` (`engine-ambiguous`).
 - Every community rule names a literal anchor beside the program that is neither a program nor
-  a runtime every game ships (`descriptor-too-broad` otherwise). Nothing follows a link or
-  blocks on a FIFO; every lookup and byte is counted (64 lookups and 8 probes per descriptor,
-  1,024 lookups and 64 KiB per game), and over budget means no answer, never a slow one.
+  a runtime every game ships (`descriptor-too-broad` otherwise); a rule whose anchor is absent
+  costs nothing, on Steam's hint as in the folder search. Pass B follows no link and blocks on
+  no FIFO; every lookup and byte it makes is counted (64 lookups and 8 probes per descriptor,
+  1,024 lookups and 64 KiB per game), choosing its programs is linear in the walk, and over
+  budget means no answer, never a slow one. (Pass A — the built-in rules, unchanged since
+  0.4.1 — still opens the first top-level programs and a Unity data folder's headers with a
+  plain open, so a FIFO there blocks `detect_with` as it always has; the built-ins move to the
+  same reads with L2.)
 - A Pass B answer carries `Detection::descriptor_sha256`, perhaps `Detection::version`, and
   `anti-cheat-unknown` in `anti_cheat` when the walk stopped at its cap or a `*.sys` ships.
   None of these fields appear in a Pass A detection's JSON.

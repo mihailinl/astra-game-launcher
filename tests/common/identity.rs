@@ -179,21 +179,36 @@ claims = "everything"
     ),
 ];
 
+fn build(hostile: &[(&str, Moderation, bool, &str)]) -> EngineSet {
+    EngineSet::build(hostile.iter().map(|(publisher, moderation, fp, text)| {
+        (
+            Origin {
+                moderation: *moderation,
+                publisher: (*publisher).to_owned(),
+                first_party: *fp,
+            },
+            Descriptor::from_toml(text),
+        )
+    }))
+}
+
 /// The admitted part of [`HOSTILE`] (and the skipped part, in [`EngineSet::skipped`]).
 pub fn hostile_set() -> &'static EngineSet {
     static SET: OnceLock<EngineSet> = OnceLock::new();
-    SET.get_or_init(|| {
-        EngineSet::build(HOSTILE.iter().map(|(publisher, moderation, fp, text)| {
-            (
-                Origin {
-                    moderation: *moderation,
-                    publisher: (*publisher).to_owned(),
-                    first_party: *fp,
-                },
-                Descriptor::from_toml(text),
-            )
-        }))
-    })
+    SET.get_or_init(|| build(HOSTILE))
+}
+
+/// [`HOSTILE`] without its moderated claim on every program, so the lower standings act alone.
+pub fn hostile_lower_set() -> &'static EngineSet {
+    static SET: OnceLock<EngineSet> = OnceLock::new();
+    SET.get_or_init(|| build(&HOSTILE[1..]))
+}
+
+/// [`HOSTILE`]'s moderated claim on every program, alone: where it answers, the whole hostile
+/// set must answer exactly the same (a lower standing never replaces nor ambiguates it).
+pub fn moderated_hostile_set() -> &'static EngineSet {
+    static SET: OnceLock<EngineSet> = OnceLock::new();
+    SET.get_or_init(|| build(&HOSTILE[..1]))
 }
 
 /// Whether Pass A left this game to the descriptors: the canary's own reading of plan B's
@@ -205,6 +220,11 @@ pub fn open_to_descriptors(d: &Detection) -> bool {
 
 /// [`detect_with`], held against launcher 0.4.1 (C1) and against [`hostile_set`] (C1c).
 pub fn checked(dir: &Path, hint: Option<&str>) -> Detection {
+    checked_with_hostile(dir, hint).0
+}
+
+/// [`checked`], and what [`hostile_set`] made of the same game.
+pub fn checked_with_hostile(dir: &Path, hint: Option<&str>) -> (Detection, Detection) {
     let new = detect_with(dir, hint).unwrap();
     let legacy = launcher_legacy::detect_with(dir, hint).unwrap();
     assert_eq!(
@@ -228,7 +248,7 @@ pub fn checked(dir: &Path, hint: Option<&str>) -> Detection {
             "C1c: no descriptor changes what Pass A decided ({dir:?}, hint {hint:?})"
         );
     }
-    new
+    (new, hostile)
 }
 
 /// What Pass B may do to a game Pass A left open: answer it, or call it ambiguous — never

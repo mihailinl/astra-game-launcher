@@ -343,3 +343,55 @@ pub fn bepinex6_il2cpp_at(root: &Path, version: &str) {
 pub fn plugin_at(root: &Path, rel: &str) {
     write(&root.join("BepInEx/plugins").join(rel), b"MZ a mod");
 }
+
+/// A Steam `appinfo.vdf` (format v28, inline keys) holding `apps`: each appid with
+/// `appinfo/common/category`'s `category_8` (Valve Anti-Cheat) set when `Some(true)`, only
+/// `category_1` when `Some(false)`, and no `category` at all when `None` (Steam does not say).
+/// The minimum `valve_anti_cheat` reads; `tests/steam_appinfo.rs` builds every other shape.
+pub fn appinfo_vac(apps: &[(u32, Option<bool>)]) -> Vec<u8> {
+    fn key(out: &mut Vec<u8>, ty: u8, k: &str) {
+        out.push(ty);
+        out.extend_from_slice(k.as_bytes());
+        out.push(0);
+    }
+    fn string(out: &mut Vec<u8>, k: &str, v: &str) {
+        key(out, 0x01, k);
+        out.extend_from_slice(v.as_bytes());
+        out.push(0);
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x0756_4428u32.to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes());
+    for (id, vac) in apps {
+        let mut body = Vec::new();
+        key(&mut body, 0x00, "appinfo");
+        key(&mut body, 0x02, "appid");
+        body.extend_from_slice(&(*id as i32).to_le_bytes());
+        key(&mut body, 0x00, "common");
+        string(&mut body, "name", "A game");
+        if let Some(vac) = vac {
+            key(&mut body, 0x00, "category");
+            string(
+                &mut body,
+                if *vac { "category_8" } else { "category_1" },
+                "1",
+            );
+            body.push(0x08);
+        }
+        string(&mut body, "type", "Game");
+        body.push(0x08); // common
+        body.push(0x08); // appinfo
+        body.push(0x08); // the record
+        out.extend_from_slice(&id.to_le_bytes());
+        out.extend_from_slice(&(60 + body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&2u32.to_le_bytes());
+        out.extend_from_slice(&1_700_000_000u32.to_le_bytes());
+        out.extend_from_slice(&0u64.to_le_bytes());
+        out.extend_from_slice(&[0xAB; 20]);
+        out.extend_from_slice(&42u32.to_le_bytes());
+        out.extend_from_slice(&[0xCD; 20]);
+        out.extend_from_slice(&body);
+    }
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out
+}

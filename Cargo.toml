@@ -55,3 +55,9 @@ hex = "0.4"
 # Detection this crate makes against the one that commit makes, byte for byte. Never a runtime
 # dependency; never moved: a new pin would compare against itself.
 launcher_legacy = { package = "astra-game-launcher", git = "https://github.com/mihailinl/astra-game-launcher", rev = "73bf11e32d83b88704175411f765806aaa7bac3f", default-features = false }
+
+# The C1 canary runs launcher 0.4.1 (a dependency, above) beside this crate over 20,000 game
+# folders: dependencies are built optimised in this repository's own dev and test builds (a
+# crate depending on this one never reads its profiles), so the gate takes minutes, not tens.
+[profile.dev.package."*"]
+opt-level = 2

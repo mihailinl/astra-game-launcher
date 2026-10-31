@@ -13,6 +13,11 @@
 //! set of Steam launch hints for it: right, wrong, missing, escaping, a wrapper, too deep.
 //! Pieces may collide (a file where another piece wants a folder); [`Tree::build`] keeps the first,
 //! deterministically, and both detectors read whatever is on disk.
+//!
+//! Pieces added after C1 was first proven draw from their own stream ([`extras`]), so every tree
+//! of the first corpus is laid exactly as before and only gains what the new stream adds: a
+//! folder of 10,000 names that a listing cut BEFORE it is sorted reads differently from one cut
+//! after, a game past the walk's cap with Steam's hint naming it, and the tree's Steam appid.
 
 use std::fs;
 use std::path::Path;
@@ -54,11 +59,29 @@ pub enum Node {
     Link(String, String),
     /// `count` empty files below one folder: past the walk's cap when large.
     Many(String, usize),
+    /// `count` empty files below one folder, named `z00000.dat`…: after every name that begins
+    /// with a digit or a capital, so they sort after the game laid beside them.
+    Fill(String, usize),
+}
+
+/// The Steam app a tree is, as the caller of planning vouches: one the fixture appinfo flags as
+/// VAC, one it clears, one it does not hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum App {
+    Vac,
+    Clear,
+    Unlisted,
 }
 
 pub struct Tree {
     pub nodes: Vec<Node>,
     pub hints: Vec<String>,
+    /// Every program laid, as `/`-separated paths (some may have lost a collision).
+    pub programs: Vec<String>,
+    /// The tree holds a folder past the walk's 5,000 entries whose listing a cut before
+    /// sorting reads differently from a cut after ([`extras`]).
+    pub truncation: bool,
+    pub app: Option<App>,
 }
 
 const NAMES: &[&str] = &[
@@ -537,9 +560,82 @@ pub fn tree(seed: u64) -> Tree {
         );
     }
     hints.dedup();
-    Tree {
+    let mut t = Tree {
         nodes: g.nodes,
         hints,
+        programs: g.programs,
+        truncation: false,
+        app: None,
+    };
+    extras(seed, &mut t);
+    t
+}
+
+/// The second stream: drawn from its own generator, laid after everything the first stream
+/// laid, so it changes no tree of the first corpus but by adding to it.
+fn extras(seed: u64, t: &mut Tree) {
+    let mut x = Rng::new(seed.rotate_left(29) ^ 0x7E5E_C7ED_C1C1_0001);
+    t.app = match x.below(100) {
+        0..=14 => Some(App::Vac),
+        15..=34 => Some(App::Clear),
+        35..=44 => Some(App::Unlisted),
+        _ => None,
+    };
+    if x.below(1000) >= 4 {
+        return;
+    }
+    // `Huge/`: a game laid before 10,000 names and one after, both sorting before them. A
+    // listing cut at 5,000 BEFORE it is sorted (Pass A's `listing_of`, which the hint, the
+    // bootstrap and `engine_of_exe` read) loses whichever this filesystem lists late; one cut
+    // after sorting would keep both. The walk itself sorts first, so it keeps both and stops
+    // inside `Huge/` at its cap.
+    t.truncation = true;
+    let godot = x.chance(50);
+    let pair = |nodes: &mut Vec<Node>, programs: &mut Vec<String>, stem: &str| {
+        let exe = format!("Huge/{stem}.exe");
+        nodes.push(Node::File(exe.clone(), b"MZ\x90\0 huge".to_vec()));
+        programs.push(exe);
+        if godot {
+            nodes.push(Node::File(format!("Huge/{stem}.pck"), b"GDPC".to_vec()));
+        } else {
+            nodes.push(Node::File(
+                format!("Huge/{stem}_Data/Managed/Assembly-CSharp.dll"),
+                b"MZ cs".to_vec(),
+            ));
+        }
+    };
+    pair(&mut t.nodes, &mut t.programs, "AAA");
+    if !godot {
+        t.nodes.push(Node::File(
+            "Huge/UnityPlayer.dll".into(),
+            b"MZ player".to_vec(),
+        ));
+    }
+    t.nodes.push(Node::Fill("Huge".into(), 10_000));
+    pair(&mut t.nodes, &mut t.programs, "AAB");
+    // `Later/`: a whole Unity game the walk never reaches (its cap falls inside `Huge/`).
+    t.nodes.push(Node::File(
+        "Later/Game.exe".into(),
+        b"MZ\x90\0 later".to_vec(),
+    ));
+    t.nodes.push(Node::File(
+        "Later/UnityPlayer.dll".into(),
+        b"MZ player".to_vec(),
+    ));
+    t.nodes.push(Node::File(
+        "Later/Game_Data/Managed/Assembly-CSharp.dll".into(),
+        b"MZ cs".to_vec(),
+    ));
+    t.programs.push("Later/Game.exe".into());
+    for h in [
+        "Huge/AAA.exe",
+        "Huge/AAB.exe",
+        "huge/aaa.EXE",
+        "HUGE/aab.exe",
+        "Later/Game.exe",
+        "later/GAME.exe",
+    ] {
+        t.hints.push(h.into());
     }
 }
 
@@ -565,6 +661,14 @@ impl Tree {
                     if fs::create_dir_all(&dir).is_ok() {
                         for i in 0..*count {
                             let _ = fs::write(dir.join(format!("{i:05}.dat")), b"");
+                        }
+                    }
+                }
+                Node::Fill(p, count) => {
+                    let dir = root.join(p);
+                    if fs::create_dir_all(&dir).is_ok() {
+                        for i in 0..*count {
+                            let _ = fs::write(dir.join(format!("z{i:05}.dat")), b"");
                         }
                     }
                 }
