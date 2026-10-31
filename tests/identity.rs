@@ -17,6 +17,20 @@
 //! now and then — absent, ours, or someone else's — and the plan held to 0.4.1's: the same
 //! `GameAction` for every file, the same refusal and its parameters.
 //!
+//! And past the fresh game ([`c1b_install`]): for a share of the programs that plan, the tree is
+//! copied once per launcher, each with its own profile, and installed by 0.4.1 and by this crate
+//! through the public `plan_install` and `install`. The two ledgers must be equal; then one change
+//! is made to both games (none; a Doorstop of someone else's that does our proxy's job laid over
+//! it, which reaches `share-loader`; our `doorstop_config.ini` rewritten, `keep-existing`; a file
+//! of ours changed; files named as an older Astra left them laid beside), both are planned again
+//! from the ledger the install wrote, and now and then that plan is installed as the update;
+//! then both are uninstalled. Plans, refusals, ledgers, `UninstallReport`s and the trees left
+//! must be equal. For a share of those, a third copy is installed by launcher 0.3.1 — what
+//! Astra 0.2.7 ships, so what wrote every 0.2.7 user's ledger — whose ledger must be 0.4.1's on
+//! every field 0.3.1's has; it is changed alike and planned again by this crate, which must plan
+//! as 0.4.1 does over its own install. The older Astra's files are look-alikes (the
+//! shipped bytes are not committed; docs/ENGINE-DESCRIPTORS-DEBT.md), so no launcher removes them.
+//!
 //! The tests in `tests/detect.rs` go through the same check, fixture by fixture. Where 0.5.0
 //! knowingly answers otherwise (a link, a FIFO, a hint naming a Windows device), C1 has declared
 //! exceptions, each pinned by `tests/divergence.rs` against `tests/corpus/divergence.txt`, where
@@ -35,6 +49,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
 use astra_game_launcher::{
     Detection, Engine, EngineSet, ExePick, detect_with_engines, valve_anti_cheat,
@@ -43,7 +58,9 @@ use common::identity::{
     checked_with_hostile, hostile_lower_set, hostile_set, moderated_hostile_set, narrowed,
     open_to_descriptors,
 };
-use common::{E, Tmp, appinfo_vac, sha, write, zip};
+use common::{
+    DOORSTOP_V4, E, Tmp, X64, appinfo_vac, copy_tree, pe_with_options, sha, snapshot, write, zip,
+};
 use corpus::{App, Node};
 
 /// Fixed for good: a new seed is a new corpus, and the old one is what C1 was proven on.
@@ -118,6 +135,30 @@ struct Counts {
     c1b_planned: AtomicUsize,
     c1b_actions: Mutex<BTreeMap<String, usize>>,
     c1b_refusals: Mutex<BTreeMap<String, usize>>,
+    /// C1b past the fresh game ([`c1b_install`]): pairs installed, and pairs whose install (on
+    /// the copies) both launchers refused alike.
+    c1b_installs: AtomicUsize,
+    c1b_install_refused: AtomicUsize,
+    /// Plans from the ledger an install wrote, the actions they hold and their refusals.
+    c1b_replans: AtomicUsize,
+    c1b_replan_actions: Mutex<BTreeMap<String, usize>>,
+    c1b_replan_refusals: Mutex<BTreeMap<String, usize>>,
+    /// Those plans installed as the update, and the uninstalls that ended every pair.
+    c1b_updates: AtomicUsize,
+    c1b_uninstalls: AtomicUsize,
+    /// Plans by this crate from a ledger launcher 0.3.1 wrote, held to 0.4.1's over its own.
+    c1b_cross: AtomicUsize,
+    /// The changes made between install and plan, by kind (`nothing` when the kind found nothing
+    /// to change), and a file of ours changed where we had replaced the game's.
+    c1b_changes: Mutex<BTreeMap<String, usize>>,
+    c1b_changed_replaced: AtomicUsize,
+    /// Older-Astra look-alikes laid beside the game, every one still there after the uninstall;
+    /// and what the uninstalls reported removing as an older Astra's (none can be: the shipped
+    /// bytes are not committed).
+    c1b_lookalikes_kept: AtomicUsize,
+    c1b_former_removed: AtomicUsize,
+    /// Installs per manifest.
+    c1b_installed: Mutex<BTreeMap<String, usize>>,
 }
 
 fn bump(a: &AtomicUsize) {
@@ -222,16 +263,43 @@ struct Fixture {
     exe: Option<String>,
     /// Each game file that lands directly beside the program: its name, and our bytes.
     beside: Vec<(String, Vec<u8>)>,
+    /// The Doorstop options its launch passes (`--doorstop-…`); empty when it starts no Doorstop.
+    doorstop: Vec<String>,
+}
+
+/// The names a loader proxy goes by (src/plan.rs `LOADER_PROXIES`).
+const PROXIES: &[&str] = &["winhttp.dll", "version.dll", "dxgi.dll", "d3d11.dll"];
+/// The names left alone when present and not ours (src/plan.rs `KEEP_IF_PRESENT`).
+const KEEP: &[&str] = &["doorstop_config.ini", "reshade.ini"];
+/// The files the Unreal runner 0.2.x left beside a game's program (src/former.rs).
+const FORMER_NAMES: &[&str] = &["dwmapi.dll", "dxgi.dll", "astra.addon64"];
+
+/// The last component of a `/`-separated path, in ASCII lower case.
+fn leaf(rel: &str) -> String {
+    rel.rsplit('/').next().unwrap_or(rel).to_ascii_lowercase()
 }
 
 /// A zip of `manifest` and every file it names: each `[[game_files]]` source with bytes made up
 /// from its pin (one pin, one content, so a pin shared by two files still matches both) and the
-/// pin rewritten to them; each `[[files]]` pattern with a file under it.
+/// pin rewritten to them; each `[[files]]` pattern with a file under it. A loader proxy of a
+/// manifest that launches through Doorstop is a Doorstop build (a PE that understands every
+/// option the launch passes), as the runners' `winhttp.dll` is, so a Doorstop of someone else's
+/// can stand in for it.
 fn fixture(name: &'static str, manifest: &str) -> Fixture {
     let table: toml::Table = toml::from_str(manifest).unwrap();
     let mut text = manifest.to_owned();
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
     let mut beside = Vec::new();
+    let doorstop: Vec<String> = table
+        .get("launch")
+        .and_then(|l| l.get("args"))
+        .and_then(|a| a.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|a| a.as_str())
+        .filter(|a| a.starts_with("--doorstop-"))
+        .map(str::to_owned)
+        .collect();
     let add = |entries: &mut Vec<(String, Vec<u8>)>, from: &str, bytes: Vec<u8>| {
         let path = match from.strip_suffix("**") {
             Some(dir) => format!("{dir}c1b.bin"),
@@ -253,7 +321,13 @@ fn fixture(name: &'static str, manifest: &str) -> Fixture {
         let to = g["to"].as_str().unwrap();
         let bytes = match g.get("sha256").and_then(|v| v.as_str()) {
             Some(pin) => {
-                let bytes = format!("C1b {pin}").into_bytes();
+                let made_up = format!("C1b {pin}").into_bytes();
+                let bytes = if PROXIES.contains(&leaf(to).as_str()) && !doorstop.is_empty() {
+                    let options: Vec<&str> = doorstop.iter().map(String::as_str).collect();
+                    pe_with_options(X64, &options, &made_up)
+                } else {
+                    made_up
+                };
                 text = text.replace(pin, &sha(&bytes));
                 bytes
             }
@@ -291,6 +365,7 @@ fn fixture(name: &'static str, manifest: &str) -> Fixture {
         appid,
         exe,
         beside,
+        doorstop,
     }
 }
 
@@ -306,45 +381,86 @@ struct Planned<'a> {
     proton: bool,
 }
 
-/// One plan, as text: the plan itself, or its refusal's code and params.
-fn plan_new(p: &Planned, zip: &[u8]) -> String {
-    use astra_game_launcher::{GameTarget, GiPackage, Platform, plan_install};
-    let pkg = GiPackage::open(zip, &sha(zip)).unwrap();
-    let game = GameTarget {
-        dir: p.dir.to_path_buf(),
-        exe: p.exe.to_path_buf(),
-        steam_appid: p.appid,
-        platform: if p.proton {
-            Platform::LinuxProton { prefix: None }
-        } else {
-            Platform::LinuxNative
-        },
-        steam_appinfo: Some(p.appinfo.to_path_buf()),
+/// One launcher's public install path — `plan_install`, `install`, `uninstall` — in that
+/// version's own types, each outcome as text: its JSON, or a refusal's code and params.
+macro_rules! launcher {
+    ($m:ident, $krate:ident) => {
+        // Not every version is asked everything (0.3.1 only installs).
+        #[allow(dead_code)]
+        mod $m {
+            use $krate::{Accept, Ctx, GameTarget, GiPackage, LauncherError, Platform};
+
+            use super::{Planned, sha};
+
+            fn game(p: &Planned) -> GameTarget {
+                GameTarget {
+                    dir: p.dir.to_path_buf(),
+                    exe: p.exe.to_path_buf(),
+                    steam_appid: p.appid,
+                    platform: if p.proton {
+                        Platform::LinuxProton { prefix: None }
+                    } else {
+                        Platform::LinuxNative
+                    },
+                    steam_appinfo: Some(p.appinfo.to_path_buf()),
+                }
+            }
+
+            fn refused(e: LauncherError) -> String {
+                format!("{} {:?}", e.code, e.params)
+            }
+
+            /// The plan, or its refusal.
+            pub fn plan(p: &Planned, zip: &[u8]) -> String {
+                let pkg = GiPackage::open(zip, &sha(zip)).unwrap();
+                match $krate::plan_install(&pkg, &game(p), p.profile) {
+                    Ok(plan) => serde_json::to_string(&plan).unwrap(),
+                    Err(e) => refused(e),
+                }
+            }
+
+            /// [`plan`], and when it plans, that plan installed (the person having accepted an
+            /// unread VAC flag): then the ledger the install left on disk, or its refusal.
+            pub fn install(p: &Planned, zip: &[u8]) -> (String, Option<String>) {
+                let pkg = GiPackage::open(zip, &sha(zip)).unwrap();
+                let game = game(p);
+                let plan = match $krate::plan_install(&pkg, &game, p.profile) {
+                    Ok(plan) => plan,
+                    Err(e) => return (refused(e), None),
+                };
+                let accept = Accept {
+                    vac_unchecked: true,
+                };
+                let done = match $krate::install(&pkg, &plan, &game, accept, &Ctx::silent()) {
+                    Ok(_) => {
+                        std::fs::read_to_string(p.profile.join($krate::LEDGER_FILE_NAME)).unwrap()
+                    }
+                    Err(e) => refused(e),
+                };
+                (serde_json::to_string(&plan).unwrap(), Some(done))
+            }
+
+            /// The `UninstallReport`, or the refusal.
+            pub fn uninstall(p: &Planned) -> String {
+                match $krate::uninstall(p.profile, &game(p)) {
+                    Ok(r) => serde_json::to_string(&r).unwrap(),
+                    Err(e) => refused(e),
+                }
+            }
+        }
     };
-    match plan_install(&pkg, &game, p.profile) {
-        Ok(p) => serde_json::to_string(&p).unwrap(),
-        Err(e) => format!("{} {:?}", e.code, e.params),
-    }
+}
+// This crate; launcher 0.4.1 (C1's reference); launcher 0.3.1 (what Astra 0.2.7 ships).
+launcher!(ours, astra_game_launcher);
+launcher!(legacy, launcher_legacy);
+launcher!(v031, launcher_031);
+
+fn plan_new(p: &Planned, zip: &[u8]) -> String {
+    ours::plan(p, zip)
 }
 
 fn plan_legacy(p: &Planned, zip: &[u8]) -> String {
-    use launcher_legacy::{GameTarget, GiPackage, Platform, plan_install};
-    let pkg = GiPackage::open(zip, &sha(zip)).unwrap();
-    let game = GameTarget {
-        dir: p.dir.to_path_buf(),
-        exe: p.exe.to_path_buf(),
-        steam_appid: p.appid,
-        platform: if p.proton {
-            Platform::LinuxProton { prefix: None }
-        } else {
-            Platform::LinuxNative
-        },
-        steam_appinfo: Some(p.appinfo.to_path_buf()),
-    };
-    match plan_install(&pkg, &game, p.profile) {
-        Ok(p) => serde_json::to_string(&p).unwrap(),
-        Err(e) => format!("{} {:?}", e.code, e.params),
-    }
+    legacy::plan(p, zip)
 }
 
 /// The walk Pass A makes (src/detect.rs `walk`), as `/`-joined paths, and whether it stopped
@@ -468,6 +584,7 @@ fn one_tree(
     fixtures: &[Fixture],
     appinfo: &Path,
     counts: &Counts,
+    installs: &SyncSender<Job>,
 ) {
     let tree = corpus::tree(seed);
     let t = Tmp::new(&format!("corpus-{seed:x}"));
@@ -660,7 +777,7 @@ fn one_tree(
                 bump(&counts.plan_embedded_below);
             }
         }
-        c1b_plan(seed, k, &p, fixtures, counts);
+        c1b_plan(seed, k, &p, fixtures, counts, installs);
     }
 }
 
@@ -676,10 +793,19 @@ fn engine_seen(plan: &str, probe: Engine) -> Option<String> {
 }
 
 /// C1b for one program: one of Astra's own manifests, turning with the seed, its game files laid
-/// beside the program now and then (ours, or someone else's), planned by both launchers.
-fn c1b_plan(seed: u64, k: usize, p: &Planned, fixtures: &[Fixture], counts: &Counts) {
+/// beside the program now and then (ours, or someone else's), planned by both launchers; and a
+/// share of those that plan sent on to `installs` ([`c1b_install`]).
+fn c1b_plan(
+    seed: u64,
+    k: usize,
+    p: &Planned,
+    fixtures: &[Fixture],
+    counts: &Counts,
+    installs: &SyncSender<Job>,
+) {
     let turn = (seed as usize).wrapping_mul(31).wrapping_add(k * 7);
-    let f = &fixtures[turn % fixtures.len()];
+    let fixture = turn % fixtures.len();
+    let f = &fixtures[fixture];
     let program = p.dir.join(p.exe);
     let game = program.parent().unwrap();
     let real = |q: &Path, dir: bool| {
@@ -713,22 +839,525 @@ fn c1b_plan(seed: u64, k: usize, p: &Planned, fixtures: &[Fixture], counts: &Cou
         f.name, p.exe, p.appid
     );
     bump(&counts.c1b_plans);
+    tally(&new, &counts.c1b_actions, &counts.c1b_refusals);
     if new.starts_with('{') {
         bump(&counts.c1b_planned);
-        let mut actions = counts.c1b_actions.lock().unwrap();
-        for a in [
-            "add",
-            "replace",
-            "reuse-known-proxy",
-            "keep-existing",
-            "share-loader",
-        ] {
-            *actions.entry(a.to_owned()).or_default() +=
-                new.matches(&format!("\"action\":\"{a}\"")).count();
+        // A share of what plans, by the turn: installed, changed, planned again and uninstalled.
+        let h = mix(turn);
+        if h.is_multiple_of(INSTALL_SHARE) {
+            let past = Past {
+                change: CHANGES[(h >> 3) % CHANGES.len()],
+                cross: (h >> 6).is_multiple_of(CROSS_SHARE),
+                update: (h >> 9).is_multiple_of(2),
+                pick: h >> 12,
+            };
+            let at = format!("seed {seed:#x}");
+            installs.send(Job::copy(at, &p, fixture, past)).unwrap();
+        }
+    }
+}
+
+/// The actions a plan holds, or its refusal's code, added to `actions` or `refusals`.
+fn tally(
+    plan: &str,
+    actions: &Mutex<BTreeMap<String, usize>>,
+    refusals: &Mutex<BTreeMap<String, usize>>,
+) {
+    if plan.starts_with('{') {
+        let mut actions = actions.lock().unwrap();
+        for a in ACTIONS {
+            *actions.entry((*a).to_owned()).or_default() +=
+                plan.matches(&format!("\"action\":\"{a}\"")).count();
         }
     } else {
-        let code = new.split(' ').next().unwrap_or("").to_owned();
-        *counts.c1b_refusals.lock().unwrap().entry(code).or_default() += 1;
+        let code = plan.split(' ').next().unwrap_or("").to_owned();
+        *refusals.lock().unwrap().entry(code).or_default() += 1;
+    }
+}
+
+const ACTIONS: &[&str] = &[
+    "add",
+    "replace",
+    "reuse-known-proxy",
+    "keep-existing",
+    "share-loader",
+];
+
+/// One in this many of the programs C1b plans goes on to [`c1b_install`]; one in [`CROSS_SHARE`]
+/// of those is installed by launcher 0.3.1 too.
+const INSTALL_SHARE: usize = 2;
+const CROSS_SHARE: usize = 2;
+
+/// The turn, scattered: its bits choose independently of the `turn % n` C1b's plan already used.
+fn mix(turn: usize) -> usize {
+    ((turn as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 17) as usize
+}
+
+/// What a game goes through between C1b's install and its plan from the ledger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Change {
+    /// Nothing: the plan is an update over our own install.
+    Nothing,
+    /// A Doorstop of someone else's laid over our proxy, one that does everything ours does (a
+    /// BepInEx installed by hand after us): `share-loader`. The game's program is an x64 PE from
+    /// the start, so a proxy can serve it.
+    TheirDoorstop,
+    /// Our `doorstop_config.ini` or `ReShade.ini` rewritten (by a mod manager, by ReShade
+    /// itself): `keep-existing`.
+    Rewritten,
+    /// Another file of ours changed since we placed it (a game update, the player).
+    OursChanged,
+    /// Files named as the Unreal runner 0.2.x left them, laid beside the program where nothing
+    /// is: look-alikes, since the shipped bytes are not committed.
+    OlderAstra,
+}
+
+const CHANGES: [Change; 5] = [
+    Change::Nothing,
+    Change::TheirDoorstop,
+    Change::Rewritten,
+    Change::OursChanged,
+    Change::OlderAstra,
+];
+
+/// The turn's choices for one [`c1b_install`].
+#[derive(Clone, Copy)]
+struct Past {
+    change: Change,
+    /// Also installed by launcher 0.3.1, and planned again by this crate.
+    cross: bool,
+    /// The plan from the ledger is installed too, as the update, before the uninstall.
+    update: bool,
+    /// Picks among the files a change could touch.
+    pick: usize,
+}
+
+/// A copy of a game folder with a profile beside it (never inside it), for one launcher.
+struct GameCopy {
+    tmp: Tmp,
+    game: PathBuf,
+    profile: PathBuf,
+}
+
+impl GameCopy {
+    fn of(dir: &Path, name: &str) -> GameCopy {
+        let tmp = Tmp::new(name);
+        let game = tmp.join("game");
+        copy_tree(dir, &game);
+        let profile = tmp.join("profile").join("p");
+        GameCopy { tmp, game, profile }
+    }
+
+    /// `p`, on this copy.
+    fn at<'a>(&'a self, p: &Planned<'a>) -> Planned<'a> {
+        Planned {
+            dir: &self.game,
+            profile: &self.profile,
+            ..*p
+        }
+    }
+
+    /// `text` with this copy's paths written relative to it.
+    fn norm(&self, text: &str) -> String {
+        text.replace(self.tmp.path().to_str().unwrap(), "<copy>")
+    }
+
+    /// A ledger on disk, as text, read with launcher 0.4.1's `Ledger` (every field it has), its
+    /// paths relative to this copy.
+    fn ledger(&self, text: &str) -> launcher_legacy::Ledger {
+        serde_json::from_str(&self.norm(text)).unwrap()
+    }
+}
+
+/// The program at `path`, when it is a file and no x64 PE, given an x64 PE's headers before its
+/// own bytes (which keep their end: what a probe reads there is unchanged).
+fn as_x64_pe(path: &Path) {
+    if !fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
+        return;
+    }
+    let bytes = fs::read(path).unwrap();
+    let mut pe = pe_with_options(X64, &[], b"");
+    pe.extend_from_slice(&bytes);
+    fs::write(path, pe).unwrap();
+}
+
+/// Makes `change` to the game whose program is in `root`, installed as `ledger` records: the
+/// files it wrote, below `root`.
+fn make(
+    change: Change,
+    root: &Path,
+    ledger: &launcher_legacy::Ledger,
+    f: &Fixture,
+    pick: usize,
+) -> Vec<(String, Vec<u8>)> {
+    use launcher_legacy::GameAction as A;
+    // Ours, on disk with our bytes since the install placed or found them.
+    let ours: Vec<&launcher_legacy::LedgerGameFile> = ledger
+        .game_files
+        .iter()
+        .filter(|g| matches!(g.action, A::Add | A::Replace | A::ReuseKnownProxy))
+        .collect();
+    let one = |of: Vec<&launcher_legacy::LedgerGameFile>| {
+        (!of.is_empty()).then(|| of[pick % of.len()].rel.clone())
+    };
+    let laid: Vec<(String, Vec<u8>)> = match change {
+        Change::Nothing => Vec::new(),
+        Change::TheirDoorstop => {
+            let options: Vec<&str> = if f.doorstop.is_empty() {
+                DOORSTOP_V4.to_vec()
+            } else {
+                f.doorstop.iter().map(String::as_str).collect()
+            };
+            let theirs = pe_with_options(X64, &options, b"theirs: a BepInEx installed by hand");
+            one(ours
+                .iter()
+                .copied()
+                .filter(|g| PROXIES.contains(&leaf(&g.rel).as_str()))
+                .collect())
+            .map(|rel| (rel, theirs))
+            .into_iter()
+            .collect()
+        }
+        Change::Rewritten => one(ours
+            .iter()
+            .copied()
+            .filter(|g| KEEP.contains(&leaf(&g.rel).as_str()))
+            .collect())
+        .map(|rel| {
+            (
+                rel,
+                b"[General]\nenabled = false\n; rewritten since\n".to_vec(),
+            )
+        })
+        .into_iter()
+        .collect(),
+        Change::OursChanged => {
+            let mine: Vec<_> = ours
+                .iter()
+                .copied()
+                .filter(|g| !KEEP.contains(&leaf(&g.rel).as_str()))
+                .collect();
+            // Every other time, one we replaced the game's with, where there is one: its backup
+            // is what an uninstall must not put back over the change.
+            let replaced: Vec<_> = mine
+                .iter()
+                .copied()
+                .filter(|g| g.action == A::Replace)
+                .collect();
+            let from = if (pick >> 4).is_multiple_of(2) && !replaced.is_empty() {
+                replaced
+            } else {
+                mine
+            };
+            one(from)
+                .map(|rel| (rel, b"MZ changed since we placed it".to_vec()))
+                .into_iter()
+                .collect()
+        }
+        Change::OlderAstra => FORMER_NAMES
+            .iter()
+            .filter(|n| {
+                !ledger
+                    .game_files
+                    .iter()
+                    .any(|g| g.rel.eq_ignore_ascii_case(n))
+                    && fs::symlink_metadata(root.join(n)).is_err()
+            })
+            .map(|n| {
+                (
+                    (*n).to_owned(),
+                    format!("MZ like {n} of an older Astra").into_bytes(),
+                )
+            })
+            .collect(),
+    };
+    for (rel, bytes) in &laid {
+        write(&root.join(rel), bytes);
+    }
+    laid
+}
+
+/// The two trees, file for file and byte for byte, relative to each copy.
+fn same_tree(a: &GameCopy, b: &GameCopy, at: &str) {
+    let (sa, sb) = (snapshot(a.tmp.path()), snapshot(b.tmp.path()));
+    if sa != sb {
+        let only = |x: &BTreeMap<String, Vec<u8>>, y: &BTreeMap<String, Vec<u8>>| {
+            x.iter()
+                .filter(|(k, v)| y.get(*k) != Some(v))
+                .map(|(k, _)| k.clone())
+                .collect::<Vec<_>>()
+        };
+        panic!(
+            "C1b: the trees the uninstalls left differ ({at}): 0.4.1 has {:?}, this crate {:?}",
+            only(&sa, &sb),
+            only(&sb, &sa)
+        );
+    }
+}
+
+/// One [`c1b_install`]: the program and the appid C1b planned it with, the fixture, the turn's
+/// choices, and the copies of its tree as it was then (the corpus tree changes afterwards).
+struct Job {
+    at: String,
+    exe: PathBuf,
+    appid: Option<u32>,
+    fixture: usize,
+    past: Past,
+    /// For 0.4.1, this crate, and (with `past.cross`) 0.3.1.
+    a: GameCopy,
+    b: GameCopy,
+    c: Option<GameCopy>,
+}
+
+impl Job {
+    fn copy(at: String, p: &Planned, fixture: usize, past: Past) -> Job {
+        let copy = |name| {
+            let copy = GameCopy::of(p.dir, name);
+            if past.change == Change::TheirDoorstop {
+                as_x64_pe(&copy.game.join(p.exe));
+            }
+            copy
+        };
+        Job {
+            at,
+            exe: p.exe.to_path_buf(),
+            appid: p.appid,
+            fixture,
+            past,
+            a: copy("c1b-041"),
+            b: copy("c1b-ours"),
+            c: past.cross.then(|| copy("c1b-031")),
+        }
+    }
+}
+
+/// How many threads run [`c1b_install`]s, apart from the corpus's: an install mostly waits for
+/// the disk (every file it writes is synced), and many such waits overlap.
+const POOL: usize = 96;
+
+/// The [`Job`]s waiting for [`c1b_install`], and the first of them that failed.
+struct Pool {
+    jobs: Mutex<Receiver<Job>>,
+    failed: Mutex<Option<Box<dyn std::any::Any + Send>>>,
+}
+
+impl Pool {
+    fn new() -> (SyncSender<Job>, Pool) {
+        let (send, jobs) = sync_channel(POOL * 2);
+        let failed = Mutex::new(None);
+        let jobs = Mutex::new(jobs);
+        (send, Pool { jobs, failed })
+    }
+
+    /// Runs every job on [`POOL`] threads of `s`, until the senders are gone. Once one has
+    /// failed, the rest are only taken off the queue: a sender must never wait on a pool whose
+    /// threads all died.
+    fn run<'scope>(
+        &'scope self,
+        s: &'scope std::thread::Scope<'scope, '_>,
+        fixtures: &'scope [Fixture],
+        appinfo: &'scope Path,
+        counts: &'scope Counts,
+    ) {
+        for _ in 0..POOL {
+            s.spawn(move || {
+                loop {
+                    let job = self.jobs.lock().unwrap().recv();
+                    let Ok(job) = job else { break };
+                    if self.failed.lock().unwrap().is_some() {
+                        continue;
+                    }
+                    let run = std::panic::AssertUnwindSafe(|| {
+                        c1b_install(job, fixtures, appinfo, counts);
+                    });
+                    if let Err(failure) = std::panic::catch_unwind(run) {
+                        self.failed.lock().unwrap().get_or_insert(failure);
+                    }
+                }
+            });
+        }
+    }
+
+    /// Fails as the first failed job did, if one did.
+    fn finish(self) {
+        if let Some(failure) = self.failed.into_inner().unwrap() {
+            std::panic::resume_unwind(failure);
+        }
+    }
+}
+
+/// C1b past the fresh game, for one program both launchers planned on the corpus tree: installed
+/// by 0.4.1 and by this crate into copies of the tree, `past.change` made to both, planned again
+/// from the ledgers (and, now and then, that plan installed as the update), uninstalled; the
+/// ledgers, plans, refusals, reports and the trees left equal throughout. With `past.cross`, a
+/// third copy installed by launcher 0.3.1, changed alike and planned again by this crate, plans
+/// as 0.4.1 does over its own install.
+fn c1b_install(job: Job, fixtures: &[Fixture], appinfo: &Path, counts: &Counts) {
+    let Job {
+        at,
+        exe,
+        appid,
+        fixture,
+        past,
+        a,
+        b,
+        c,
+    } = job;
+    let f = &fixtures[fixture];
+    let at = format!("{at}, exe {exe:?}, {}, {:?}", f.name, past.change);
+    let empty = PathBuf::new();
+    let p = &Planned {
+        dir: &empty,
+        exe: &exe,
+        appid,
+        appinfo,
+        profile: &empty,
+        proton: true,
+    };
+    let (pa, pb) = (a.at(p), b.at(p));
+
+    let (plan_a, done_a) = legacy::install(&pa, &f.zip);
+    let (plan_b, done_b) = ours::install(&pb, &f.zip);
+    assert_eq!(
+        b.norm(&plan_b),
+        a.norm(&plan_a),
+        "C1b: the install's plan ({at})"
+    );
+    let (Some(done_a), Some(done_b)) = (done_a, done_b) else {
+        bump(&counts.c1b_install_refused);
+        return;
+    };
+    if !done_a.starts_with('{') || !done_b.starts_with('{') {
+        assert_eq!(
+            b.norm(&done_b),
+            a.norm(&done_a),
+            "C1b: the install's refusal ({at})"
+        );
+        bump(&counts.c1b_install_refused);
+        return;
+    }
+    let ledger = a.ledger(&done_a);
+    assert_eq!(
+        b.ledger(&done_b),
+        ledger,
+        "C1b: the ledger the install wrote, on every field 0.4.1's has ({at})"
+    );
+    bump(&counts.c1b_installs);
+    *counts
+        .c1b_installed
+        .lock()
+        .unwrap()
+        .entry(f.name.to_owned())
+        .or_default() += 1;
+    if let Some(c) = &c {
+        let (_, done) = v031::install(&c.at(p), &f.zip);
+        let done = done.unwrap_or_default();
+        assert!(
+            done.starts_with('{'),
+            "C1b: launcher 0.3.1 installs where 0.4.1 did ({at}): {done}"
+        );
+        let v031 = |copy: &GameCopy, text: &str| -> launcher_031::Ledger {
+            serde_json::from_str(&copy.norm(text)).unwrap()
+        };
+        assert_eq!(
+            v031(c, &done),
+            v031(&a, &done_a),
+            "C1b: launcher 0.3.1's ledger is 0.4.1's, on every field 0.3.1's has ({at})"
+        );
+    }
+
+    let root = |copy: &GameCopy| copy.game.join(p.exe).parent().unwrap().to_path_buf();
+    let laid = make(past.change, &root(&a), &ledger, f, past.pick);
+    for copy in [Some(&b), c.as_ref()].into_iter().flatten() {
+        assert_eq!(make(past.change, &root(copy), &ledger, f, past.pick), laid);
+    }
+    let kind = match (past.change, laid.is_empty()) {
+        (Change::Nothing, _) | (_, true) => Change::Nothing,
+        (change, false) => change,
+    };
+    *counts
+        .c1b_changes
+        .lock()
+        .unwrap()
+        .entry(format!("{kind:?}"))
+        .or_default() += 1;
+    if kind == Change::OursChanged
+        && ledger.game_files.iter().any(|g| {
+            g.action == launcher_legacy::GameAction::Replace
+                && laid.iter().any(|(rel, _)| *rel == g.rel)
+        })
+    {
+        bump(&counts.c1b_changed_replaced);
+    }
+
+    // From the ledger: 0.4.1 over its own install, this crate over its own and over 0.3.1's.
+    let (re_a, update_a, re_b, update_b) = if past.update {
+        let (ra, ua) = legacy::install(&pa, &f.zip);
+        let (rb, ub) = ours::install(&pb, &f.zip);
+        (ra, ua, rb, ub)
+    } else {
+        (
+            legacy::plan(&pa, &f.zip),
+            None,
+            ours::plan(&pb, &f.zip),
+            None,
+        )
+    };
+    if let Some(c) = &c {
+        assert_eq!(
+            c.norm(&ours::plan(&c.at(p), &f.zip)),
+            a.norm(&re_a),
+            "C1b: over the ledger launcher 0.3.1 wrote, this crate plans as 0.4.1 over its own ({at})"
+        );
+        bump(&counts.c1b_cross);
+    }
+    assert_eq!(
+        b.norm(&re_b),
+        a.norm(&re_a),
+        "C1b: the plan from the ledger ({at})"
+    );
+    bump(&counts.c1b_replans);
+    tally(
+        &re_b,
+        &counts.c1b_replan_actions,
+        &counts.c1b_replan_refusals,
+    );
+    if let (Some(ua), Some(ub)) = (update_a, update_b) {
+        if ua.starts_with('{') && ub.starts_with('{') {
+            assert_eq!(
+                b.ledger(&ub),
+                a.ledger(&ua),
+                "C1b: the ledger the update wrote ({at})"
+            );
+        } else {
+            assert_eq!(b.norm(&ub), a.norm(&ua), "C1b: the update's refusal ({at})");
+        }
+        bump(&counts.c1b_updates);
+    }
+
+    let (gone_a, gone_b) = (legacy::uninstall(&pa), ours::uninstall(&pb));
+    assert_eq!(
+        b.norm(&gone_b),
+        a.norm(&gone_a),
+        "C1b: the uninstall's report ({at})"
+    );
+    bump(&counts.c1b_uninstalls);
+    if let Ok(r) = serde_json::from_str::<launcher_legacy::UninstallReport>(&gone_b) {
+        counts.c1b_former_removed.fetch_add(
+            r.former_removed.len() + r.not_restored.len(),
+            Ordering::Relaxed,
+        );
+    }
+    same_tree(&a, &b, &at);
+    if kind == Change::OlderAstra {
+        for (rel, bytes) in &laid {
+            assert_eq!(
+                fs::read(root(&b).join(rel)).ok().as_ref(),
+                Some(bytes),
+                "C1b: a look-alike of an older Astra's file is the player's, and stays ({at})"
+            );
+            bump(&counts.c1b_lookalikes_kept);
+        }
     }
 }
 
@@ -765,18 +1394,30 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(TREES);
     let counts = Counts::default();
+    let (installs, pool) = Pool::new();
     std::thread::scope(|s| {
+        pool.run(s, &fixtures, &appinfo, &counts);
         for w in 0..THREADS {
             let (zips, fixtures, counts, appinfo) = (&zips, &fixtures, &counts, appinfo.as_path());
+            let installs = installs.clone();
             s.spawn(move || {
                 let mut i = w;
                 while i < trees {
-                    one_tree(SEED.wrapping_add(i), zips, fixtures, appinfo, counts);
+                    one_tree(
+                        SEED.wrapping_add(i),
+                        zips,
+                        fixtures,
+                        appinfo,
+                        counts,
+                        &installs,
+                    );
                     i += THREADS;
                 }
             });
         }
+        drop(installs);
     });
+    pool.finish();
     let get = |a: &AtomicUsize| a.load(Ordering::Relaxed);
     let c = &counts;
     let report = [
@@ -900,6 +1541,69 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
             "C1b {k}: {got} < {floor}: the corpus no longer reaches it"
         );
     }
+
+    // C1b past the fresh game: installs, plans from their ledgers, updates, uninstalls, and the
+    // upgrade from 0.3.1's ledgers; every action a plan from a ledger is for.
+    let past_actions = c.c1b_replan_actions.lock().unwrap().clone();
+    let past_refusals = c.c1b_replan_refusals.lock().unwrap().clone();
+    let changes = c.c1b_changes.lock().unwrap().clone();
+    eprintln!(
+        "C1b past the fresh game: {} installs ({} refused alike), {} plans from the ledger, {} updates, {} uninstalls, {} from 0.3.1's ledgers\n  changes {changes:?}\n  actions {past_actions:?}\n  refusals {past_refusals:?}\n  {} changed files we had replaced, {} look-alikes kept, {} former files removed",
+        get(&c.c1b_installs),
+        get(&c.c1b_install_refused),
+        get(&c.c1b_replans),
+        get(&c.c1b_updates),
+        get(&c.c1b_uninstalls),
+        get(&c.c1b_cross),
+        get(&c.c1b_changed_replaced),
+        get(&c.c1b_lookalikes_kept),
+        get(&c.c1b_former_removed),
+    );
+    assert_eq!(get(&c.c1b_replans), get(&c.c1b_installs));
+    assert_eq!(get(&c.c1b_uninstalls), get(&c.c1b_installs));
+    let past_action = |a: &str| past_actions.get(a).copied().unwrap_or(0);
+    let change = |k: Change| changes.get(&format!("{k:?}")).copied().unwrap_or(0);
+    // About half what the seed reaches in 20,000 trees, as C1's floors are. Rewritten and the
+    // look-alikes are rare here (they need a BepInEx manifest on a Unity program); the games the
+    // manifests are for reach every change for every manifest
+    // (`c1b_every_manifest_plans_as_0_4_1_on_the_games_it_is_for`).
+    let past_floors: Vec<(&str, usize, usize)> = vec![
+        ("installs", get(&c.c1b_installs), 1_500),
+        ("plans from the ledger", get(&c.c1b_replans), 1_500),
+        ("updates", get(&c.c1b_updates), 580),
+        ("uninstalls", get(&c.c1b_uninstalls), 1_500),
+        ("plans from 0.3.1's ledgers", get(&c.c1b_cross), 760),
+        ("add", past_action("add"), 20_000),
+        ("replace", past_action("replace"), 800),
+        ("reuse-known-proxy", past_action("reuse-known-proxy"), 600),
+        ("keep-existing", past_action("keep-existing"), 30),
+        ("share-loader", past_action("share-loader"), 23),
+        (
+            "their Doorstop over ours",
+            change(Change::TheirDoorstop),
+            300,
+        ),
+        ("ours rewritten", change(Change::Rewritten), 12),
+        ("ours changed", change(Change::OursChanged), 300),
+        (
+            "ours changed where we replaced",
+            get(&c.c1b_changed_replaced),
+            90,
+        ),
+        (
+            "older Astra's look-alikes laid",
+            change(Change::OlderAstra),
+            13,
+        ),
+        ("look-alikes kept", get(&c.c1b_lookalikes_kept), 38),
+    ];
+    for (k, got, per_20k) in past_floors {
+        let floor = (per_20k * trees as usize / 20_000).max(1);
+        assert!(
+            got >= floor,
+            "C1b past the fresh game, {k}: {got} < {floor}: the corpus no longer reaches it"
+        );
+    }
 }
 
 /// C1b on the games each manifest is for, beside the corpus (where a pinned program such as
@@ -974,50 +1678,93 @@ fn c1b_every_manifest_plans_as_0_4_1_on_the_games_it_is_for() {
         }
     }
     let mut planned: BTreeMap<&str, usize> = BTreeMap::new();
+    let counts = Counts::default();
     let mut plans = 0;
-    for f in &fixtures {
-        for (i, (exe, lay)) in shapes.iter().enumerate() {
-            for variant in 0..3 {
-                let t = Tmp::new("c1b-game");
-                lay(t.path());
-                let game = t.path().join(exe);
-                let game = game.parent().unwrap();
-                for (leaf, ours) in &f.beside {
-                    match variant {
-                        1 => write(&game.join(leaf), ours),
-                        2 => write(&game.join(leaf), b"MZ someone else's"),
-                        _ => {}
+    let (installs, pool) = Pool::new();
+    std::thread::scope(|s| {
+        pool.run(s, &fixtures, &appinfo, &counts);
+        for (n, f) in fixtures.iter().enumerate() {
+            for (i, (exe, lay)) in shapes.iter().enumerate() {
+                for variant in 0..3 {
+                    let t = Tmp::new("c1b-game");
+                    lay(t.path());
+                    let game = t.path().join(exe);
+                    let game = game.parent().unwrap();
+                    for (leaf, ours) in &f.beside {
+                        match variant {
+                            1 => write(&game.join(leaf), ours),
+                            2 => write(&game.join(leaf), b"MZ someone else's"),
+                            _ => {}
+                        }
                     }
-                }
-                let profile = Tmp::new("c1b-profile");
-                let p = Planned {
-                    dir: t.path(),
-                    exe: Path::new(exe),
-                    appid: f.appid,
-                    appinfo: &appinfo,
-                    profile: &profile.join("p"),
-                    proton: true,
-                };
-                let new = plan_new(&p, &f.zip);
-                let old = plan_legacy(&p, &f.zip);
-                assert_eq!(
-                    new, old,
-                    "C1b: {} on shape {i} ({exe}), variant {variant}",
-                    f.name
-                );
-                plans += 1;
-                if new.starts_with('{') {
-                    *planned.entry(f.name).or_default() += 1;
+                    let profile = Tmp::new("c1b-profile");
+                    let p = Planned {
+                        dir: t.path(),
+                        exe: Path::new(exe),
+                        appid: f.appid,
+                        appinfo: &appinfo,
+                        profile: &profile.join("p"),
+                        proton: true,
+                    };
+                    let new = plan_new(&p, &f.zip);
+                    let old = plan_legacy(&p, &f.zip);
+                    assert_eq!(
+                        new, old,
+                        "C1b: {} on shape {i} ({exe}), variant {variant}",
+                        f.name
+                    );
+                    plans += 1;
+                    if new.starts_with('{') {
+                        *planned.entry(f.name).or_default() += 1;
+                        // And past the fresh game: every change, each from its own copies.
+                        for (j, change) in CHANGES.iter().enumerate() {
+                            let past = Past {
+                                change: *change,
+                                cross: true,
+                                update: (variant + j).is_multiple_of(2),
+                                pick: n + i + j,
+                            };
+                            let at = format!("shape {i} ({exe}), variant {variant}");
+                            installs.send(Job::copy(at, &p, n, past)).unwrap();
+                        }
+                    }
                 }
             }
         }
-    }
-    eprintln!("C1b on its own games: {plans} plans; planned per manifest {planned:?}");
+        drop(installs);
+    });
+    pool.finish();
+    let installed = counts.c1b_installed.lock().unwrap().clone();
+    eprintln!(
+        "C1b on its own games: {plans} plans; planned per manifest {planned:?}; installed {installed:?}; changes {:?}; actions from the ledger {:?}",
+        counts.c1b_changes.lock().unwrap(),
+        counts.c1b_replan_actions.lock().unwrap()
+    );
     for f in &fixtures {
         assert!(
             planned.get(f.name).is_some_and(|n| *n > 0),
             "C1b: {} never planned on a game it is for",
             f.name
+        );
+        assert!(
+            installed.get(f.name).is_some_and(|n| *n > 0),
+            "C1b: {} never installed on a game it is for",
+            f.name
+        );
+    }
+    // Each change made, and every action a plan from a ledger is for.
+    let changes = counts.c1b_changes.lock().unwrap().clone();
+    let actions = counts.c1b_replan_actions.lock().unwrap().clone();
+    for change in &CHANGES[1..] {
+        assert!(
+            changes.get(&format!("{change:?}")).is_some_and(|n| *n > 0),
+            "C1b: {change:?} never made on the games the manifests are for"
+        );
+    }
+    for a in ACTIONS {
+        assert!(
+            actions.get(*a).is_some_and(|n| *n > 0),
+            "C1b: no plan from a ledger holds {a} on the games the manifests are for"
         );
     }
 }

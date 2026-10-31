@@ -234,6 +234,24 @@ pub fn snapshot(dir: &Path) -> BTreeMap<String, Vec<u8>> {
     out
 }
 
+/// A copy of the tree at `from` as `to`: folders, files with their bytes, and links as links
+/// (their target text unchanged, never followed).
+pub fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for e in fs::read_dir(from).unwrap().flatten() {
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        let ft = e.file_type().unwrap();
+        if ft.is_symlink() {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(fs::read_link(&src).unwrap(), &dst).unwrap();
+        } else if ft.is_dir() {
+            copy_tree(&src, &dst);
+        } else {
+            fs::copy(&src, &dst).unwrap();
+        }
+    }
+}
+
 /// Every test that is not about VAC installs a plan whose VAC flag no appinfo could read.
 pub const ACCEPT: astra_game_launcher::Accept = astra_game_launcher::Accept {
     vac_unchecked: true,

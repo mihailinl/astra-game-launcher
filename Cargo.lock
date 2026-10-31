@@ -4,6 +4,20 @@ version = 4
 
 [[package]]
 name = "astra-game-launcher"
+version = "0.3.1"
+source = "git+https://github.com/mihailinl/astra-game-launcher?rev=9aa7874b60f6b10bd67411b7aad40fcc968b78bc#9aa7874b60f6b10bd67411b7aad40fcc968b78bc"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml",
+ "windows-sys 0.61.2",
+ "zip",
+]
+
+[[package]]
+name = "astra-game-launcher"
 version = "0.4.1"
 source = "git+https://github.com/mihailinl/astra-game-launcher?rev=73bf11e32d83b88704175411f765806aaa7bac3f#73bf11e32d83b88704175411f765806aaa7bac3f"
 dependencies = [
@@ -21,6 +35,7 @@ dependencies = [
 name = "astra-game-launcher"
 version = "0.5.0"
 dependencies = [
+ "astra-game-launcher 0.3.1",
  "astra-game-launcher 0.4.1",
  "hex",
  "libc",
