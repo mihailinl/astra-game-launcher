@@ -588,8 +588,19 @@ fn extras(seed: u64, t: &mut Tree) {
     // listing cut at 5,000 BEFORE it is sorted (Pass A's `listing_of`, which the hint, the
     // bootstrap and `engine_of_exe` read) loses whichever this filesystem lists late; one cut
     // after sorting would keep both. The walk itself sorts first, so it keeps both and stops
-    // inside `Huge/` at its cap.
+    // inside `Huge/` at its cap. The stems are drawn per tree: a filesystem that lists a folder
+    // by a hash of each name (ext4) puts one name at the same place in every tree, so only
+    // names that change from tree to tree land on both sides of the cut.
     t.truncation = true;
+    let mut stem = || -> String {
+        let tail: String = (0..3).map(|_| (b'A' + x.below(26) as u8) as char).collect();
+        format!("A{tail}")
+    };
+    let first = stem();
+    let mut second = stem();
+    if second == first {
+        second.push('B');
+    }
     let godot = x.chance(50);
     let pair = |nodes: &mut Vec<Node>, programs: &mut Vec<String>, stem: &str| {
         let exe = format!("Huge/{stem}.exe");
@@ -604,7 +615,7 @@ fn extras(seed: u64, t: &mut Tree) {
             ));
         }
     };
-    pair(&mut t.nodes, &mut t.programs, "AAA");
+    pair(&mut t.nodes, &mut t.programs, &first);
     if !godot {
         t.nodes.push(Node::File(
             "Huge/UnityPlayer.dll".into(),
@@ -612,7 +623,7 @@ fn extras(seed: u64, t: &mut Tree) {
         ));
     }
     t.nodes.push(Node::Fill("Huge".into(), 10_000));
-    pair(&mut t.nodes, &mut t.programs, "AAB");
+    pair(&mut t.nodes, &mut t.programs, &second);
     // `Later/`: a whole Unity game the walk never reaches (its cap falls inside `Huge/`).
     t.nodes.push(Node::File(
         "Later/Game.exe".into(),
@@ -628,14 +639,14 @@ fn extras(seed: u64, t: &mut Tree) {
     ));
     t.programs.push("Later/Game.exe".into());
     for h in [
-        "Huge/AAA.exe",
-        "Huge/AAB.exe",
-        "huge/aaa.EXE",
-        "HUGE/aab.exe",
-        "Later/Game.exe",
-        "later/GAME.exe",
+        format!("Huge/{first}.exe"),
+        format!("Huge/{second}.exe"),
+        format!("huge/{}.EXE", first.to_ascii_lowercase()),
+        format!("HUGE/{}.exe", second.to_ascii_lowercase()),
+        "Later/Game.exe".into(),
+        "later/GAME.exe".into(),
     ] {
-        t.hints.push(h.into());
+        t.hints.push(h);
     }
 }
 
