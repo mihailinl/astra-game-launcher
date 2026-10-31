@@ -1187,6 +1187,88 @@ fn a_game_over_its_budget_gets_no_pass_b_answer() {
     assert_eq!(got, detect_with(t.path(), None).unwrap());
 }
 
+/// The anchors are the O(1) prefilter: descriptors whose anchors the folder does not hold cost
+/// the game nothing, however many rules they carry — the one that does match still answers.
+#[test]
+fn a_descriptor_whose_anchors_are_absent_costs_nothing() {
+    let t = Tmp::new("prefilter");
+    for i in 0..8 {
+        write(&t.join(&format!("p{i}/Tool.exe")), b"MZ");
+    }
+    write(&t.join("p3/real.anchor"), b"r");
+    let rule = "[[rule]]\ntier = \"strong\"\nprograms = { ext = [\"exe\"], first = 8 }\nrequire = [ { listed = \"absent.anchor\", kind = \"file\" } ]\ncode = \"CODE\"\nconfidence = \"high\"\nevidence = \"{program}\"\nbinary = \"windows\"\n";
+    let absent: Vec<String> = (0..20)
+        .map(|i| {
+            format!(
+                "schema = \"astra.engine/1\"\nengine = {{ codes = {{ absent-{i} = \"Absent {i}\" }} }}\n{}",
+                rule.replace("CODE", &format!("absent-{i}")).repeat(16)
+            )
+        })
+        .collect();
+    let real = alpha_like("alpha", "real.anchor");
+    // 20 × 16 rules × 8 programs would be 2,560 lookups were the anchors not a prefilter.
+    let set = EngineSet::build(
+        absent
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                (
+                    origin(Moderation::Unchecked, &format!("a{i}"), false),
+                    Descriptor::from_toml(s),
+                )
+            })
+            .chain(std::iter::once((
+                origin(Moderation::Unchecked, "real", false),
+                Descriptor::from_toml(&real),
+            ))),
+    );
+    assert_eq!(set.len(), 21, "{:?}", set.skipped());
+    let got = d(t.path(), None, &set);
+    assert_eq!((got.engine.as_str(), got.exe), ("alpha", p("p3/Tool.exe")));
+}
+
+#[test]
+fn listed_never_resolves_to_a_wrappers_name_and_skip_dirs_skip() {
+    let text = alpha_like("alpha", "alpha.core").replace(
+        "{ listed = \"alpha.core\", kind = \"file\", as = \"core\" }",
+        "{ listed = \"alpha.core\", kind = \"file\", as = \"core\" }, { listed = \"{stem}*.cfg\", kind = \"file\" }",
+    );
+    let set = one(&text);
+    assert_eq!(set.len(), 1, "{:?}", set.skipped());
+    let t = Tmp::new("listed-wrapper");
+    write(&t.join("Game.exe"), b"MZ");
+    write(&t.join("alpha.core"), b"a");
+    write(&t.join("GameLauncher.cfg"), b"c");
+    assert!(
+        d(t.path(), None, &set).engine.is_unknown(),
+        "only a wrapper's name matches"
+    );
+    write(&t.join("GameSettings.cfg"), b"c");
+    assert_eq!(d(t.path(), None, &set).engine, "alpha");
+
+    let skipping = one(&alpha_like("alpha", "alpha.core")
+        .replace("first = 8 }", "first = 8, skip_dirs = [\"Tools\"] }"));
+    let t = Tmp::new("skip-dirs");
+    write(&t.join("tools/Editor.exe"), b"MZ");
+    write(&t.join("tools/alpha.core"), b"a");
+    assert!(d(t.path(), None, &skipping).engine.is_unknown());
+    assert_eq!(
+        d(t.path(), None, &one(&alpha_like("alpha", "alpha.core"))).engine,
+        "alpha"
+    );
+}
+
+/// `{project}` is at least one folder: a program directly at `at`'s tail, at the top, has none.
+#[test]
+fn a_project_is_never_the_root() {
+    let set = one(SOURCE2);
+    let t = Tmp::new("flat-source2");
+    write(&t.join("bin/win64/cs2.exe"), b"MZ");
+    write(&t.join("bin/win64/engine2.dll"), b"MZ");
+    write(&t.join("core/pak01_dir.vpk"), b"vpk");
+    assert!(d(t.path(), None, &set).engine.is_unknown());
+}
+
 // ---- Pass B: links and FIFOs ----
 
 /// "Read outside the folder": no lookup or probe goes through a link, and none blocks on a FIFO.
@@ -1310,6 +1392,16 @@ version = { head = ["{dir}/data/version.txt"], template = "N{1,3}.N{1,3}" }
     write(&outside.join("data/tail.bin"), b"EPS");
     symlink(outside.join("data"), t.join("bin/data")).unwrap();
     assert!(d(t.path(), None, &set).engine.is_unknown());
+    // `stat` alone through a linked folder (no probe there to refuse it instead).
+    let stat_only = text.replace(
+        ", { tail = \"{dir}/data/tail.bin\", bytes = 3, equals = \"EPS\" }",
+        "",
+    );
+    let stat_only = one(&stat_only);
+    assert_eq!(stat_only.len(), 1, "{:?}", stat_only.skipped());
+    assert!(d(t.path(), None, &stat_only).engine.is_unknown());
+    let t = make("eps-stat-real");
+    assert_eq!(d(t.path(), None, &stat_only).engine, "eps");
     let t = make("eps-version-link");
     std::fs::remove_file(t.join("bin/data/version.txt")).unwrap();
     write(&outside.join("version.txt"), b"9.99");

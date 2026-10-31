@@ -2225,3 +2225,24 @@ impl Descriptor {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RFC 8785 sorts keys by UTF-16 code units: U+10000 (a surrogate pair, D800 DC00) before
+    /// U+E000, the other way round from UTF-8 and from a `BTreeMap<String, _>`.
+    #[test]
+    fn jcs_sorts_object_keys_by_utf16() {
+        let v: Value = serde_json::from_str(
+            r#"{"b":1,"\ue000":2,"\ud800\udc00":3,"a":[true,"x\u0001\"\\"],"B":{"z":0,"y":-5}}"#,
+        )
+        .unwrap();
+        let mut out = String::new();
+        jcs(&v, &mut out);
+        assert_eq!(
+            out,
+            "{\"B\":{\"y\":-5,\"z\":0},\"a\":[true,\"x\\u0001\\\"\\\\\"],\"b\":1,\"\u{10000}\":3,\"\u{e000}\":2}"
+        );
+    }
+}
