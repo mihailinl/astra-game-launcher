@@ -10,6 +10,7 @@
 mod common;
 
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::mpsc;
 use std::time::Duration;
 

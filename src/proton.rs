@@ -635,6 +635,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn two_spellings_of_one_prefix_are_one_record() {
         // `~/.local/share/Steam/...` and `~/.steam/steam/...`, the second through Steam's link.
@@ -658,6 +659,7 @@ mod tests {
         assert_eq!(fs::read_to_string(real.join("user.reg")).unwrap(), REG);
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_unreadable_proc_or_cwd_of_our_wineserver_counts_as_alive() {
         use std::os::unix::fs::MetadataExt;
@@ -774,6 +776,7 @@ mod tests {
     }
 
     /// A process named `wineserver` (a copy of `sleep`) whose working directory is `dir`.
+    #[cfg(unix)]
     fn fake_wineserver(dir: &std::path::Path, bin: &std::path::Path) -> std::process::Child {
         let sleep = std::env::split_paths(&std::env::var_os("PATH").unwrap())
             .map(|d| d.join("sleep"))
@@ -787,6 +790,7 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_live_wineserver_blocks_apply_and_restore_and_a_left_directory_does_not() {
         use std::os::unix::fs::MetadataExt;
