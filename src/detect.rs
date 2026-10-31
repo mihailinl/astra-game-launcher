@@ -200,8 +200,10 @@ impl Detection {
     }
 
     /// Whether Pass B may speak for this result: Pass A said `unknown`, with no evidence and no
-    /// launch hint used. Everything else Pass A decided is final.
-    pub(crate) fn open_to_descriptors(&self) -> bool {
+    /// launch hint used. Everything else Pass A decided is final. THE narrow-only gate: Pass B
+    /// asks it, and so must anything else that would let data name a game's engine (a
+    /// moderator's `games[]` row: merged plan §2.1) — never a copy of it.
+    pub fn open_to_descriptors(&self) -> bool {
         self.engine.is_unknown() && self.evidence.is_none() && !self.hint_used
     }
 }

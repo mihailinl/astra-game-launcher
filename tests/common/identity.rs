@@ -196,7 +196,9 @@ pub fn hostile_set() -> &'static EngineSet {
     })
 }
 
-/// Whether Pass A left this game to the descriptors.
+/// Whether Pass A left this game to the descriptors: the canary's own reading of plan B's
+/// rule, independent of the crate's gate (a weakened gate must not weaken the canary), and held
+/// equal to it in [`checked`].
 pub fn open_to_descriptors(d: &Detection) -> bool {
     d.engine.is_unknown() && d.evidence.is_none() && !d.hint_used
 }
@@ -212,6 +214,11 @@ pub fn checked(dir: &Path, hint: Option<&str>) -> Detection {
     );
     let empty = detect_with_engines(dir, hint, &EngineSet::empty()).unwrap();
     assert_eq!(empty, new, "an empty EngineSet is Pass A alone ({dir:?})");
+    assert_eq!(
+        new.open_to_descriptors(),
+        open_to_descriptors(&new),
+        "the crate's narrow-only gate reads plan B's rule ({dir:?}, hint {hint:?})"
+    );
     let hostile = detect_with_engines(dir, hint, hostile_set()).unwrap();
     if open_to_descriptors(&new) {
         narrowed(&new, &hostile);

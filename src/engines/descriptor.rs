@@ -56,7 +56,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 
-use super::{EngineCode, is_valid_engine_code};
+use super::EngineCode;
 use crate::detect::{Confidence, Engine, is_wrapper_name};
 use crate::error::{LauncherError, Result, codes};
 use crate::paths::check_component;
@@ -130,10 +130,20 @@ pub const RESERVED_CODE_PREFIXES: &[&str] = &["unknown", "astra"];
 /// Codes that may not hold these anywhere, after folding.
 pub const RESERVED_CODE_INFIXES: &[&str] = &["ambiguous"];
 
-/// Words a display name may not hold, after folding: Astra's own tiers and team, and words that
-/// would read as a review. The built-in engines' family names are added to these
-/// ([`check_pass_b`](Descriptor::check_pass_b)).
+/// Words no display name may hold where one of its words begins, after folding and with the
+/// separators between its words dropped (so `Un real`, `V.e.r.i.f.i.e.d` and `My Un ity` read as
+/// what they spell): Astra's own tiers and team, words that would read as a review, and what
+/// reads as a built-in engine beyond its family name (`UE5`, `Юнити`). The built-in engines'
+/// family names are added to these ([`check_pass_b`](Descriptor::check_pass_b)). A word holding
+/// `-` is looked for anywhere in the folded name instead.
 pub const RESERVED_NAME_WORDS: &[&str] = &[
+    "ue4",
+    "ue5",
+    "юнити",
+    "унити",
+    "анриал",
+    "анреал",
+    "годот",
     "astra",
     "астра",
     "minice",
@@ -323,15 +333,56 @@ pub const GENERIC_ANCHOR_FILES: &[&str] = &[
 /// The program kinds Pass B considers: these extensions, or none.
 pub const PASS_B_PROGRAM_EXTS: &[&str] = &["exe", "x86_64", "x86"];
 
-/// A code or a name as a person reads it: lower case, `_`/`-`/space/`.` dropped, look-alike
-/// letters and digits (Latin, Cyrillic, Greek) folded together, `rn`→`m`, `vv`→`w`, `cl`→`d`.
+/// What a Latin-1 or Latin Extended-A letter (lower case) reads as without its marks: `é` → `e`,
+/// `ł` → `l`, `æ` → `ae`, `ß` → `ss`. `None` for any other character.
+fn latin_base(c: char) -> Option<&'static str> {
+    Some(match c {
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => "a",
+        'æ' => "ae",
+        'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => "c",
+        'ð' | 'ď' | 'đ' => "d",
+        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => "e",
+        'ĝ' | 'ğ' | 'ġ' | 'ģ' => "g",
+        'ĥ' | 'ħ' => "h",
+        'ì' | 'í' | 'î' | 'ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => "i",
+        'ĳ' => "ij",
+        'ĵ' => "j",
+        'ķ' | 'ĸ' => "k",
+        'ĺ' | 'ļ' | 'ľ' | 'ŀ' | 'ł' => "l",
+        'ñ' | 'ń' | 'ņ' | 'ň' | 'ŉ' | 'ŋ' => "n",
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ŏ' | 'ő' => "o",
+        'œ' => "oe",
+        'ŕ' | 'ŗ' | 'ř' => "r",
+        'ś' | 'ŝ' | 'ş' | 'š' | 'ſ' => "s",
+        'ß' => "ss",
+        'ţ' | 'ť' | 'ŧ' => "t",
+        'þ' => "th",
+        'ù' | 'ú' | 'û' | 'ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => "u",
+        'ŵ' => "w",
+        'ý' | 'ÿ' | 'ŷ' => "y",
+        'ź' | 'ż' | 'ž' => "z",
+        _ => return None,
+    })
+}
+
+/// A code or a name as a person reads it: lower case, Latin letters without their marks
+/// (`Unreál` → `unreal`), `_`/`-`/space/`.` dropped, look-alike letters and digits (Latin,
+/// Cyrillic, Greek) folded together, `rn`→`m`, `vv`→`w`, `cl`→`d`. A display name may hold no
+/// other script for this to miss ([`name_char_allowed`]).
 pub fn fold_confusables(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    let mut base = String::with_capacity(s.len());
     for ch in s.chars() {
         let ch = ch.to_lowercase().next().unwrap_or(ch);
+        match latin_base(ch) {
+            Some(b) => base.push_str(b),
+            None => base.push(ch),
+        }
+    }
+    let mut out = String::with_capacity(base.len());
+    for ch in base.chars() {
         let c = match ch {
             '0' | 'о' | 'ο' | 'օ' => 'o',
-            '1' | 'i' | 'l' | '|' | 'і' | 'ι' | 'ӏ' | 'ı' | '!' => 'l',
+            '1' | 'i' | 'l' | '|' | 'і' | 'ї' | 'ι' | 'ӏ' | '!' => 'l',
             '5' | 'ѕ' | '$' => 's',
             '2' => 'z',
             '3' | 'е' | 'ё' | 'ε' | 'є' => 'e',
@@ -345,7 +396,8 @@ pub fn fold_confusables(s: &str) -> String {
             'х' | 'χ' => 'x',
             'к' | 'κ' => 'k',
             'м' => 'm',
-            'н' | 'η' => 'h',
+            'н' | 'η' | 'һ' => 'h',
+            'ј' => 'j',
             'ԁ' => 'd',
             'ո' => 'n',
             'ս' | 'υ' => 'u',
@@ -1336,15 +1388,31 @@ fn is_default_ignorable(c: char) -> bool {
         | '\u{1D173}'..='\u{1D17A}' | '\u{E0000}'..='\u{E0FFF}')
 }
 
-/// A display name as a person reads it: 1 to 48 printable characters, trimmed, none of the
-/// invisible, direction-changing or separator characters.
+/// Whether a display name may hold `c`: printable ASCII, a Latin-1 or Latin Extended-A letter
+/// ([`fold_confusables`] reads it without its marks), or a Cyrillic letter. Nothing else —
+/// fullwidth and mathematical letters, small capitals, enclosed and letter-like symbols, Roman
+/// numerals, combining marks, Greek, any other script — because each can spell a reserved word
+/// (`Ｕｎｉｔｙ`, `𝐔𝐧𝐢𝐭𝐲`, `ᴜɴɪᴛʏ`, `Unⅰty`, `Unreál`) that no fold of a closed list can see.
+pub fn name_char_allowed(c: char) -> bool {
+    matches!(c,
+        ' '..='~'
+        | '\u{00C0}'..='\u{00D6}'
+        | '\u{00D8}'..='\u{00F6}'
+        | '\u{00F8}'..='\u{017F}'
+        | '\u{0400}'..='\u{0482}'
+        | '\u{048A}'..='\u{04FF}')
+}
+
+/// A display name as a person reads it: 1 to 48 characters, trimmed, every one allowed
+/// ([`name_char_allowed`]) and none a separator the UI draws ([`FORBIDDEN_NAME_CHARS`]).
 fn check_display_name(name: &str, field: &str) -> Result<()> {
     let n = name.chars().count();
     if n == 0 || n > limits::NAME_CHARS || name.trim() != name {
         return Err(invalid(field, "1 to 48 characters, trimmed"));
     }
     if name.chars().any(|c| {
-        c.is_control()
+        !name_char_allowed(c)
+            || c.is_control()
             || is_bidi_control(c)
             || is_default_ignorable(c)
             || FORBIDDEN_NAME_CHARS.contains(&c)
@@ -2006,13 +2074,17 @@ pub(crate) fn anchor_refusal(name: &str, kind: Kind, m: &Model) -> Option<&'stat
 }
 
 /// Whether a display name reads as a built-in engine's (`families`) or holds one of
-/// [`RESERVED_NAME_WORDS`]: a word of the name that, folded, begins with a reserved word, or —
-/// for a reserved phrase of several words (`first-party`) — the whole name, folded, holding it.
-fn name_is_reserved(name: &str, families: &[String]) -> bool {
-    let words: Vec<String> = name
+/// [`RESERVED_NAME_WORDS`]: from some word of the name on, the rest of it — its words run
+/// together, folded — begins with a reserved word (`Unreal Engine 5`, `Un real`, `G.o.d.o.t`,
+/// `My Un ity`), or, for a reserved phrase of several words (`first-party`), the whole name,
+/// folded, holds it. A reserved word inside a word does not count: `Community` holds `unity`.
+pub fn name_is_reserved(name: &str, families: &[String]) -> bool {
+    let words: Vec<&str> = name
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
-        .map(fold_confusables)
+        .collect();
+    let tails: Vec<String> = (0..words.len())
+        .map(|i| fold_confusables(&words[i..].concat()))
         .collect();
     let whole = fold_confusables(name);
     families
@@ -2024,9 +2096,78 @@ fn name_is_reserved(name: &str, families: &[String]) -> bool {
             if w.contains('-') {
                 whole.contains(&fw)
             } else {
-                words.iter().any(|x| x.starts_with(&fw))
+                tails.iter().any(|t| t.starts_with(&fw))
             }
         })
+}
+
+/// The built-in engines' family names (`unity`, `unreal`, `godot`): reserved as code prefixes and
+/// as name words.
+pub fn builtin_families() -> Vec<String> {
+    Engine::ALL
+        .iter()
+        .filter(|e| **e != Engine::Unknown)
+        .map(|e| e.code().split('-').next().unwrap_or("").to_owned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// What two publishers' engine codes may not share ([`super::EngineSet::build`]'s ownership):
+/// the code with `-` dropped and the look-alikes of its own alphabet read alike — `0` as `o`,
+/// `1` and `i` as `l`, `rn` as `m`, `vv` as `w`, `cl` as `d`. Not [`fold_confusables`]'s
+/// reading of every digit as a letter (that guards the reserved codes): `id-tech-6` and
+/// `id-tech-8` stay two codes, while `s0urce-2` is `source2`.
+pub fn code_identity(code: &str) -> String {
+    let mapped: String = code
+        .chars()
+        .filter(|c| *c != '-')
+        .map(|c| match c {
+            '0' => 'o',
+            '1' | 'i' => 'l',
+            c => c,
+        })
+        .collect();
+    mapped
+        .replace("rn", "m")
+        .replace("vv", "w")
+        .replace("cl", "d")
+}
+
+/// Whether `code` is spelled as an engine code may be: `^[a-z][a-z0-9-]{1,31}$`.
+pub fn is_valid_engine_code(code: &str) -> bool {
+    let b = code.as_bytes();
+    (2..=32).contains(&b.len())
+        && b[0].is_ascii_lowercase()
+        && b[1..]
+            .iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+}
+
+/// Whether no engine descriptor may declare `code` (any spelling, valid or not): a built-in
+/// code, `unknown`, or one that reads as one of them once folded ([`fold_confusables`]:
+/// `unity-mon0`, `un1ty-x`, `g0dot`); one that begins with a built-in family name
+/// ([`builtin_families`]) or a [`RESERVED_CODE_PREFIXES`] entry; one holding a
+/// [`RESERVED_CODE_INFIXES`] entry.
+pub fn is_reserved_code(code: &str) -> bool {
+    let folded = fold_confusables(code);
+    if Engine::ALL
+        .iter()
+        .any(|e| folded == fold_confusables(e.code()))
+    {
+        return true;
+    }
+    if builtin_families()
+        .iter()
+        .map(String::as_str)
+        .chain(RESERVED_CODE_PREFIXES.iter().copied())
+        .any(|f| folded.starts_with(&fold_confusables(f)))
+    {
+        return true;
+    }
+    RESERVED_CODE_INFIXES
+        .iter()
+        .any(|w| folded.contains(&fold_confusables(w)))
 }
 
 // ---- The descriptor. ----
@@ -2137,13 +2278,7 @@ impl Descriptor {
     /// not yet evaluate (`walk`, `scope`, `programs = "none"`) are `descriptor-unsupported`.
     pub fn check_pass_b(&self, first_party: bool) -> Result<()> {
         let m = &self.model;
-        let families: Vec<String> = Engine::ALL
-            .iter()
-            .filter(|e| **e != Engine::Unknown)
-            .map(|e| e.code().split('-').next().unwrap_or("").to_owned())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        let families = builtin_families();
         for (code, name) in &m.codes {
             if code.is_reserved() {
                 return Err(
@@ -2246,5 +2381,15 @@ mod tests {
             out,
             "{\"B\":{\"y\":-5,\"z\":0},\"a\":[true,\"x\\u0001\\\"\\\\\"],\"b\":1,\"\u{10000}\":3,\"\u{e000}\":2}"
         );
+    }
+
+    /// RFC 8785 §3.2.2.2: a control with no short escape is `\u` and four LOWER-case hex digits;
+    /// DEL and everything past it are written as themselves.
+    #[test]
+    fn jcs_writes_controls_in_lower_case_hex() {
+        let v = Value::String("\u{000b}\u{001f}\u{001e}\u{007f}\u{0080}".into());
+        let mut out = String::new();
+        jcs(&v, &mut out);
+        assert_eq!(out, "\"\\u000b\\u001f\\u001e\u{7f}\u{80}\"");
     }
 }

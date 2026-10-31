@@ -465,7 +465,8 @@ fn reserved_codes_are_refused() {
     ] {
         assert!(!is_reserved_code(code), "{code}");
     }
-    // A name that reads as a built-in engine's, or as a review, is reserved too.
+    // A name that reads as a built-in engine's, or as a review, is reserved too — spelled with
+    // marks, look-alikes, or separators inside the word.
     for name in [
         "Unity (Mono)",
         "UNITY",
@@ -476,6 +477,25 @@ fn reserved_codes_are_refused() {
         "Verified by Astra",
         "First Party",
         "Астра",
+        "Moderat\u{0435}d",
+        "Un real Engine",
+        "U.nreal 5",
+        "G.o.d.o.t",
+        "My Un real",
+        "Un ity",
+        "U-n-i-t-y",
+        "Unre\u{00E1}l Engine",
+        "\u{00DC}nity",
+        "G\u{00F6}dot",
+        "\u{016A}nity",
+        "Verif ied",
+        "Off icial",
+        "V.e.r.i.f.i.e.d",
+        "V\u{00E9}rified",
+        "\u{00C1}stra",
+        "UE5",
+        "UE4 Fork",
+        "Юнити",
     ] {
         let text = SOURCE2.replace("\"Source 2\"", &format!("\"{name}\""));
         assert_eq!(
@@ -484,8 +504,36 @@ fn reserved_codes_are_refused() {
             "{name}"
         );
     }
-    let fine = SOURCE2.replace("\"Source 2\"", "\"Community Engine\"");
-    assert_eq!(one(&fine).len(), 1);
+    // Letters a fold of a closed list cannot see are not held at all: fullwidth, mathematical,
+    // enclosed, small capitals, Roman numerals, combining marks, other scripts.
+    for name in [
+        "\u{FF35}\u{FF4E}\u{FF52}\u{FF45}\u{FF41}\u{FF4C} \u{FF25}\u{FF4E}\u{FF47}\u{FF49}\u{FF4E}\u{FF45}",
+        "\u{FF2F}\u{FF46}\u{FF46}\u{FF49}\u{FF43}\u{FF49}\u{FF41}\u{FF4C}",
+        "\u{FF36}\u{FF45}\u{FF52}\u{FF49}\u{FF46}\u{FF49}\u{FF45}\u{FF44} by \u{FF21}\u{FF53}\u{FF54}\u{FF52}\u{FF41}",
+        "\u{FF35}\u{FF4E}\u{FF49}\u{FF54}\u{FF59}",
+        "\u{1D414}\u{1D427}\u{1D422}\u{1D42D}\u{1D432}",
+        "\u{24CA}\u{24DD}\u{24D8}\u{24E3}\u{24E8}",
+        "\u{1D1C}\u{0274}\u{026A}\u{1D1B}\u{028F}",
+        "Un\u{2170}ty",
+        "U\u{0308}nity",
+        "Unrea\u{0301}l Engine",
+        "\u{0395}ngine",
+        "Engine\u{2122}",
+    ] {
+        let text = SOURCE2.replace("\"Source 2\"", &format!("\"{name}\""));
+        assert_eq!(parse_err(&text).code, codes::DESCRIPTOR_INVALID, "{name:?}");
+    }
+    for name in [
+        "Community Engine",
+        "MonoGame",
+        "Ren'Py",
+        "Unigine",
+        "Движок 2",
+        "Caf\u{00E9} Engine",
+    ] {
+        let text = SOURCE2.replace("\"Source 2\"", &format!("\"{name}\""));
+        assert_eq!(one(&text).len(), 1, "{name}");
+    }
 }
 
 /// "Grief unknown games": a rule with no literal anchor — or one on a program, a wrapper, a
@@ -626,6 +674,50 @@ fn codes_belong_to_the_first_publisher_and_counts_are_capped() {
     let s = &set.skipped()[0];
     assert_eq!((s.index, s.error.code), (0, codes::ENGINE_CODE_TAKEN));
     assert_eq!(s.error.param("owner"), Some("valve-fan"));
+
+    // A look-alike of an owned code is that code: `s0urce-2` is `source2` read aloud.
+    let set = set_of(&[
+        (Moderation::Moderated, "valve-fan", false, SOURCE2),
+        (
+            Moderation::Unchecked,
+            "squatter",
+            false,
+            &SOURCE2.replace("source2", "s0urce-2"),
+        ),
+        (
+            Moderation::Unchecked,
+            "valve-fan",
+            false,
+            &SOURCE2
+                .replace("source2", "source-2")
+                .replace("Source 2", "Source Two"),
+        ),
+    ]);
+    assert_eq!(set.len(), 2, "{:?}", set.skipped());
+    let s = &set.skipped()[0];
+    assert_eq!(
+        (s.index, s.error.code, s.error.param("owner")),
+        (1, codes::ENGINE_CODE_TAKEN, Some("valve-fan"))
+    );
+    // A digit is not a letter here (it is, for the reserved codes): two publishers'
+    // `id-tech-6` and `id-tech-8` are two codes.
+    let set = set_of(&[
+        (
+            Moderation::Unchecked,
+            "a",
+            false,
+            &SOURCE2.replace("source2", "id-tech-6"),
+        ),
+        (
+            Moderation::Unchecked,
+            "b",
+            false,
+            &SOURCE2
+                .replace("source2", "id-tech-8")
+                .replace("Source 2", "Tech Eight"),
+        ),
+    ]);
+    assert_eq!(set.len(), 2, "{:?}", set.skipped());
 
     // One publisher may ship several descriptors of its own code; the same one twice is one.
     let set = set_of(&[
@@ -1846,7 +1938,13 @@ fn engine_codes_serialise_as_the_bare_string() {
     assert_eq!(d.engine, astra_game_launcher::Engine::UnityIl2cpp);
     assert_eq!(serde_json::to_value(&d.engine).unwrap(), "unity-il2cpp");
     let bad = old.replace("unity-il2cpp", "Unity Il2cpp");
-    assert!(serde_json::from_str::<Detection>(&bad).is_err());
+    let e = serde_json::from_str::<Detection>(&bad)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("not an engine code") && !e.contains("descriptor"),
+        "{e}"
+    );
     for e in astra_game_launcher::Engine::ALL {
         let c = EngineCode::from(e);
         assert_eq!((c.as_str(), c.builtin()), (e.code(), Some(e)));

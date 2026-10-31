@@ -34,7 +34,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-pub use descriptor::Descriptor;
+pub use descriptor::{Descriptor, is_reserved_code, is_valid_engine_code};
 pub(crate) use eval::pass_b;
 
 use crate::detect::Engine;
@@ -47,16 +47,6 @@ use crate::error::{LauncherError, Result, codes};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct EngineCode(String);
-
-/// Whether `code` is spelled as an engine code may be: `^[a-z][a-z0-9-]{1,31}$`.
-pub fn is_valid_engine_code(code: &str) -> bool {
-    let b = code.as_bytes();
-    (2..=32).contains(&b.len())
-        && b[0].is_ascii_lowercase()
-        && b[1..]
-            .iter()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
-}
 
 impl EngineCode {
     /// The code, if it is spelled as one may be ([`is_valid_engine_code`]).
@@ -88,36 +78,13 @@ impl EngineCode {
         self.builtin() == Some(Engine::Unknown)
     }
 
-    /// Whether no engine descriptor may declare this code: a built-in one, `unknown`, or one
-    /// that reads as one of them once `_` is taken for `-`, hyphens are dropped and look-alike
-    /// letters and digits are folded together (`unity-mon0`, `un1ty-x`, `g0dot`). Codes that
-    /// begin with a built-in engine's family name (`unity-…`, `unreal…`, `godot…`) or with
-    /// `astra`, and codes holding `ambiguous`, are reserved too: they would read as Astra's own.
+    /// Whether no engine descriptor may declare this code ([`is_reserved_code`]): a built-in
+    /// one, `unknown`, or one that reads as one of them once folded (`unity-mon0`, `un1ty-x`,
+    /// `g0dot`); one beginning with a built-in engine's family name or `astra`; one holding
+    /// `ambiguous`. They would read as Astra's own.
     pub fn is_reserved(&self) -> bool {
         is_reserved_code(&self.0)
     }
-}
-
-/// See [`EngineCode::is_reserved`]. Applies to any spelling, valid or not.
-pub fn is_reserved_code(code: &str) -> bool {
-    let folded = descriptor::fold_confusables(code);
-    let builtins = Engine::ALL.iter().map(|e| e.code());
-    for b in builtins.clone() {
-        if folded == descriptor::fold_confusables(b) {
-            return true;
-        }
-    }
-    let families = builtins
-        .map(|b| b.split('-').next().unwrap_or(b))
-        .chain(descriptor::RESERVED_CODE_PREFIXES.iter().copied());
-    for f in families {
-        if folded.starts_with(&descriptor::fold_confusables(f)) {
-            return true;
-        }
-    }
-    descriptor::RESERVED_CODE_INFIXES
-        .iter()
-        .any(|w| folded.contains(&descriptor::fold_confusables(w)))
 }
 
 impl From<Engine> for EngineCode {
@@ -126,15 +93,27 @@ impl From<Engine> for EngineCode {
     }
 }
 
+/// A string that is not an engine code ([`is_valid_engine_code`]): what reading a
+/// [`crate::Detection`] whose `engine` is misspelled says. Not a descriptor's fault, so not a
+/// `descriptor-*` code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotAnEngineCode(pub String);
+
+impl fmt::Display for NotAnEngineCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "not an engine code: {:?}", self.0)
+    }
+}
+
+impl std::error::Error for NotAnEngineCode {}
+
 impl TryFrom<String> for EngineCode {
-    type Error = LauncherError;
-    fn try_from(s: String) -> Result<Self> {
+    type Error = NotAnEngineCode;
+    fn try_from(s: String) -> std::result::Result<Self, NotAnEngineCode> {
         if is_valid_engine_code(&s) {
             Ok(EngineCode(s))
         } else {
-            Err(LauncherError::new(codes::DESCRIPTOR_INVALID)
-                .with("field", "engine")
-                .with("reason", "not an engine code"))
+            Err(NotAnEngineCode(s))
         }
     }
 }
@@ -289,9 +268,10 @@ impl EngineSet {
                 );
                 continue;
             }
+            // Owned as a person reads it: a look-alike of an owned code is that code.
             if let Some((code, owner)) = d.codes().find_map(|(c, _)| {
                 owners
-                    .get(c.as_str())
+                    .get(&descriptor::code_identity(c.as_str()))
                     .filter(|owner| **owner != origin.publisher)
                     .map(|owner| (c.as_str().to_owned(), owner.clone()))
             }) {
@@ -327,7 +307,7 @@ impl EngineSet {
             *count += 1;
             for (c, _) in d.codes() {
                 owners
-                    .entry(c.as_str().to_owned())
+                    .entry(descriptor::code_identity(c.as_str()))
                     .or_insert_with(|| origin.publisher.clone());
             }
             set.entries.push(Admitted {

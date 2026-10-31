@@ -123,12 +123,22 @@ pub(crate) fn check_component(c: &str) -> bool {
         .unwrap_or("")
         .trim_end()
         .to_ascii_uppercase();
+    // `COM0`-`COM9` and `LPT0`-`LPT9`, and Windows reads the superscripts `¹²³` as digits there
+    // too (`COM¹` is a device).
+    let numbered = stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"))
+        .is_some_and(|n| {
+            let mut c = n.chars();
+            matches!(
+                (c.next(), c.next()),
+                (Some('0'..='9' | '\u{00B9}' | '\u{00B2}' | '\u{00B3}'), None)
+            )
+        });
     let device = matches!(
         stem.as_str(),
         "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
-    ) || ((stem.starts_with("COM") || stem.starts_with("LPT"))
-        && stem.len() == 4
-        && stem.as_bytes()[3].is_ascii_digit());
+    ) || numbered;
     !device
 }
 
@@ -671,7 +681,22 @@ mod tests {
     #[test]
     fn components_refuse_windows_traps() {
         for bad in [
-            "", ".", "..", "a:b", "CON", "com1.txt", "lpt9", "x.", "x ", "a*b", "a\u{0}b",
+            "",
+            ".",
+            "..",
+            "a:b",
+            "CON",
+            "com1.txt",
+            "lpt9",
+            "x.",
+            "x ",
+            "a*b",
+            "a\u{0}b",
+            "COM0",
+            "lpt0.log",
+            "COM\u{00B9}",
+            "com\u{00B2}.txt",
+            "LPT\u{00B3}",
         ] {
             assert!(!check_component(bad), "{bad:?}");
         }
@@ -681,6 +706,8 @@ mod tests {
             "BepInEx",
             "com10",
             "a.b.c",
+            "COM\u{2074}",
+            "comx",
         ] {
             assert!(check_component(good), "{good:?}");
         }
