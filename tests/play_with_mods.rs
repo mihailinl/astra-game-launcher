@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 
 use astra_game_launcher::{
     ArmedBy, Choice, ChoiceKind, ChoiceSource, GameAction, LastRun, LauncherError, Ledger,
-    LoaderReason, LoaderStatus, MODS_CHOICE_UNREADABLE, ModManager, ModsEnv, Platform, ProcessPlan,
-    STEAM_LAUNCH_OPTIONS_DOORSTOP, codes, installed, loader_status, mods_last_run,
-    prepare_launch_with, set_mods_choice,
+    LoaderReason, LoaderStatus, MODS_CHOICE_UNREADABLE, MODS_PACK_PATH_REFUSED, ModManager,
+    ModsEnv, Platform, ProcessPlan, STEAM_LAUNCH_OPTIONS_DOORSTOP, codes, installed, loader_status,
+    mods_last_run, prepare_launch_with, set_mods_choice,
 };
 use common::*;
 
@@ -972,4 +972,66 @@ fn a_fifo_in_place_of_their_doorstop_config_never_blocks_a_play() {
         .expect("Play opened a FIFO and waited for a writer")
         .unwrap();
     assert!(args.contains(&"--doorstop-target-assembly".to_owned()));
+}
+
+// ---- paths in their pack's ini: judged by their text before anything touches them ----
+
+#[test]
+fn a_pack_path_written_as_a_share_or_a_device_is_left_out_and_said() {
+    let w = World::new(true);
+    w.install(IL2CPP_DECL);
+    let theirs = w.theirs("Default");
+    bepinex6_il2cpp_at(&theirs, "6.0.0-be.788+5b766a3");
+    plugin_at(&theirs, "M/M.dll");
+    write(&theirs.join("unstripped corlib/mscorlib.dll"), b"MZ");
+    let refused = [
+        "//host/share/x",
+        r"/\host\x",
+        r"\\host\share\x",
+        r"\\.\pipe\x",
+        r"\\?\UNC\host\share\x",
+        r"\\?\GLOBALROOT\x",
+    ];
+    let ini = format!(
+        "[General]\nboot_config_override = \\\\host\\boot.config\n[UnityMono]\ndll_search_path_override = {};unstripped corlib;C:\\Corlib\n[Il2Cpp]\ncorlib_dir = \\\\host\\dotnet\ncoreclr_path = //./pipe/coreclr\n",
+        refused.join(";")
+    );
+    write(&theirs.join("doorstop_config.ini"), ini.as_bytes());
+    w.choose(ChoiceKind::With, Some(&theirs));
+    let p = w.play().unwrap();
+    assert_eq!(p.warnings, [MODS_PACK_PATH_REFUSED]);
+    let after = |opt: &str| {
+        let i = p.args.iter().position(|a| a == opt)?;
+        Some(p.args[i + 1].clone())
+    };
+    // Only what is not a share or a device, the drive path as written.
+    assert_eq!(
+        after("--doorstop-mono-dll-search-path-override").unwrap(),
+        format!(
+            "{};C:\\Corlib",
+            w.their_text(&theirs.join("unstripped corlib"))
+        )
+    );
+    assert_eq!(after("--doorstop-boot-config-override"), None);
+    // Their runtime's refused paths give way to their pack's own dotnet/.
+    assert_eq!(
+        after("--doorstop-clr-corlib-dir").unwrap(),
+        w.their_text(&theirs.join("dotnet"))
+    );
+    assert_eq!(
+        after("--doorstop-clr-runtime-coreclr-path").unwrap(),
+        w.their_text(&theirs.join("dotnet/coreclr.dll"))
+    );
+    let all = format!("{:?}{}", p.args, w.chain_ini().unwrap());
+    assert!(
+        !all.contains("host") && !all.contains("pipe") && !all.contains("GLOBALROOT"),
+        "{all}"
+    );
+
+    // Nothing refused: no warning.
+    write(
+        &theirs.join("doorstop_config.ini"),
+        b"[UnityMono]\ndll_search_path_override = unstripped corlib\n",
+    );
+    assert!(w.play().unwrap().warnings.is_empty());
 }

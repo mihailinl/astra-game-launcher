@@ -570,8 +570,12 @@ fn run(argv: &[String]) -> Result<Output, LauncherError> {
                     added_roots: Vec::new(),
                 }),
                 Some("with") => {
-                    let want = std::fs::canonicalize(a.need("--source")?).map_err(|e| {
-                        LauncherError::io(e).with("path", a.need("--source").unwrap_or_default())
+                    let source = Path::new(a.need("--source")?);
+                    // Judged by its spelling before anything touches it: on Windows merely
+                    // asking about a share opens an SMB session with the user's credentials.
+                    gl::check_local_path(source)?;
+                    let want = std::fs::canonicalize(source).map_err(|e| {
+                        LauncherError::io(e).with("path", source.display().to_string())
                     })?;
                     let s = sources
                         .iter()

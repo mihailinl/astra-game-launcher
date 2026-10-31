@@ -4,9 +4,10 @@ version = 4
 
 [[package]]
 name = "astra-game-launcher"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "hex",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

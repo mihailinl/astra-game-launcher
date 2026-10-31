@@ -38,14 +38,17 @@ use std::path::{Path, PathBuf};
 
 use super::{
     Budget, ChoiceKind, ChoiceSource, ModsDecl, ModsEnv, ModsLoader, Unplayable, accepts,
-    bepinex_at, discover, melonloader_at, read_choice,
+    bepinex_at, discover, melonloader_at, read_choice_file,
 };
 use crate::doorstop::{self, Generation};
 use crate::error::{LauncherError, Result, codes};
 use crate::game::{GameTarget, Platform};
 use crate::ledger::Ledger;
 use crate::manifest::Manifest;
-use crate::paths::{FileState, checked_rel, existing_target, file_state, find_any_case};
+use crate::mods::choice::OnDisk;
+use crate::paths::{
+    FileState, WindowsText, checked_rel, existing_target, file_state, find_any_case,
+};
 use crate::plan::is_loader_proxy;
 
 /// A path for the game's command line or `chain.ini`.
@@ -70,6 +73,9 @@ pub(crate) struct WithMods {
     pub boot_config: Option<GamePath>,
     /// IL2CPP: their .NET runtime's folder and `coreclr.dll`.
     pub clr: Option<(GamePath, GamePath)>,
+    /// Values of their pack's ini refused by their text (`<reason>: <value>`) and left out:
+    /// a share, a device, a verbatim namespace.
+    pub refused: Vec<String>,
 }
 
 /// The new refusals' codes, with their params.
@@ -84,32 +90,37 @@ fn unsupported(reason: &str) -> LauncherError {
     LauncherError::new(codes::MODS_UNSUPPORTED).with("reason", reason)
 }
 
-/// A Windows path written in a file: `C:\…`, `C:/…`, `\\server\…`.
-fn windows_absolute(s: &str) -> bool {
-    let b = s.as_bytes();
-    (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/'))
-        || s.starts_with("\\\\")
-}
-
-/// One path from their `doorstop_config.ini`, found: below `root`, then the game folder.
-fn resolve(value: &str, root: &Path, game_root: &Path) -> Option<GamePath> {
+/// One path from their `doorstop_config.ini`: `Ok(None)` when it names nothing that is there,
+/// `Err(reason)` when it is refused. Judged by its text first, as the Windows game would read it
+/// (`paths::windows_text_verdict`) — a share (`\\host\…`, `//host/…`), a device (`\\.\…`), a
+/// verbatim namespace — before anything touches it or it reaches the command line or chain.ini.
+/// A drive-letter path is passed as written; a path from the root is looked up on this machine
+/// (and judged by its prefix here too); a relative one is found below `root`, then the game
+/// folder.
+fn resolve(
+    value: &str,
+    root: &Path,
+    game_root: &Path,
+) -> std::result::Result<Option<GamePath>, &'static str> {
     let value = value.trim();
     if value.is_empty() {
-        return None;
+        return Ok(None);
     }
-    if windows_absolute(value) {
-        return Some(GamePath::Verbatim(value.to_owned()));
-    }
-    if value.starts_with('/') {
-        return Path::new(value)
-            .exists()
-            .then(|| GamePath::Local(PathBuf::from(value)));
+    match crate::paths::windows_text_verdict(value)? {
+        WindowsText::Drive => return Ok(Some(GamePath::Verbatim(value.to_owned()))),
+        WindowsText::Rooted => {
+            crate::paths::local_verdict(Path::new(value))?;
+            return Ok(Path::new(value)
+                .exists()
+                .then(|| GamePath::Local(PathBuf::from(value))));
+        }
+        WindowsText::Relative => {}
     }
     let parts: Vec<&str> = value.split(['\\', '/']).collect();
-    [root, game_root]
+    Ok([root, game_root]
         .iter()
         .find_map(|base| find_any_case(base, &parts))
-        .map(GamePath::Local)
+        .map(GamePath::Local))
 }
 
 /// Whether the file at `rel` (`/`-separated, below `profile`) is whole: the ledger's digest.
@@ -150,14 +161,19 @@ pub(crate) fn resolve_play(
         Some(d) => d,
     };
     // An answer that cannot be read is no answer: never a reason this Play fails.
-    let (choice, choice_unreadable) = match read_choice(profile) {
-        Ok(c) => (c, None),
+    let (file, choice_unreadable) = match read_choice_file(profile) {
+        Ok(f) => (f, None),
         Err(e) => (None, Some(e.to_string())),
     };
-    let Some(choice) = choice else {
+    // The folders the person added count even before they answered (`"choice": null`).
+    let added_roots = file
+        .as_ref()
+        .map(|f| f.added_roots.clone())
+        .unwrap_or_default();
+    let Some(choice) = file.and_then(OnDisk::answer) else {
         // Asked once: only when the integration can play with mods and something is offered.
         if super::capability(game, Some(ledger)).is_ok() {
-            let offered = discover(game, Some(ledger), &[], env)
+            let offered = discover(game, Some(ledger), &added_roots, env)
                 .iter()
                 .filter(|s| s.playable.is_ok())
                 .count();
@@ -237,10 +253,11 @@ pub(crate) fn resolve_play(
 
     // Their mods are still there, and still a BepInEx the chain runs beside.
     let root = &source.root;
-    let usable = root.is_absolute()
-        && root
-            .to_str()
-            .is_some_and(|s| !s.contains(['\n', '\r', '\0']));
+    // Never a share, a device or a verbatim namespace: refused before anything touches it.
+    crate::paths::require_local(root)?;
+    let usable = root
+        .to_str()
+        .is_some_and(|s| !s.contains(['\n', '\r', '\0']));
     if !usable || !root.is_dir() {
         return Err(source_missing(&source));
     }
@@ -285,27 +302,33 @@ pub(crate) fn resolve_play(
             .and_then(|t| crate::ini::get(t, section, key))
             .filter(|v| !v.trim().is_empty())
     };
+    // A value refused by its text is dropped, and the Play says so (`mods-pack-path-refused`).
+    let mut refused: Vec<String> = Vec::new();
+    let mut take = |v: &str| match resolve(v, root, &game_root) {
+        Ok(p) => p,
+        Err(reason) => {
+            refused.push(format!("{reason}: {}", v.trim()));
+            None
+        }
+    };
     let search_override = get("UnityMono", "dll_search_path_override")
         .or_else(|| get("UnityDoorstop", "dllSearchPathOverride"))
-        .map(|v| {
-            v.split(';')
-                .filter_map(|p| resolve(p, root, &game_root))
-                .collect()
-        })
+        .map(|v| v.split(';').filter_map(&mut take).collect())
         .unwrap_or_default();
-    let boot_config =
-        get("General", "boot_config_override").and_then(|v| resolve(&v, root, &game_root));
+    let boot_config = get("General", "boot_config_override").and_then(|v| take(&v));
     let clr = match decl.loader {
         ModsLoader::Bepinex5 => None,
         ModsLoader::Bepinex6Il2cpp { .. } => {
-            let corlib = get("Il2Cpp", "corlib_dir").unwrap_or_else(|| "dotnet".to_owned());
-            let coreclr =
-                get("Il2Cpp", "coreclr_path").unwrap_or_else(|| "dotnet/coreclr.dll".to_owned());
-            let found = |v: &str| {
-                resolve(v, root, &game_root)
-                    .ok_or_else(|| source_missing(&source).with("file", v.to_owned()))
+            // Theirs, or (one refused, or none set) their pack's own `dotnet/` beside it.
+            let mut found = |key: &str, default: &str| {
+                let theirs = get("Il2Cpp", key).and_then(|v| take(&v));
+                theirs
+                    .or_else(|| resolve(default, root, &game_root).ok().flatten())
+                    .ok_or_else(|| source_missing(&source).with("file", default.to_owned()))
             };
-            Some((found(&corlib)?, found(&coreclr)?))
+            let corlib = found("corlib_dir", "dotnet")?;
+            let coreclr = found("coreclr_path", "dotnet/coreclr.dll")?;
+            Some((corlib, coreclr))
         }
     };
     Ok(Resolved {
@@ -316,6 +339,7 @@ pub(crate) fn resolve_play(
             search_override,
             boot_config,
             clr,
+            refused,
         }),
         choice_unreadable: None,
     })
@@ -464,16 +488,6 @@ pub(crate) fn without_doorstop_options(args: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_a_windows_path_is_passed_as_written() {
-        assert!(windows_absolute("C:\\x"));
-        assert!(windows_absolute("z:/x"));
-        assert!(windows_absolute("\\\\server\\share"));
-        assert!(!windows_absolute("BepInEx\\unstripped"));
-        assert!(!windows_absolute("/home/u"));
-        assert!(!windows_absolute("C:"));
-    }
 
     #[test]
     fn the_manifest_s_doorstop_options_go_with_their_values() {

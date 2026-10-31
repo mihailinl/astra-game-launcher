@@ -122,8 +122,22 @@ set_mods_choice(&profile_dir, Choice { choice: ChoiceKind::With,
   (`not-installed`, `platform`, …).
 - **The choice.** `<profile>/mods-choice.json`
   (`{"schema":1,"choice":"with"|"without","source":{…},"added_roots":[…]}`), written atomically
-  under the profile lock by `set_mods_choice` only; its name is reserved like the ledger's. An
-  update keeps it, `uninstall` removes it, so a reinstall asks again.
+  under the profile lock by `set_mods_choice` and `add_mods_root` only; its name is reserved like
+  the ledger's. An update keeps it, `uninstall` removes it, so a reinstall asks again. 0.4.1:
+  `add_mods_root` remembers a folder the person picked before they answered (`"choice": null`:
+  no answer, Play still asks, discovery looks there; launcher 0.4.0 cannot read that file, which
+  its own rule makes harmless — an answer it cannot read is no answer), and an answer keeps the
+  folders already remembered; past 32 the oldest goes, so adding one never fails. Every folder —
+  added, a source's root — must be an absolute drive-letter path on Windows (a mapped network
+  drive or `subst` behind the letter is the user's own setting and is followed): a share
+  (`\\host\share`, `\\?\UNC\…`), a device (`\\.\pipe\…`) or another verbatim namespace is
+  refused (`path-escapes`, `reason` = `unc`, `verbatim-unc`, `device`, `verbatim`,
+  `not-absolute`), judged on the spelling given before any filesystem call, since on Windows
+  merely asking about a share opens an SMB session with the user's credentials
+  (`check_local_path`). Folders are remembered without `\\?\`. The paths in the player's pack's
+  `doorstop_config.ini` are judged the same way, by their text as the Windows game reads them
+  (`//host/…` and `/\host\…` are shares too): a refused one is left out of the Play, which says
+  so with the warning `mods-pack-path-refused`.
 
 - **Play.** `prepare_launch` reads the choice (its signature is unchanged; `prepare_launch_with`
   takes the `ModsEnv`). Not asked yet while something could be played together:
@@ -396,9 +410,15 @@ rules: a launcher beside a Unity game is not a Unity game.
   the game first). `prepare_launch` writes none, so a refusal between the two leaves no fresh arm;
   a failed write fails the launch before anything starts, and a failed spawn puts back what was
   there. A game without a Steam appid gets none. It is not a file of the ledger's, uninstall
-  leaves it (removing the profile folder is the caller's), and like the ledger, its lock and the
+  leaves it (removing the profile folder is the caller's; the one deletion is
+  `remove_play_arm_if_older`, below), and like the ledger, its lock and the
   backups its name is reserved: no manifest file may be named `play-arm.json`. Known gap, shared
   by all four names: a Windows 8.3 short name (`PLAY-A~1.JSO`) is not recognised as one of them.
+  `remove_play_arm_if_older(profile, decided_unix_ms)` (0.4.1) is the one way to take an arm
+  away: under the profile lock, read without following a link or waiting on a FIFO, removed only
+  when its `started_unix_ms` is older than `decided_unix_ms`; a link in its place (on Windows a
+  directory link or junction too) is removed as a link. An arm it cannot parse stays (`false`);
+  one it cannot read for any other reason is an error, never a silent `false`.
 - **What Play records.** It is written to the ledger last, once nothing can refuse the Play any
   more: a refused Play records nothing. Uninstall keeps the Proton override that loads a shared
   proxy (`share-loader`) still beside the game, as it does for a proxy kept for another loader.
@@ -425,7 +445,7 @@ algorithm) and bakes it in:
 
 ```
 astra-game-launcher --version
-# astra-game-launcher 0.4.0 (source tree sha256 <hex>)
+# astra-game-launcher 0.4.1 (source tree sha256 <hex>)
 ```
 
 Astra's own release notes / About screen show the same hash for the commit it pinned. A GitHub
@@ -435,7 +455,7 @@ a hash you compute yourself. Recompute it from a clone of a tag with one line (r
 and `sha256sum`; `scripts/tree-hash.sh` is this same command, runnable against any directory):
 
 ```bash
-V=0.4.0 REPO=https://github.com/mihailinl/astra-game-launcher
+V=0.4.1 REPO=https://github.com/mihailinl/astra-game-launcher
 rm -rf /tmp/astra-gl-verify && mkdir -p /tmp/astra-gl-verify && \
 git clone --quiet --depth 1 --branch "v$V" "$REPO" /tmp/astra-gl-verify/src && \
 cd /tmp/astra-gl-verify/src && git archive "v$V" | tar -x -C /tmp/astra-gl-verify && \

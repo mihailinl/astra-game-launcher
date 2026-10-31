@@ -1,6 +1,6 @@
 [package]
 name = "astra-game-launcher"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.89"
 license = "MPL-2.0"
@@ -33,6 +33,10 @@ sha2 = "0.10"
 hex = "0.4"
 zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 ureq = { version = "3", optional = true, default-features = false, features = ["rustls"] }
+
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW / O_NONBLOCK for reading a play-arm that may have been swapped for a link or a FIFO.
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

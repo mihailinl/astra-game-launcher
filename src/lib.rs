@@ -49,8 +49,9 @@ pub use former::FormerKind;
 pub use game::{GameTarget, Platform, proton_prefix_for, steam_appid_of_dir, steam_appids_of_dir};
 pub use install::{UninstallReport, install, installed, uninstall};
 pub use launch::{
-    MODS_CHOICE_UNREADABLE, ProcessPlan, STEAM_LAUNCH_OPTIONS_DOORSTOP, Spawn, StdSpawn,
-    find_steam, launch, prepare_launch, prepare_launch_with,
+    MODS_CHOICE_UNREADABLE, MODS_PACK_PATH_REFUSED, ProcessPlan, STEAM_LAUNCH_OPTIONS_DOORSTOP,
+    Spawn, StdSpawn, find_steam, launch, prepare_launch, prepare_launch_with,
+    remove_play_arm_if_older,
 };
 pub use ledger::{
     LEDGER_SCHEMA, Ledger, LedgerBackup, LedgerFile, LedgerGame, LedgerGameFile, LedgerSource,
@@ -63,8 +64,8 @@ pub use manifest::{
 pub use mods::{
     ArmedBy, Choice, ChoiceKind, ChoiceSource, LOADER_STATUS_FILE_NAME, LastRun, LoaderKind,
     LoaderReason, LoaderStatus, MODS_CHOICE_SCHEMA, ModLoader, ModManager, ModSource, ModsDecl,
-    ModsEnv, ModsLoader, Unplayable, default_mods_source, discover_mods, discover_mods_in,
-    loader_status, mods_choice, mods_last_run, set_mods_choice,
+    ModsEnv, ModsLoader, Unplayable, add_mods_root, default_mods_source, discover_mods,
+    discover_mods_in, loader_status, mods_choice, mods_last_run, set_mods_choice,
 };
 pub use package::{GiPackage, Limits, PackageSummary, SummaryConfigWrite, SummaryGameFile};
 pub use plan::{
@@ -87,6 +88,16 @@ pub const PLAY_ARM_FILE_NAME: &str = paths::PLAY_ARM_FILE;
 
 /// The mods choice's file name inside a profile (see [`set_mods_choice`]).
 pub const MODS_CHOICE_FILE_NAME: &str = paths::MODS_CHOICE_FILE;
+
+/// `path-escapes` (`reason` = `unc`, `verbatim-unc`, `device`, `verbatim`, `not-absolute`) unless
+/// `path` is an absolute drive-letter path on Windows (a mapped network drive or `subst` behind the
+/// letter is the user's own setting and is followed), or from the root on Unix — judged from its
+/// spelling alone, before anything touches it: on Windows merely asking about `\\host\share`
+/// opens an SMB session with the user's credentials, and `\\.\pipe\…` connects to a pipe. Every
+/// folder the launcher is given goes through this; a caller about to touch one may too.
+pub fn check_local_path(path: &std::path::Path) -> Result<()> {
+    paths::require_local(path)
+}
 
 /// This build's own version (`Cargo.toml`'s `[package].version`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

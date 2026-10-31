@@ -31,8 +31,10 @@
 //! fails puts back what was there. `started_unix_ms` is the moment Astra asked Steam to start the
 //! game, not the moment the game's process started: Steam may update the game first. A failed
 //! write fails the launch before anything is spawned. A game without a Steam appid gets none. The
-//! launcher never deletes an arm a launch left (removing the profile folder is the caller's), it
-//! is not a file of the ledger's, and no manifest file may be named `play-arm.json`.
+//! one way an arm a launch left is taken away is [`remove_play_arm_if_older`] (the daemon's crash
+//! guard: under the lock, only an arm older than its decision); uninstall leaves it (removing the
+//! profile folder is the caller's). It is not a file of the ledger's, and no manifest file may be
+//! named `play-arm.json`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -69,7 +71,8 @@ pub struct ProcessPlan {
     /// Things the person should know before playing, as codes:
     /// [`STEAM_LAUNCH_OPTIONS_DOORSTOP`] (their Steam launch options for the game pass Doorstop
     /// options of their own, which may win over these), [`MODS_CHOICE_UNREADABLE`] (their
-    /// answer about their mods could not be read). Never a reason not to play.
+    /// answer about their mods could not be read), [`MODS_PACK_PATH_REFUSED`] (a path in their
+    /// pack's Doorstop settings was left out). Never a reason not to play.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     /// The play-arm [`launch`] writes right before it spawns (a Steam game). Only
@@ -106,6 +109,11 @@ pub const STEAM_LAUNCH_OPTIONS_DOORSTOP: &str = "steam-launch-options-doorstop";
 /// and nothing could be played together anyway, so this Play is Astra's alone, as if the player
 /// had not been asked yet. Never a refusal.
 pub const MODS_CHOICE_UNREADABLE: &str = "mods-choice-unreadable";
+
+/// [`ProcessPlan::warnings`]: a path in the player's pack's `doorstop_config.ini` was left out of
+/// this Play with mods because of how it is written — a share (`\\host\…`, `//host/…`), a device
+/// (`\\.\…`), a verbatim namespace — before anything touched it. The Play goes on without it.
+pub const MODS_PACK_PATH_REFUSED: &str = "mods-pack-path-refused";
 
 /// Starts a process. The daemon passes its own; [`StdSpawn`] is the plain one.
 pub trait Spawn {
@@ -191,6 +199,113 @@ pub fn launch(plan: &ProcessPlan, spawner: &dyn Spawn) -> Result<()> {
         return Err(e);
     }
     Ok(())
+}
+
+/// A play-arm written before `decided_unix_ms` (ms since the UNIX epoch): the crash guard's
+/// compare-and-delete. Under the profile lock (so no [`launch`] writes a fresh arm in between) it
+/// reads `<profile>/play-arm.json` without following a link and without waiting on a FIFO, and
+/// deletes it only when its `started_unix_ms` is older than `decided_unix_ms`. A link in its place
+/// (on Windows a directory symlink or a junction too) is removed as a link, never followed: it is
+/// no arm of ours.
+///
+/// The contract: `Ok(true)` when something was removed; `Ok(false)` for no arm (or one gone by the
+/// time it is removed), a newer one, one that cannot be parsed or says no `started_unix_ms` (it
+/// stays: it arms nothing the runner would take), and anything that is not a regular file (a
+/// folder, a FIFO), which is left alone. `Err` when the arm is there and cannot be read for any
+/// other reason (permissions): never a silent `false` for that.
+pub fn remove_play_arm_if_older(profile_dir: &Path, decided_unix_ms: u64) -> Result<bool> {
+    let profile = match canonical_dir(profile_dir) {
+        Ok(p) => p,
+        Err(_) if fs::symlink_metadata(profile_dir).is_err() => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let _lock = ProfileLock::acquire(&profile)?;
+    let path = profile.join(PLAY_ARM_FILE);
+    match fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(LauncherError::io_at(&e, &path)),
+        Ok(m) if m.file_type().is_symlink() => return remove_gone_ok(&path, true),
+        Ok(m) if !m.is_file() => return Ok(false),
+        Ok(_) => {}
+    }
+    let Some(text) = read_arm_no_follow(&path)? else {
+        return Ok(false);
+    };
+    #[derive(Deserialize)]
+    struct Started {
+        started_unix_ms: u64,
+    }
+    let Ok(Started { started_unix_ms }) = serde_json::from_slice::<Started>(&text) else {
+        return Ok(false);
+    };
+    if started_unix_ms >= decided_unix_ms {
+        return Ok(false);
+    }
+    remove_gone_ok(&path, false)
+}
+
+/// Removes the arm at `path` (`link`: a link found in its place, removed as a link: on Windows a
+/// directory link or junction with `remove_dir`, which takes the link and never what it points
+/// at). `Ok(false)` when it is gone already.
+fn remove_gone_ok(path: &Path, link: bool) -> Result<bool> {
+    #[cfg(windows)]
+    let dir_link = link
+        && fs::symlink_metadata(path).is_ok_and(|m| {
+            use std::os::windows::fs::FileTypeExt;
+            m.file_type().is_symlink_dir()
+        });
+    #[cfg(not(windows))]
+    let dir_link = {
+        let _ = link;
+        false
+    };
+    let removed = if dir_link {
+        fs::remove_dir(path)
+    } else {
+        fs::remove_file(path)
+    };
+    match removed {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(LauncherError::io_at(&e, path)),
+    }
+}
+
+/// The bytes of the regular file at `path`, opened without following a link and without waiting
+/// on a FIFO (it may have been swapped since it was looked at); `None` when it is not a regular
+/// file, a link, or more than any arm.
+fn read_arm_no_follow(path: &Path) -> Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    let mut opts = fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT: a link (reparse point) is opened itself, not followed.
+        opts.custom_flags(0x0020_0000);
+    }
+    let f = match opts.open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        // A link put in its place since it was looked at (O_NOFOLLOW: ELOOP): no arm of ours.
+        #[cfg(unix)]
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Ok(None),
+        // Anything else (permissions, …) is said, never taken for "no arm".
+        Err(e) => return Err(LauncherError::io_at(&e, path)),
+    };
+    if !f.metadata().is_ok_and(|m| m.is_file()) {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    f.take(64 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| LauncherError::io_at(&e, path))?;
+    Ok((bytes.len() <= 64 * 1024).then_some(bytes))
 }
 
 /// How a path is written for the game.
@@ -626,6 +741,9 @@ pub fn prepare_launch_with(
     if resolved.choice_unreadable.is_some() {
         plan.warnings.push(MODS_CHOICE_UNREADABLE.to_owned());
     }
+    if mods.as_ref().is_some_and(|w| !w.refused.is_empty()) {
+        plan.warnings.push(MODS_PACK_PATH_REFUSED.to_owned());
+    }
 
     // Last, once nothing can refuse this Play any more: the chain's `chain.ini` (the one file a
     // Play with mods adds, in the profile), then what was rewritten is theirs now.
@@ -764,5 +882,31 @@ pub fn find_steam() -> Option<PathBuf> {
         std::env::split_paths(&path)
             .map(|d| d.join("steam"))
             .find(|p| p.is_file())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The crash guard's compare-and-delete waits for the profile lock: an arm `launch` is about to
+    /// write (it holds the lock) is never judged half-way.
+    #[test]
+    fn removing_an_old_arm_waits_for_the_profile_lock() {
+        let dir = std::env::temp_dir().join(format!("agl-arm-lock-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let dir = fs::canonicalize(&dir).unwrap();
+        let file = dir.join(PLAY_ARM_FILE);
+        fs::write(&file, br#"{"schema":1,"appid":1,"started_unix_ms":5}"#).unwrap();
+        let lock = ProfileLock::acquire(&dir).unwrap();
+        let d = dir.clone();
+        let t = std::thread::spawn(move || remove_play_arm_if_older(&d, 10).unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert!(file.exists(), "removed while the lock was held");
+        drop(lock);
+        assert!(t.join().unwrap());
+        assert!(!file.exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

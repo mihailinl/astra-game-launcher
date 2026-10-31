@@ -14,8 +14,8 @@ use std::time::{Duration, SystemTime};
 
 use astra_game_launcher::{
     Choice, ChoiceKind, ChoiceSource, LoaderKind, MODS_CHOICE_FILE_NAME, Manifest, ModManager,
-    ModSource, ModsEnv, ModsLoader, Platform, Unplayable, codes, default_mods_source,
-    discover_mods_in, mods_choice, set_mods_choice, uninstall,
+    ModSource, ModsEnv, ModsLoader, Platform, Unplayable, add_mods_root, codes,
+    default_mods_source, discover_mods_in, mods_choice, set_mods_choice, uninstall,
 };
 use common::*;
 
@@ -635,14 +635,21 @@ fn the_choice_round_trips_in_its_documented_shape() {
         })
     );
 
-    // "without" needs no source; "with" does; every path is absolute.
+    // "without" needs no source; "with" does; every path is absolute. A new answer keeps the
+    // folders already remembered (0.4.1): it never forgets one the person added.
     let without = Choice {
         choice: ChoiceKind::Without,
         source: None,
         added_roots: vec![],
     };
     set_mods_choice(&w.profile(), without.clone()).unwrap();
-    assert_eq!(mods_choice(&w.profile()).unwrap(), Some(without));
+    assert_eq!(
+        mods_choice(&w.profile()).unwrap(),
+        Some(Choice {
+            added_roots: vec![w.tmp.join("D")],
+            ..without
+        })
+    );
     let no_source = Choice {
         choice: ChoiceKind::With,
         source: None,
@@ -657,9 +664,22 @@ fn the_choice_round_trips_in_its_documented_shape() {
         source: None,
         added_roots: vec![PathBuf::from("relative/x")],
     };
+    let e = set_mods_choice(&w.profile(), relative).unwrap_err();
     assert_eq!(
-        set_mods_choice(&w.profile(), relative).unwrap_err().code,
-        codes::IO
+        (e.code, e.param("reason")),
+        (codes::PATH_ESCAPES, Some("not-absolute"))
+    );
+
+    // A file edited by hand is judged the same way when it is read.
+    fs::write(
+        w.profile().join(MODS_CHOICE_FILE_NAME),
+        br#"{"schema":1,"choice":null,"added_roots":["relative/x"]}"#,
+    )
+    .unwrap();
+    let e = mods_choice(&w.profile()).unwrap_err();
+    assert_eq!(
+        (e.code, e.param("reason")),
+        (codes::PATH_ESCAPES, Some("not-absolute"))
     );
 
     // A newer schema is said as such.
@@ -851,18 +871,199 @@ fn a_fifo_where_a_log_or_an_assembly_should_be_never_blocks_discovery() {
 }
 
 #[test]
-fn no_more_than_32_folders_can_be_added_by_hand() {
+fn no_more_than_32_folders_are_remembered_and_the_oldest_goes_first() {
     let w = World::new(NEW_APPID);
     w.install(MODS_DECL);
-    let roots: Vec<PathBuf> = (0..33).map(|i| w.tmp.join(&format!("added{i}"))).collect();
+    let roots: Vec<PathBuf> = (0..34).map(|i| w.tmp.join(&format!("added{i}"))).collect();
     let choice = |n: usize| Choice {
         choice: ChoiceKind::Without,
         source: None,
         added_roots: roots[..n].to_vec(),
     };
     set_mods_choice(&w.profile(), choice(32)).unwrap();
+    // Never stuck: one more pushes the oldest out.
+    set_mods_choice(&w.profile(), choice(34)).unwrap();
+    let kept = mods_choice(&w.profile()).unwrap().unwrap().added_roots;
+    assert_eq!(kept, roots[2..].to_vec());
+    add_mods_root(&w.profile(), &w.tmp.join("newest")).unwrap();
+    let kept = mods_choice(&w.profile()).unwrap().unwrap().added_roots;
+    assert_eq!(kept.len(), 32);
+    assert_eq!(kept.first(), Some(&roots[3]));
+    assert_eq!(kept.last(), Some(&w.tmp.join("newest")));
+}
+
+// ---- a folder added before any answer (0.4.1) ----
+
+#[test]
+fn a_folder_added_before_any_answer_is_looked_in_and_play_still_asks() {
+    let w = World::new(NEW_APPID);
+    w.install(MODS_DECL);
+    let custom = w.tmp.join("D/My mods");
+    profile_with_a_mod(&custom.join("profiles/Mine"));
+    add_mods_root(&w.profile(), &custom).unwrap();
+    // Twice is once.
+    add_mods_root(&w.profile(), &custom).unwrap();
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&fs::read(w.profile().join(MODS_CHOICE_FILE_NAME)).unwrap())
+            .unwrap();
     assert_eq!(
-        set_mods_choice(&w.profile(), choice(33)).unwrap_err().code,
-        codes::IO
+        on_disk,
+        serde_json::json!({"schema": 1, "choice": null, "added_roots": [custom]})
     );
+    // No answer: Play keeps asking, and discovery looks in the folder.
+    assert_eq!(mods_choice(&w.profile()).unwrap(), None);
+    let found = w.discover();
+    assert_eq!(
+        roots(&found),
+        [(ModManager::Folder, real(&custom.join("profiles/Mine")))]
+    );
+    let e = astra_game_launcher::prepare_launch_with(
+        &w.profile(),
+        &w.target(),
+        &vars(),
+        Some(Path::new("/opt/fake/steam")),
+        &w.env(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.param("sources")),
+        (codes::MODS_CHOICE_NEEDED, Some("1"))
+    );
+    assert_eq!(e.param("choice_unreadable"), None, "no answer, read whole");
+
+    // The answer then keeps the folder, and a folder added after it keeps the answer.
+    let answer = Choice {
+        choice: ChoiceKind::With,
+        source: Some(ChoiceSource::of(&found[0])),
+        added_roots: vec![],
+    };
+    set_mods_choice(&w.profile(), answer.clone()).unwrap();
+    let other = w.tmp.join("E");
+    add_mods_root(&w.profile(), &other).unwrap();
+    assert_eq!(
+        mods_choice(&w.profile()).unwrap(),
+        Some(Choice {
+            added_roots: vec![custom.clone(), other.clone()],
+            ..answer
+        })
+    );
+
+    // Refused before anything touches it; past 32 the oldest goes, the answer stays.
+    let e = add_mods_root(&w.profile(), Path::new("relative")).unwrap_err();
+    assert_eq!(
+        (e.code, e.param("reason")),
+        (codes::PATH_ESCAPES, Some("not-absolute"))
+    );
+    for i in 0..31 {
+        add_mods_root(&w.profile(), &w.tmp.join(&format!("F{i}"))).unwrap();
+    }
+    let now = mods_choice(&w.profile()).unwrap().unwrap();
+    assert_eq!(now.choice, ChoiceKind::With);
+    assert_eq!(now.added_roots.len(), 32);
+    assert_eq!(
+        now.added_roots[0], other,
+        "the oldest, `custom`, went first"
+    );
+}
+
+/// What launcher 0.4.0 does with a file 0.4.1 wrote with `"choice": null`. Its reader, as it was
+/// at c832515 (`src/mods/choice.rs`: `OnDisk { schema, #[serde(flatten)] choice: Choice }`, with
+/// `Choice::choice` a `ChoiceKind`, not an `Option`), cannot read it; and its rule for an answer
+/// that cannot be read (`mods::play::resolve_play` at c832515, the very code still here, tested by
+/// `an_answer_that_cannot_be_read_is_no_answer` in tests/play_with_mods.rs) is "no answer":
+/// Play asks, or plays Astra alone, and discovery looks in no added folder. Harmless. 0.4.0
+/// itself is not run here: that would need it as a git dev-dependency, which a `cargo test` with
+/// no network cannot fetch; its reader is copied instead.
+#[test]
+fn a_file_with_no_answer_is_no_answer_to_launcher_0_4_0() {
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct Choice040 {
+        choice: ChoiceKind,
+        #[serde(default)]
+        source: Option<ChoiceSource>,
+        #[serde(default)]
+        added_roots: Vec<PathBuf>,
+    }
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct OnDisk040 {
+        schema: u32,
+        #[serde(flatten)]
+        choice: Choice040,
+    }
+    let w = World::new(NEW_APPID);
+    w.install(MODS_DECL);
+    add_mods_root(&w.profile(), &w.tmp.join("D")).unwrap();
+    let text = fs::read_to_string(w.profile().join(MODS_CHOICE_FILE_NAME)).unwrap();
+    assert!(serde_json::from_str::<OnDisk040>(&text).is_err(), "{text}");
+    // And a file 0.4.1 writes with an answer is one 0.4.0 reads as before.
+    set_mods_choice(
+        &w.profile(),
+        Choice {
+            choice: ChoiceKind::Without,
+            source: None,
+            added_roots: vec![],
+        },
+    )
+    .unwrap();
+    let text = fs::read_to_string(w.profile().join(MODS_CHOICE_FILE_NAME)).unwrap();
+    let old: OnDisk040 = serde_json::from_str(&text).unwrap();
+    assert_eq!(old.choice.choice, ChoiceKind::Without);
+    assert_eq!(old.choice.added_roots, [w.tmp.join("D")]);
+}
+
+/// Windows only: a share, a pipe or a verbatim namespace is refused before anything touches it,
+/// and a verbatim drive path is remembered as a person sees it.
+#[cfg(windows)]
+#[test]
+fn a_share_or_a_device_is_never_a_folder_to_look_in() {
+    let w = World::new(NEW_APPID);
+    w.install(MODS_DECL);
+    for (p, reason) in [
+        (r"\\host\share\mods", "unc"),
+        (r"\\?\UNC\host\share\mods", "verbatim-unc"),
+        (r"\\.\pipe\mods", "device"),
+        (r"\\?\GLOBALROOT\x", "verbatim"),
+    ] {
+        let e = add_mods_root(&w.profile(), Path::new(p)).unwrap_err();
+        assert_eq!(
+            (e.code, e.param("reason")),
+            (codes::PATH_ESCAPES, Some(reason)),
+            "{p}"
+        );
+    }
+    let verbatim = format!(r"\\?\{}", w.tmp.join("D").display());
+    add_mods_root(&w.profile(), Path::new(&verbatim)).unwrap();
+    let text = fs::read_to_string(w.profile().join(MODS_CHOICE_FILE_NAME)).unwrap();
+    assert!(!text.contains(r"\\\\?"), "{text}");
+}
+
+/// The CLI's `mods --choose with --source <folder>` judges the folder's spelling before it
+/// touches it (on Windows, canonicalizing a share would open an SMB session).
+#[test]
+fn the_cli_checks_a_sources_spelling_before_touching_it() {
+    let w = World::new(NEW_APPID);
+    w.install(MODS_DECL);
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_astra-game-launcher"))
+        .args(["mods", "--profile"])
+        .arg(w.profile())
+        .arg("--game")
+        .arg(w.game_dir())
+        .args([
+            "--exe",
+            &format!("{GAME}.exe"),
+            "--choose",
+            "with",
+            "--source",
+            "relative/x",
+            "--json",
+        ])
+        .current_dir(w.tmp.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let e: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(e["code"], "path-escapes", "{e}");
+    assert_eq!(e["params"]["reason"], "not-absolute", "{e}");
 }

@@ -18,7 +18,7 @@
 //! - **Whether it can be played together**: the installed integration's `[integration.mods]`
 //!   ([`ModsDecl`]) against their BepInEx's own version, read from its version resource.
 
-mod choice;
+pub(crate) mod choice;
 mod decl;
 mod games;
 pub(crate) mod play;
@@ -33,9 +33,10 @@ use std::time::UNIX_EPOCH;
 use serde::{Deserialize, Serialize};
 
 pub use choice::{
-    Choice, ChoiceKind, ChoiceSource, MODS_CHOICE_SCHEMA, mods_choice, set_mods_choice,
+    Choice, ChoiceKind, ChoiceSource, MODS_CHOICE_SCHEMA, add_mods_root, mods_choice,
+    set_mods_choice,
 };
-pub(crate) use choice::{MAX_ADDED_ROOTS, read as read_choice, remove as remove_choice};
+pub(crate) use choice::{MAX_ADDED_ROOTS, read_file as read_choice_file, remove as remove_choice};
 pub use decl::{ModsDecl, ModsLoader};
 pub use status::{
     ArmedBy, LOADER_STATUS_FILE_NAME, LastRun, LoaderReason, LoaderStatus, loader_status,
@@ -46,7 +47,7 @@ use crate::doorstop;
 use crate::game::{GameTarget, Platform, steam_appid_of_dir};
 use crate::ledger::{self, Ledger};
 use crate::manifest::Manifest;
-use crate::paths::{canonical_dir, find_any_case};
+use crate::paths::{canonical_dir, find_any_case, local_verdict, plain};
 use crate::plan::is_loader_proxy;
 
 /// Who keeps a mod source.
@@ -295,6 +296,11 @@ impl ModsEnv {
         let mut seen: Vec<PathBuf> = Vec::new();
         all.into_iter()
             .filter(|(_, p)| {
+                // A data folder on a share (a redirected %APPDATA%) is never asked about: no
+                // source there could be played anyway, and asking opens an SMB session.
+                if local_verdict(p).is_err() {
+                    return false;
+                }
                 let Ok(real) = fs::canonicalize(p) else {
                     return false;
                 };
@@ -681,9 +687,9 @@ fn modified_ms(root: &Path, rel: &[&str]) -> Option<u64> {
     u64::try_from(t.duration_since(UNIX_EPOCH).ok()?.as_millis()).ok()
 }
 
-/// A path that can be written into `chain.ini` and remembered whole.
+/// A path that can be written into `chain.ini` and remembered whole: local, no line break.
 fn usable(p: &Path) -> bool {
-    p.to_str().is_some_and(|s| !s.contains(['\n', '\r', '\0']))
+    local_verdict(p).is_ok() && p.to_str().is_some_and(|s| !s.contains(['\n', '\r', '\0']))
 }
 
 /// The source at `c`, judged: `None` when it is not one (no known preloader, nothing of the
@@ -722,7 +728,8 @@ fn source_of(
     Some(ModSource {
         manager: c.manager,
         profile: c.profile.clone(),
-        root: c.root.clone(),
+        // As a person and `chain.ini` see it: no `\\?\` prefix.
+        root: plain(&c.root),
         last_played: modified_ms(&c.root, &log),
         loader,
         mods,
@@ -752,10 +759,11 @@ pub fn discover_mods_in(game: &GameTarget, profile_dir: &Path, env: &ModsEnv) ->
     let ledger = profile
         .as_deref()
         .and_then(|p| ledger::read(p).ok().flatten());
+    // The folders the person added, answered or not (`"choice": null`).
     let added = profile
         .as_deref()
-        .and_then(|p| read_choice(p).ok().flatten())
-        .map(|c| c.added_roots)
+        .and_then(|p| read_choice_file(p).ok().flatten())
+        .map(|f| f.added_roots)
         .unwrap_or_default();
     discover(game, ledger.as_ref(), &added, env)
 }
@@ -787,7 +795,13 @@ pub(crate) fn discover(
     for (manager, data) in env.manager_roots() {
         look.game_profiles(manager, &data, &mut candidates);
     }
-    for root in added_roots.iter().take(MAX_ADDED_ROOTS) {
+    // Never a share, a device or a verbatim namespace: checked before anything touches it.
+    // The newest 32 (a file edited by hand may hold more).
+    let newest = added_roots.len().saturating_sub(MAX_ADDED_ROOTS);
+    for root in added_roots[newest..]
+        .iter()
+        .filter(|r| local_verdict(r).is_ok())
+    {
         added_root(&look, root, &mut candidates);
     }
     if let Ok(game_root) = game.game_root() {
