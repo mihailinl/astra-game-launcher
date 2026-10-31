@@ -361,21 +361,25 @@ pub(crate) fn engine_of_program(
         Moderation::Local,
     ] {
         let mut found: BTreeSet<EngineCode> = BTreeSet::new();
-        for mb in described
+        'descriptors: for mb in described
             .iter()
             .filter(|mb| set.entries[mb.desc].origin.moderation == standing)
         {
             let mut spent = Spent::default();
+            // A descriptor over its budget yields nothing for this program, as in Pass B: what
+            // its earlier rules matched is dropped with it.
+            let mut own: BTreeSet<EngineCode> = BTreeSet::new();
             for rule in mb.model.rules.iter().filter(|r| r.scope != Scope::Anywhere) {
                 match game.on_program(mb, rule, exe_rel, &folder, &mut spent) {
                     Ok(Some(c)) => {
-                        found.insert(c.code);
+                        own.insert(c.code);
                     }
                     Ok(None) => {}
-                    Err(Halt::Descriptor) => break,
+                    Err(Halt::Descriptor) => continue 'descriptors,
                     Err(Halt::Game) => return EngineCode::unknown(),
                 }
             }
+            found.extend(own);
         }
         match found.len() {
             0 => continue,
@@ -2218,7 +2222,23 @@ mod tests {
             "unknown"
         );
         assert_eq!(ask("game/bin/win64/cs2.exe", &one), "source2");
-        // A built-in rule that matches decides: the set is not asked.
+        // A built-in rule that matches decides: the set is not asked, though one of its
+        // descriptors (moderated, so first) matches the same program.
+        put("Plain.exe", b"MZ plain");
+        let wide = EngineSet::build([(
+            Origin {
+                moderation: Moderation::Moderated,
+                publisher: "w".to_owned(),
+                first_party: false,
+            },
+            Descriptor::from_toml(
+                "schema = \"astra.engine/1\"\nengine = { codes = { squat = \"Squat\" } }\n[[rule]]\ntier = \"strong\"\nprograms = { ext = [\"exe\"], at = \"\", first = 8 }\nrequire = [ { listed = \"UnityPlayer.dll\", kind = \"file\" } ]\ncode = \"squat\"\nconfidence = \"high\"\nbinary = \"windows\"\nevidence = \"{program}\"\n",
+            ),
+        )]);
+        assert_eq!(wide.len(), 1, "{:?}", wide.skipped());
+        assert_eq!(ask("Tool.exe", &wide), "unity-mono");
+        // The same descriptor names a program no built-in rule matches (no `Plain_Data/`).
+        assert_eq!(ask("Plain.exe", &wide), "squat");
         assert_eq!(ask("Tool.exe", &one), "unity-mono");
         // A lower standing never overrules a higher one; two codes of one standing are none.
         let two = set(&[
@@ -2231,6 +2251,69 @@ mod tests {
             ("vapor", Moderation::Unchecked, "b"),
         ]);
         assert_eq!(ask("game/bin/win64/cs2.exe", &tied), "unknown");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A descriptor that goes over its budget on a named program yields nothing for it, as in
+    /// Pass B — what an earlier rule of it matched included.
+    #[test]
+    fn a_descriptor_over_its_budget_names_no_program() {
+        let root = std::env::temp_dir().join(format!("agl-eval-spent-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("Plain.exe"), b"MZ plain").unwrap();
+        fs::write(root.join("engine.idx"), b"idx").unwrap();
+        let head = "[[rule]]\ntier = \"strong\"\nprograms = { ext = [\"exe\"], at = \"\", first = 8 }\ncode = \"spent\"\nconfidence = \"high\"\nbinary = \"windows\"\nevidence = \"{program}\"\n";
+        let matches =
+            format!("{head}require = [ {{ listed = \"engine.idx\", kind = \"file\" }} ]\n");
+        // Each of these asks 28 names (27 of them absent, each in a `none`, which asks them
+        // all) and the program's magic: two of them fit the 64 lookups beside the first rule's
+        // two, three do not.
+        let none = |from: usize, n: usize| {
+            let names: Vec<String> = (from..from + n)
+                .map(|i| format!("{{ listed = \"n{i:02}.dat\", kind = \"file\" }}"))
+                .collect();
+            format!("{{ none = [ {} ] }}", names.join(", "))
+        };
+        let burns = format!(
+            "{head}require = [ {{ listed = \"engine.idx\", kind = \"file\" }}, {}, {}, {}, {} ]\n",
+            none(0, 8),
+            none(8, 8),
+            none(16, 8),
+            none(24, 3)
+        );
+        let text = |rules: &[&str]| {
+            format!(
+                "schema = \"astra.engine/1\"\nengine = {{ codes = {{ spent = \"Spent\" }} }}\n{}",
+                rules.concat()
+            )
+        };
+        let set = |rules: &[&str]| {
+            let s = EngineSet::build([(
+                Origin {
+                    moderation: Moderation::Unchecked,
+                    publisher: "s".to_owned(),
+                    first_party: false,
+                },
+                Descriptor::from_toml(&text(rules)),
+            )]);
+            assert_eq!(s.len(), 1, "{:?}", s.skipped());
+            s
+        };
+        let exe = vec!["Plain.exe".to_owned()];
+        let builtin = crate::engines::builtin();
+        let ask = |s: &EngineSet| engine_of_program(&root, &exe, builtin, s);
+        assert_eq!(ask(&set(&[&matches])), "spent");
+        assert_eq!(
+            ask(&set(&[&matches, &burns, &burns])),
+            "spent",
+            "64: within"
+        );
+        assert_eq!(
+            ask(&set(&[&matches, &burns, &burns, &burns])),
+            "unknown",
+            "over its budget, the descriptor names nothing"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
