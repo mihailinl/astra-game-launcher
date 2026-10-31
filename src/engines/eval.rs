@@ -75,6 +75,11 @@ type Listing = Vec<(String, bool)>;
 
 /// A path below the game's root, one component per name.
 type Rel = Vec<String>;
+/// Of the programs a `pick` rule selects in one folder: the largest (the first by name of equal
+/// sizes), and how many there are.
+type Largest = (Option<String>, usize);
+/// A glob `listed`'s memo key: the descriptor, the listing (its `Rc`), the glob, the kind.
+type GlobKey = (usize, usize, String, bool);
 /// Folders read once per game, by path below the root: `None` when not a real folder.
 type Memo<T> = RefCell<HashMap<Rel, Option<Rc<T>>>>;
 
@@ -270,6 +275,11 @@ struct Game<'a> {
     folders: Memo<Folder>,
     /// The names `child` looks through ignoring case, memoised: see [`Game::window`].
     windows: Memo<Vec<String>>,
+    /// The built-ins' memos, so a folder of `k` programs costs them `k` lookups and not `k²`:
+    /// `pick`'s largest program per (rule, folder), and a glob `listed`'s first match per
+    /// (descriptor, listing, glob, kind). Pass B pays for each lookup every time (its budgets).
+    picks: RefCell<HashMap<(usize, Rel), Rc<Largest>>>,
+    globs: RefCell<HashMap<GlobKey, Option<String>>>,
     lookups: Cell<u32>,
     bytes: Cell<u64>,
     sizings: Cell<u32>,
@@ -458,6 +468,8 @@ impl<'a> Game<'a> {
             names,
             folders: RefCell::new(HashMap::new()),
             windows: RefCell::new(HashMap::new()),
+            picks: RefCell::new(HashMap::new()),
+            globs: RefCell::new(HashMap::new()),
             lookups: Cell::new(0),
             bytes: Cell::new(0),
             sizings: Cell::new(0),
@@ -744,12 +756,33 @@ impl<'a> Game<'a> {
         let want_dir = kind.is_dir();
         let found = match &last {
             Seg::Name(n) => self.find_in(&folder, n, want_dir).map(str::to_owned),
-            Seg::Glob(g) => folder
-                .scan(&self.work)
-                .iter()
-                .filter(|(n, d)| *d == want_dir && !m.is_wrapper(n))
-                .find(|(n, _)| glob_match(g, &n.to_ascii_lowercase()))
-                .map(|(n, _)| n.clone()),
+            Seg::Glob(g) => {
+                let scan = || {
+                    folder
+                        .scan(&self.work)
+                        .iter()
+                        .filter(|(n, d)| *d == want_dir && !m.is_wrapper(n))
+                        .find(|(n, _)| glob_match(g, &n.to_ascii_lowercase()))
+                        .map(|(n, _)| n.clone())
+                };
+                if self.builtin_policy() {
+                    // One listing (the walk's, or one read afresh and memoised) is one `Rc`.
+                    let key = (
+                        std::ptr::from_ref(m) as usize,
+                        Rc::as_ptr(&folder) as usize,
+                        glob_key(g),
+                        want_dir,
+                    );
+                    let memo = self.globs.borrow().get(&key).cloned();
+                    memo.unwrap_or_else(|| {
+                        let v = scan();
+                        self.globs.borrow_mut().insert(key, v.clone());
+                        v
+                    })
+                } else {
+                    scan()
+                }
+            }
         };
         Ok(found.filter(|n| !m.is_wrapper(n)).map(|n| {
             parent.push(n);
@@ -1198,7 +1231,7 @@ impl<'a> Game<'a> {
 
     /// `pick = "hint-else-largest"`: the program the hint (or the caller) names; else, of the
     /// programs the rule selects in that folder, only the largest (the first by name of equal
-    /// sizes) answers — one lookup per program sized.
+    /// sizes) answers — one lookup per program sized; the built-ins size a folder once.
     fn pick(
         &self,
         m: &Model,
@@ -1212,6 +1245,36 @@ impl<'a> Game<'a> {
         let Some(p) = &rule.programs else {
             return Ok(None);
         };
+        // A walk program's folder is the walk's listing of it, one per folder: the answer is
+        // the rule's and the folder's, whichever of its programs asks.
+        let key = (std::ptr::from_ref(rule) as usize, prog.dir.clone());
+        let memo = if self.builtin_policy() {
+            self.picks.borrow().get(&key).cloned()
+        } else {
+            None
+        };
+        let largest = match memo {
+            Some(l) => l,
+            None => {
+                let l = Rc::new(self.largest(m, p, prog, spent)?);
+                if self.builtin_policy() {
+                    self.picks.borrow_mut().insert(key, l.clone());
+                }
+                l
+            }
+        };
+        Ok(match &*largest {
+            (Some(n), count) if *n == prog.name => Some(if *count == 1 {
+                ExePick::Only
+            } else {
+                ExePick::Largest
+            }),
+            _ => None,
+        })
+    }
+
+    /// [`Largest`] in `prog`'s folder, of the programs `p` selects (never a wrapper).
+    fn largest(&self, m: &Model, p: &Programs, prog: &Prog, spent: &mut Spent) -> Step<Largest> {
         let names: Vec<&str> = prog
             .folder
             .scan(&self.work)
@@ -1231,14 +1294,7 @@ impl<'a> Game<'a> {
                 best = Some((size, n));
             }
         }
-        Ok(match best {
-            Some((_, n)) if n == prog.name => Some(if names.len() == 1 {
-                ExePick::Only
-            } else {
-                ExePick::Largest
-            }),
-            _ => None,
-        })
+        Ok((best.map(|(_, n)| n.to_owned()), names.len()))
     }
 
     fn binary(&self, b: &BinaryRule, sc: &View) -> Binary {
@@ -1895,6 +1951,18 @@ fn glob_parts(pieces: &[Piece]) -> Vec<GPart> {
         .collect()
 }
 
+/// A glob as a memo key: its literal runs, each `*` a NUL (which no name holds).
+fn glob_key(parts: &[GPart]) -> String {
+    let mut k = String::new();
+    for p in parts {
+        match p {
+            GPart::Lit(l) => k.push_str(l),
+            GPart::Star => k.push('\0'),
+        }
+    }
+    k
+}
+
 /// A `*` glob against a lower-case name: literal runs in order, the first anchored to the start
 /// and the last to the end unless a `*` stands there.
 fn glob_match(parts: &[GPart], name: &str) -> bool {
@@ -2316,6 +2384,49 @@ mod tests {
             ask(&set(&[&matches, &burns, &burns, &burns])),
             "unknown",
             "over its budget, the descriptor names nothing"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The built-ins over one `Binaries/Win64/` of many unshipped programs: linear in the
+    /// folder, counted, never timed. `pick` sizes the folder once per rule and a glob `listed`
+    /// scans it once per descriptor, whichever program asks; asked per program, as 0.4.1 did,
+    /// that was `k²` — 4,980 programs took 66 s in a debug build.
+    #[test]
+    fn a_folder_of_many_programs_is_read_once_by_the_built_ins() {
+        const PROGRAMS: usize = 2_000;
+        let root = std::env::temp_dir().join(format!("agl-eval-many-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let bin = root.join("P/Binaries/Win64");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(root.join("P/Content/Paks")).unwrap();
+        fs::write(root.join("P/Content/Paks/a.pak"), b"pak").unwrap();
+        let mut entries = vec![
+            entry(&["P"], true),
+            entry(&["P", "Binaries"], true),
+            entry(&["P", "Content"], true),
+            entry(&["P", "Binaries", "Win64"], true),
+            entry(&["P", "Content", "Paks"], true),
+        ];
+        for i in 0..PROGRAMS {
+            let name = format!("g{i:05}.exe");
+            fs::write(bin.join(&name), vec![b'M'; 2 + i % 97]).unwrap();
+            entries.push(entry(&["P", "Binaries", "Win64", &name], false));
+        }
+        entries.push(entry(&["P", "Content", "Paks", "a.pak"], false));
+        let game = Game::new(&root, &entries, None, Policy::BuiltIn);
+        let c = game.builtin(&members(crate::engines::builtin())).unwrap();
+        assert_eq!(
+            (
+                c.exe.as_deref().and_then(|e| e.last()).map(String::as_str),
+                c.exe_pick
+            ),
+            (Some("g00096.exe"), Some(ExePick::Largest))
+        );
+        let work = game.work.get();
+        assert!(
+            work < 16 * PROGRAMS as u64,
+            "{work} names examined for {PROGRAMS} programs: no longer linear"
         );
         let _ = fs::remove_dir_all(&root);
     }
