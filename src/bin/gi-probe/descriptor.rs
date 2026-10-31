@@ -32,9 +32,10 @@ use serde_json::{Value, json};
 
 use crate::{Fatal, Finding, Scratch, report};
 
-/// The AstraPlugins commit whose `spec/games/engine-descriptor-v1.md` §5 this lint follows (PR
-/// #117). Re-pinning the spec is this one constant, and whatever the new §5 says.
-pub const SPEC_SHA: &str = "d46e44a089387589018f28cfc3403399f7c3b89d";
+/// The AstraPlugins commit whose `spec/games/` this probe follows (PR #117), and whose goldens
+/// `tests/goldens/astraplugins/` holds: read from that copy's `PIN`, so a re-pin is
+/// `tools/vendor-astraplugins-goldens.sh` alone (and whatever the new spec says).
+pub const SPEC_SHA: &str = include_str!("../../../tests/goldens/astraplugins/PIN").trim_ascii_end();
 
 /// The negative folders of spec §5: `(name, files)`; a file name ending in `/` is a folder.
 pub const NEGATIVE_FOLDERS: &[(&str, &[&str])] = &[
@@ -124,6 +125,75 @@ fn claims(d: &Descriptor, det: &Detection) -> bool {
             .any(|(c, _)| det.engine == *c || det.engine_candidates.contains(c))
 }
 
+/// The folders' rows and the claims as findings, or the refusals of a set that would not hold
+/// the descriptor.
+pub type NegativeFolders = Result<(Vec<Value>, Vec<Finding>), Vec<LauncherError>>;
+
+/// What the spec's negative folders make of `d`, asked alone as an unchecked descriptor
+/// (`first_party` as given): one row per folder (`{folder, claimed, engine}`) and a
+/// `descriptor-too-broad{reason=negative:<folder>}` finding per claim (step unset). `None` when
+/// Pass B does not admit `d`, with the refusals of the set that would not hold it.
+pub fn negative_folders(d: &Descriptor, first_party: bool) -> Result<NegativeFolders, Fatal> {
+    let origin = Origin {
+        moderation: Moderation::Unchecked,
+        publisher: "gi-probe".to_owned(),
+        first_party,
+    };
+    let set = EngineSet::build([(origin, Ok(d.clone()))]);
+    if set.is_empty() {
+        return Ok(Err(set
+            .skipped()
+            .into_iter()
+            .map(|s| s.error.clone())
+            .collect()));
+    }
+    let scratch = Scratch::new("negative")?;
+    let mut folders = Vec::new();
+    let mut findings = Vec::new();
+    for (name, files) in NEGATIVE_FOLDERS {
+        let dir = scratch.path().join(name);
+        std::fs::create_dir_all(&dir).map_err(|e| Fatal::io(&dir, e))?;
+        for f in *files {
+            let p = dir.join(f);
+            let bytes = if f.ends_with(".exe") {
+                pe_x64()
+            } else {
+                b"MZ".to_vec()
+            };
+            std::fs::write(&p, bytes).map_err(|e| Fatal::io(&p, e))?;
+        }
+        let det = detect_with_engines(&dir, None, &set)
+            .map_err(|e| Fatal::io(&dir, format!("{}: {:?}", e.code, e.params)))?;
+        let claimed = claims(d, &det);
+        folders.push(json!({
+            "folder": name,
+            "claimed": claimed,
+            "engine": det.engine.as_str(),
+        }));
+        if claimed {
+            findings.push(
+                Finding::new(
+                    codes::DESCRIPTOR_TOO_BROAD,
+                    format!(
+                        "the descriptor claims the negative folder {name:?} (spec §5): it would name games it knows nothing of"
+                    ),
+                )
+                .field("rule")
+                .with("reason", format!("negative:{name}")),
+            );
+        }
+    }
+    Ok(Ok((folders, findings)))
+}
+
+/// The report's `descriptor`: its digest and codes.
+pub fn summary(d: &Descriptor) -> Value {
+    json!({
+        "sha256": d.digest(),
+        "codes": d.codes().map(|(c, n)| (c.as_str().to_owned(), json!(n))).collect::<serde_json::Map<_, _>>(),
+    })
+}
+
 /// `gi-probe validate-descriptor`.
 pub fn run(file: &Path, first_party: bool) -> Result<(Value, bool), Fatal> {
     let bytes = std::fs::read(file).map_err(|e| Fatal::io(file, e))?;
@@ -135,61 +205,22 @@ pub fn run(file: &Path, first_party: bool) -> Result<(Value, bool), Fatal> {
     match parsed {
         Err(e) => findings.push(refusal(&e, "not an astra.engine/1 descriptor").step(1)),
         Ok(d) => {
-            descriptor = json!({
-                "sha256": d.digest(),
-                "codes": d.codes().map(|(c, n)| (c.as_str().to_owned(), json!(n))).collect::<serde_json::Map<_, _>>(),
-            });
+            descriptor = summary(&d);
             if let Err(e) = d.check_pass_b(first_party) {
                 findings.push(refusal(&e, "Pass B does not admit this descriptor").step(2));
             }
-            let origin = Origin {
-                moderation: Moderation::Unchecked,
-                publisher: "gi-probe".to_owned(),
-                first_party,
-            };
-            let set = EngineSet::build([(origin, Ok(d.clone()))]);
-            if set.is_empty() {
+            match negative_folders(&d, first_party)? {
                 // Pass B refused it (step 2 says why): no folder can be asked with it.
-                for s in set.skipped() {
-                    if findings.iter().all(|f| f.code != s.error.code) {
-                        findings.push(refusal(&s.error, "Pass B does not admit it").step(2));
+                Err(skipped) => {
+                    for e in skipped {
+                        if findings.iter().all(|f| f.code != e.code) {
+                            findings.push(refusal(&e, "Pass B does not admit it").step(2));
+                        }
                     }
                 }
-            } else {
-                let scratch = Scratch::new("negative")?;
-                for (name, files) in NEGATIVE_FOLDERS {
-                    let dir = scratch.path().join(name);
-                    std::fs::create_dir_all(&dir).map_err(|e| Fatal::io(&dir, e))?;
-                    for f in *files {
-                        let p = dir.join(f);
-                        let bytes = if f.ends_with(".exe") {
-                            pe_x64()
-                        } else {
-                            b"MZ".to_vec()
-                        };
-                        std::fs::write(&p, bytes).map_err(|e| Fatal::io(&p, e))?;
-                    }
-                    let det = detect_with_engines(&dir, None, &set)
-                        .map_err(|e| Fatal::io(&dir, format!("{}: {:?}", e.code, e.params)))?;
-                    let claimed = claims(&d, &det);
-                    folders.push(json!({
-                        "folder": name,
-                        "claimed": claimed,
-                        "engine": det.engine.as_str(),
-                    }));
-                    if claimed {
-                        findings.push(
-                            Finding::new(
-                                codes::DESCRIPTOR_TOO_BROAD,
-                                format!(
-                                    "the descriptor claims the negative folder {name:?} (spec §5): it would name games it knows nothing of"
-                                ),
-                            )
-                            .step(3)
-                            .field("rule")
-                            .with("reason", format!("negative:{name}")),
-                        );
-                    }
+                Ok((rows, claims)) => {
+                    folders = rows;
+                    findings.extend(claims.into_iter().map(|f| f.step(3)));
                 }
             }
         }
@@ -201,13 +232,18 @@ pub fn run(file: &Path, first_party: bool) -> Result<(Value, bool), Fatal> {
             "kind": input.code(),
             "first_party": first_party,
         },
-        "spec": {
-            "repo": "mihailinl/AstraPlugins",
-            "sha": SPEC_SHA,
-            "section": "spec/games/engine-descriptor-v1.md §5",
-        },
+        "spec": spec(),
         "descriptor": descriptor,
         "negative_folders": folders,
     });
     Ok((report("validate-descriptor", rest, &findings), passed))
+}
+
+/// The report's `spec`: the AstraPlugins commit this follows.
+pub fn spec() -> Value {
+    json!({
+        "repo": "mihailinl/AstraPlugins",
+        "sha": SPEC_SHA,
+        "section": "spec/games/engine-descriptor-v1.md §5",
+    })
 }

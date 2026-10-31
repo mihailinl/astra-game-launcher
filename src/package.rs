@@ -55,6 +55,17 @@ impl PackFile {
     }
 }
 
+/// One file a package places ([`GiPackage::placed_files`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlacedFile {
+    /// Where it goes: `${profile}/…`, or `${game}/…` (beside the exe).
+    pub dest: String,
+    /// The zip entry it is read from.
+    pub entry: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
 /// A verified package: its manifest and the files that manifest names.
 pub struct GiPackage {
     zip: Vec<u8>,
@@ -363,6 +374,22 @@ impl GiPackage {
     /// The zip's SHA-256, lowercase hex.
     pub fn sha256(&self) -> &str {
         &self.sha256
+    }
+
+    /// Every file an install of this package places: the `[[files]]` into the profile, then the
+    /// `[[game_files]]` beside the exe, each with the digest read at [`GiPackage::open`].
+    pub fn placed_files(&self) -> Vec<PlacedFile> {
+        let place = |root: &str, f: &PackFile| PlacedFile {
+            dest: format!("${{{root}}}/{}", f.rel_string()),
+            entry: f.entry.clone(),
+            size: f.size,
+            sha256: f.sha256.clone(),
+        };
+        self.profile_files
+            .iter()
+            .map(|f| place("profile", f))
+            .chain(self.game_files.iter().map(|f| place("game", f)))
+            .collect()
     }
 
     pub fn summary(&self) -> PackageSummary {

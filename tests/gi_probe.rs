@@ -15,10 +15,15 @@
 //! - `compat` passes a well-formed release of every source and fails each kind of break at the
 //!   step that owns it; `validate-descriptor` passes plan B §1's Source 2 descriptor and refuses
 //!   the anchorless, the runtime-anchored and the too broad.
+//! - `check` answers every manifest golden of the specification as `tests/goldens.rs` judges the
+//!   library (the same `SPEC_DEFECTS_AT_PIN`), and on release zips: Link files, reserved ids by
+//!   provenance, the descriptor's negative folders, `built_on` and `code_changed`.
 
 #![cfg(feature = "gi-probe")]
 
 mod common;
+#[path = "common/spec_goldens.rs"]
+mod spec_goldens;
 
 #[allow(dead_code)]
 #[path = "../src/bin/gi-probe/v027.rs"]
@@ -1608,7 +1613,11 @@ fn validate_descriptor_passes_the_source2_descriptor() {
     assert_eq!(r["descriptor"]["sha256"], digest);
     assert_eq!(r["descriptor"]["codes"], json!({ "source2": "Source 2" }));
     assert_eq!(r["input"]["kind"], "descriptor-toml");
-    assert_eq!(r["spec"]["sha"], "d46e44a089387589018f28cfc3403399f7c3b89d");
+    assert_eq!(r["spec"]["sha"], spec_goldens::pin().as_str());
+    assert_eq!(
+        spec_goldens::pin(),
+        "d46e44a089387589018f28cfc3403399f7c3b89d"
+    );
     let folders = r["negative_folders"].as_array().unwrap();
     assert_eq!(folders.len(), 4);
     assert!(folders.iter().all(|f| f["claimed"] == false));
@@ -1734,4 +1743,416 @@ evidence = "{program}"
     let (exit, r) = validate(&tmp, "broad.toml", broad, &[]);
     assert_eq!(exit, 1);
     assert_eq!(r["findings"][0]["step"], 2);
+}
+
+// ---------------------------------------------------------------------------------------------
+// `gi-probe check`.
+// ---------------------------------------------------------------------------------------------
+
+/// `(code, field)` of every finding of a report, in order.
+fn answer(r: &Value) -> spec_goldens::Answer {
+    r["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                f["code"].as_str().unwrap().to_owned(),
+                f["field"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn check(file: &str, extra: &[&str]) -> (i32, Value) {
+    let mut args = vec!["check", file];
+    args.extend(extra);
+    let (exit, r) = probe(&args);
+    assert_eq!(r["subcommand"], "check");
+    (exit, r)
+}
+
+/// **K17 through `gi-probe check`:** every manifest golden of the specification, given to the
+/// probe as the bare manifest it is, is answered as `tests/goldens.rs` judges the library —
+/// `runner-builtin` as Astra's own, the rest as community, every disagreement the one recorded in
+/// `SPEC_DEFECTS_AT_PIN`.
+#[test]
+fn check_answers_every_manifest_golden_as_labelled() {
+    let mut out = Vec::new();
+    for (golden, r) in spec_goldens::manifest_goldens() {
+        let file = spec_goldens::root().join(&golden);
+        let file = file.to_str().unwrap();
+        let fp = spec_goldens::first_party(&golden, &r);
+        let provenance = if fp { "first-party" } else { "community" };
+        let (exit, report) = check(file, &["--provenance", provenance]);
+        let a = answer(&report);
+        assert_eq!(
+            exit,
+            if a.is_empty() { 0 } else { 1 },
+            "{golden}: {report:#}"
+        );
+        assert_eq!(report["input"]["kind"], "manifest", "{golden}");
+        assert_eq!(report["spec"]["sha"], spec_goldens::pin().as_str());
+        out.extend(spec_goldens::judge_manifest(&golden, &r, &a, || {
+            answer(&check(file, &["--provenance", "community"]).1)
+        }));
+    }
+    assert!(out.is_empty(), "\n{}", out.join("\n"));
+}
+
+const LINK_SCHEMA: &[u8] =
+    br#"{"type":"object","properties":{"item":{"type":"string","maxLength":32}}}"#;
+
+/// A community release with a Link, its schema files and skill in the zip.
+fn community_release(id: &str, extra_files: &[(&str, &[u8])]) -> Vec<u8> {
+    let manifest = format!(
+        r#"schema = 1
+
+[integration]
+id = "{id}"
+name = "Astra in Example"
+version = "1.0.0"
+license = "MIT"
+
+[integration.capabilities]
+companion = ["presentation"]
+
+[integration.link]
+context = true
+skill = "astra/SKILL.md"
+[[integration.link.tools]]
+name = "drop_item"
+description = "Drop the item the player holds"
+params = "astra/tools/drop_item.json"
+
+[target]
+steam_appid = 4000
+exe = "Example.exe"
+platforms = ["windows-x64"]
+anti_cheat = "none"
+
+[[files]]
+from = "plugins/**"
+to = "${{profile}}/plugins/"
+
+[[game_files]]
+from = "astra-probe.dll"
+to = "${{game}}/astra-probe.dll"
+
+[[config_writes]]
+file = "${{profile}}/astra.ini"
+section = "bridge"
+set = {{ Token = "${{bridge_token}}" }}
+"#
+    );
+    let mut entries = vec![
+        E::File("astra-gi.toml", manifest.as_bytes()),
+        E::File("astra-probe.dll", DLL),
+        E::File("plugins/Astra.Example.dll", b"MZ plugin"),
+        E::File("plugins/readme.txt", b"hello"),
+        E::File("astra/SKILL.md", b"# Example"),
+        E::File("astra/tools/drop_item.json", LINK_SCHEMA),
+    ];
+    entries.retain(|e| {
+        !extra_files
+            .iter()
+            .any(|(n, _)| matches!(e, E::File(m, _) if m == n))
+    });
+    entries.extend(extra_files.iter().map(|(n, b)| E::File(n, b)));
+    zip(&entries)
+}
+
+#[test]
+fn check_passes_a_well_formed_community_release_and_says_what_it_did_not_check() {
+    let tmp = Tmp::new("check-ok");
+    let z = put(
+        &tmp,
+        "r",
+        "astra-gi.zip",
+        &community_release("someone.example", &[]),
+    );
+    let (exit, r) = check(&z, &[]);
+    assert_eq!(exit, 0, "{r:#}");
+    assert_eq!(r["input"]["kind"], "zip");
+    assert_eq!(r["input"]["provenance"], "community");
+    assert_eq!(r["integration"]["id"], "someone.example");
+    assert_eq!(r["link"]["schemas_validated"], false);
+    assert_eq!(
+        statuses(&r),
+        ["pass", "pass", "notice", "skipped", "skipped", "skipped"]
+    );
+    assert_eq!(r["notices"][0]["code"], "link-schemas-unvalidated");
+    assert!(r["built_on"].is_null() && r["code_changed"].is_null());
+}
+
+#[test]
+fn check_holds_the_links_files_to_the_zip() {
+    let tmp = Tmp::new("check-link");
+    // At its sizes exactly: passes. One byte over each: refused.
+    let schema = vec![b' '; 4 * 1024];
+    let skill = vec![b'#'; 16 * 1024];
+    let z = community_release(
+        "someone.example",
+        &[
+            ("astra/tools/drop_item.json", &schema),
+            ("astra/SKILL.md", &skill),
+        ],
+    );
+    let (exit, r) = check(&put(&tmp, "at", "astra-gi.zip", &z), &[]);
+    assert_eq!(exit, 0, "{r:#}");
+    let big_schema = vec![b' '; 4 * 1024 + 1];
+    let big_skill = vec![b'#'; 16 * 1024 + 1];
+    let z = community_release(
+        "someone.example",
+        &[
+            ("astra/tools/drop_item.json", &big_schema),
+            ("astra/SKILL.md", &big_skill),
+        ],
+    );
+    let (exit, r) = check(&put(&tmp, "big", "astra-gi.zip", &z), &[]);
+    assert_eq!(exit, 1, "{r:#}");
+    assert_eq!(
+        answer(&r),
+        [
+            (
+                "link-invalid".to_owned(),
+                "integration.link.tools[0].params".to_owned()
+            ),
+            (
+                "link-invalid".to_owned(),
+                "integration.link.skill".to_owned()
+            ),
+        ]
+    );
+    assert!(
+        r["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["step"] == 3 && f["params"]["reason"] == "too-large")
+    );
+    // A file the link names that the zip lacks.
+    let text = community_release("someone.example", &[]);
+    let pkg = astra_game_launcher::GiPackage::open(&text, &sha(&text)).unwrap();
+    let manifest = pkg
+        .manifest_text()
+        .replace("astra/tools/drop_item.json", "astra/tools/gone.json");
+    let z = zip(&[
+        E::File("astra-gi.toml", manifest.as_bytes()),
+        E::File("astra-probe.dll", DLL),
+        E::File("plugins/Astra.Example.dll", b"MZ plugin"),
+        E::File("astra/SKILL.md", b"# Example"),
+    ]);
+    let (exit, r) = check(&put(&tmp, "gone", "astra-gi.zip", &z), &[]);
+    assert_eq!(exit, 1, "{r:#}");
+    assert_eq!(r["findings"][0]["params"]["reason"], "not-in-zip");
+    assert_eq!(r["findings"][0]["params"]["path"], "astra/tools/gone.json");
+}
+
+#[test]
+fn check_reserves_astras_ids_to_its_own_provenance() {
+    let tmp = Tmp::new("check-reserved");
+    let z = put(
+        &tmp,
+        "r",
+        "astra-gi.zip",
+        &community_release("astra.example", &[]),
+    );
+    let (exit, r) = check(&z, &[]);
+    assert_eq!(exit, 1, "{r:#}");
+    assert_eq!(r["findings"][0]["code"], "reserved-id");
+    assert_eq!(r["findings"][0]["step"], 2);
+    let (exit, r) = check(&z, &["--provenance", "first-party"]);
+    assert_eq!(exit, 0, "{r:#}");
+    let (exit, r) = check(&z, &["--provenance", "everyone"]);
+    assert_eq!(exit, 2, "{r:#}");
+    assert_eq!(r["error"]["code"], "usage");
+}
+
+/// A reserved profile name placed through a `**`: the launcher's own open refuses it (step 1).
+#[test]
+fn check_refuses_a_reserved_profile_name_inside_a_sweep() {
+    let tmp = Tmp::new("check-profile-name");
+    let release = community_release("someone.example", &[]);
+    let pkg = astra_game_launcher::GiPackage::open(&release, &sha(&release)).unwrap();
+    let manifest = pkg
+        .manifest_text()
+        .replace("to = \"${profile}/plugins/\"", "to = \"${profile}/\"");
+    let z = zip(&[
+        E::File("astra-gi.toml", manifest.as_bytes()),
+        E::File("astra-probe.dll", DLL),
+        E::File("plugins/astra-link.json", b"{}"),
+        E::File("astra/SKILL.md", b"# Example"),
+        E::File("astra/tools/drop_item.json", LINK_SCHEMA),
+    ]);
+    let (exit, r) = check(&put(&tmp, "r", "astra-gi.zip", &z), &[]);
+    assert_eq!(exit, 1, "{r:#}");
+    assert_eq!(r["findings"][0]["step"], 1);
+    assert_eq!(r["findings"][0]["code"], "path-escapes");
+    assert_eq!(r["findings"][0]["params"]["reason"], "reserved");
+}
+
+#[test]
+fn check_reports_built_on_only_for_the_full_set() {
+    let tmp = Tmp::new("check-built-on");
+    let foundation = community_release("someone.foundation", &[]);
+    let f = put(&tmp, "f", "foundation.zip", &foundation);
+    // The same files: verified.
+    let gi = community_release("someone.example", &[]);
+    let z = put(&tmp, "a", "astra-gi.zip", &gi);
+    let (exit, r) = check(&z, &["--foundation", &f]);
+    assert_eq!(exit, 0, "{r:#}");
+    assert_eq!(r["built_on"]["id"], "someone.foundation");
+    assert_eq!(r["built_on"]["version"], "1.0.0");
+    assert_eq!(r["built_on"]["verified"], true, "{r:#}");
+    // One of the foundation's files changed: not verified, and it is named.
+    let changed = community_release("someone.example", &[("plugins/readme.txt", b"changed")]);
+    let (exit, r) = check(
+        &put(&tmp, "b", "astra-gi.zip", &changed),
+        &["--foundation", &f],
+    );
+    assert_eq!(exit, 0, "{r:#}");
+    assert_eq!(r["built_on"]["verified"], false);
+    assert_eq!(
+        r["built_on"]["differing"],
+        json!(["${profile}/plugins/readme.txt"])
+    );
+}
+
+#[test]
+fn check_reports_code_changed_against_the_previous_release() {
+    let tmp = Tmp::new("check-code-changed");
+    let previous = put(
+        &tmp,
+        "p",
+        "prev.zip",
+        &community_release("someone.example", &[]),
+    );
+    // Text only changed: no code changed.
+    let text_only = community_release("someone.example", &[("plugins/readme.txt", b"v2")]);
+    let (exit, r) = check(
+        &put(&tmp, "t", "astra-gi.zip", &text_only),
+        &["--previous", &previous],
+    );
+    assert_eq!(exit, 0, "{r:#}");
+    assert_eq!(r["code_changed"]["changed"], false, "{r:#}");
+    // A plugin DLL changed, and a Lua file added.
+    let code = community_release(
+        "someone.example",
+        &[
+            ("plugins/Astra.Example.dll", b"MZ plugin v2"),
+            ("plugins/scripts/main.lua", b"print(1)"),
+        ],
+    );
+    let (exit, r) = check(
+        &put(&tmp, "c", "astra-gi.zip", &code),
+        &["--previous", &previous],
+    );
+    assert_eq!(exit, 0, "{r:#}");
+    assert_eq!(r["code_changed"]["changed"], true);
+    assert_eq!(
+        r["code_changed"]["files"],
+        json!([
+            { "dest": "${profile}/plugins/Astra.Example.dll", "change": "changed" },
+            { "dest": "${profile}/plugins/scripts/main.lua", "change": "added" },
+        ])
+    );
+}
+
+/// A foundation whose descriptor claims a folder holding one bare program: step 4.
+#[test]
+fn check_asks_the_descriptors_negative_folders() {
+    let tmp = Tmp::new("check-negative");
+    let manifest = r#"schema = 1
+
+[integration]
+id = "astra.probe"
+name = "Probe"
+version = "1.0.0"
+
+[integration.engine]
+schema = "astra.engine/1"
+engine = { codes = { probe = "Probe Engine" } }
+[[integration.engine.rule]]
+tier = "weak"
+programs = { ext = ["exe"], at = "", first = 8 }
+require = [ { stat = "{program}", kind = "file" } ]
+code = "probe"
+confidence = "low"
+binary = "windows"
+evidence = "{program}"
+
+[target]
+engine = "probe"
+exe = "*"
+platforms = ["windows-x64"]
+anti_cheat = "none"
+
+[[files]]
+from = "a.txt"
+to = "${profile}/a.txt"
+"#;
+    let z = zip(&[
+        E::File("astra-gi.toml", manifest.as_bytes()),
+        E::File("a.txt", b"a"),
+    ]);
+    let z = put(&tmp, "r", "astra-gi.zip", &z);
+    let (exit, r) = check(&z, &["--provenance", "first-party"]);
+    assert_eq!(exit, 1, "{r:#}");
+    assert!(
+        r["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["step"] == 4 && f["params"]["reason"] == "negative:exe-only"),
+        "{r:#}"
+    );
+    assert_eq!(r["descriptor"]["codes"], json!({ "probe": "Probe Engine" }));
+    // As a community release it never gets that far: no anchor (and the id is Astra's).
+    let (exit, r) = check(&z, &[]);
+    assert_eq!(exit, 1);
+    assert_eq!(
+        answer(&r),
+        [
+            ("reserved-id".to_owned(), String::new()),
+            (
+                "descriptor-too-broad".to_owned(),
+                "rule[0].require".to_owned()
+            ),
+        ]
+    );
+}
+
+/// Every fault a release has, at once: a zip the launcher does not open for its entries still
+/// has its manifest read, and that manifest's own refusal and its descriptor's are named too.
+#[test]
+fn check_names_every_fault_of_a_release_that_does_not_open() {
+    let tmp = Tmp::new("check-faults");
+    let manifest = spec_goldens::golden_text("manifests/invalid/engine-undeclared.toml");
+    let z = zip(&[
+        E::File("astra-gi.toml", manifest.as_bytes()),
+        E::File("a.txt", b"a"),
+        E::File("A.TXT", b"b"),
+    ]);
+    let (exit, r) = check(&put(&tmp, "r", "astra-gi.zip", &z), &[]);
+    assert_eq!(exit, 1, "{r:#}");
+    let steps: Vec<(u64, String)> = r["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                f["step"].as_u64().unwrap(),
+                f["code"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            (1, "zip-unsafe-entry".to_owned()),
+            (1, "engine-undeclared".to_owned()),
+            (2, "descriptor-invalid".to_owned()),
+        ]
+    );
 }

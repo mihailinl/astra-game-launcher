@@ -392,8 +392,30 @@ fn the_manifest_s_anti_cheat_and_overrides_are_checked() {
         2,
         "schema 1 carries several overrides"
     );
+    // Since 0.5.0 any engine code but `unknown`: a descriptor's code parses, and planning
+    // answers whether the game is made with it (`engine-mismatch`; tests/goldens.rs).
     let text = base.replacen("engine = \"unity-mono\"", "engine = \"source2\"", 1);
-    assert_eq!(parse_err(&text).code, codes::MANIFEST_INVALID);
+    assert_eq!(
+        Manifest::parse(&text)
+            .unwrap()
+            .engine_code()
+            .unwrap()
+            .as_str(),
+        "source2"
+    );
+    for engine in ["unknown", "Source 2"] {
+        let text = base.replacen(
+            "engine = \"unity-mono\"",
+            &format!("engine = \"{engine}\""),
+            1,
+        );
+        let e = parse_err(&text);
+        assert_eq!(
+            (e.code, e.param("key")),
+            (codes::MANIFEST_INVALID, Some("target.engine")),
+            "{engine}"
+        );
+    }
 }
 
 #[test]
@@ -403,6 +425,8 @@ fn a_wildcard_cannot_land_on_the_profile_s_bookkeeping() {
         "Astra-Launcher-Ledger.lock",
         "astra-launcher-backup/game/winhttp.dll",
         "Play-Arm.json",
+        "Mods-Choice.json",
+        "Astra-Link.json",
     ] {
         let m = runner_manifest("\n[[files]]\nfrom = \"**\"\nto = \"${profile}/\"\n");
         let z = zip(&[

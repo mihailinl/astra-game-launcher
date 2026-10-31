@@ -639,14 +639,16 @@ pub(crate) fn plan_install_with(
     // Cleared only for an appid the caller gave or the folder proves; the manifest's appid can
     // only add a refusal. No trusted appid is UNCHECKED, never clear.
     let vac = vac_check(game, trusted, m.target.steam_appid)?;
-    if let Some(want) = m.engine() {
-        // L3 passes the catalogue's descriptors here (`plan_install_in`); until then, the
-        // built-in ones alone.
+    // Every code `[target]` may name, a descriptor's included: a code no engine set here
+    // detects is `engine-mismatch`, never a check skipped. L3 passes the catalogue's descriptors
+    // here (`plan_install_in`); until then, the built-in ones alone, so a descriptor's code
+    // plans on no game.
+    if let Some(want) = m.engine_code() {
         let got = engine_of_exe_with(&EngineSet::empty(), &game_dir, &exe);
         if got != want {
             return Err(LauncherError::new(codes::ENGINE_MISMATCH)
-                .with("want", want.code())
-                .with("got", got.code()));
+                .with("want", want.as_str())
+                .with("got", got.as_str()));
         }
     }
 

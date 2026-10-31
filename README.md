@@ -317,6 +317,8 @@ the CLI nor Astra's daemon ever builds):
 cargo build --features gi-probe --bin gi-probe
 gi-probe compat --zip astra-gi.zip --source astra.unreal --tag v0.2.1 [--asset NAME]
                 [--prerelease] [--sha256 HEX] [--previous PREV.zip] [--notes NOTES.md]
+gi-probe check astra-gi.zip [--provenance first-party|community] [--foundation F.zip]
+               [--previous PREV.zip]
 gi-probe validate-descriptor engine.toml [--first-party]
 gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
 ```
@@ -346,6 +348,28 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
   `compat` checks the digest only when given `--sha256`. `pick` is that choice over a releases
   listing; `tools/fetch-first-party-manifests.sh` uses it to keep
   `tests/fixtures/first-party/` (each source's manifest as 0.2.7 would install it today) fresh.
+- **`check`** is what a catalogue's ingest asks of a release before it is listed (AstraPlugins
+  `spec/games/manifest.md` §4), with this launcher's own parser. Its six steps:
+  1. the launcher opens the zip (its hygiene, the manifest, every file it names, no reserved
+     profile name placed — `src/reserved.rs`, the one list, canary K13);
+  2. `Manifest::lint`: a community release's id and name are not Astra's own (`reserved-id`,
+     `reserved-name`; `--provenance first-party` skips it), `${bridge_token}` only with
+     `[integration.capabilities] companion = ["presentation"]` (`capability-undeclared`), Astra
+     Link v1's counts, names and lengths (`link-invalid`), and `[integration.engine]` a
+     descriptor Pass B admits;
+  3. every file `[integration.link]` names is in the zip (schemas ≤4 KiB, the skill ≤16 KiB);
+     holding the schemas to `link-v1.md` §6's restricted profile waits for `link-v1` to freeze;
+  4. the descriptor claims none of the spec's negative folders (as `validate-descriptor`);
+  5. with `--foundation`: `built_on{id, version, verified}`, verified only when every file the
+     foundation places this release places alike (destination and digest);
+  6. with `--previous`: `code_changed`, every placed code file (`.dll .so .dylib .jar .lua .py
+     .js .exe .asi .pyd .pyc`) new or changed.
+
+  Given a bare `astra-gi.toml` instead of a zip, it makes steps 1 and 2 only and says so.
+  `tests/goldens/astraplugins/` holds the spec's goldens at the pinned commit (`PIN`,
+  `SHA256SUMS`; re-pin with `tools/vendor-astraplugins-goldens.sh`), and `tests/goldens.rs` and
+  `tests/gi_probe.rs` hold the launcher and `check` to them (K17), every known disagreement in
+  one list, `SPEC_DEFECTS_AT_PIN`.
 - **`validate-descriptor`** is the lint of the engine descriptor specification
   (AstraPlugins `spec/games/engine-descriptor-v1.md` §5): the descriptor (TOML, JSON, or a
   foundation's `astra-gi.toml` holding `[integration.engine]`) parses, Pass B admits it, and it

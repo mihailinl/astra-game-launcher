@@ -1,0 +1,5 @@
+Copied by tools/vendor-astraplugins-goldens.sh from mihailinl/AstraPlugins at commit d46e44a089387589018f28cfc3403399f7c3b89d:
+testdata/games/, spec/games/reserved.yaml and spec/games/schemas/*.json, byte for byte.
+AstraPlugins licenses spec/ and testdata/ under GPL-3.0-or-later (its LICENSE); these files keep
+that licence. They are test data this crate's tests read, never part of the launcher's
+MPL-2.0 sources or of anything it builds.

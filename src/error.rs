@@ -103,6 +103,28 @@ pub mod codes {
     /// Not a refusal of the launcher's: the anti-cheat entry a descriptor's claim carries when
     /// the walk stopped at its cap or a kernel driver (`*.sys`) ships beside the game.
     pub const ANTI_CHEAT_UNKNOWN: &str = "anti-cheat-unknown";
+    // `[integration.*]` (`crate::Manifest`) and what is checked before publishing
+    // (`crate::Manifest::lint`, `crate::reserved`).
+    /// `[integration.engine]` declares engine codes (`codes`) and `[target] engine` (`engine`,
+    /// empty when missing) is not one of them: a foundation owns the code it detects.
+    pub const ENGINE_UNDECLARED: &str = "engine-undeclared";
+    /// The integration asks for a capability (`capability`) this launcher does not know: a newer
+    /// Astra grants it, and it must not look granted here.
+    pub const NEEDS_NEWER_ASTRA: &str = "needs-newer-astra";
+    /// `[integration.loader]` keeps (`keep_if_present`) a file it also hijack-loads (`proxies`),
+    /// or a loader (`reason` = `proxy` or `loader`; `name`).
+    pub const LOADER_POLICY_CONFLICT: &str = "loader-policy-conflict";
+    /// The integration hands Astra's avatar bridge token on (`variable`) without declaring the
+    /// capability (`capability` = `companion.presentation`) in `[integration.capabilities]`.
+    pub const CAPABILITY_UNDECLARED: &str = "capability-undeclared";
+    /// A community integration's id (`id`) begins with a first-party prefix (`prefix`).
+    pub const RESERVED_ID: &str = "reserved-id";
+    /// A community integration's name (`name`) holds a first-party word.
+    pub const RESERVED_NAME: &str = "reserved-name";
+    /// `[integration.link]` past a rule or limit of Astra Link v1 (`field`; `reason` = `shape`,
+    /// `too-many`, `name`, `duplicate`, `too-long`, `missing`, `not-a-path`, `not-in-zip`,
+    /// `too-large`; `limit` where there is one).
+    pub const LINK_INVALID: &str = "link-invalid";
     // Other.
     pub const MISSING_VARIABLE: &str = "missing-variable";
     /// A variable's value holds a character it may not carry (a newline into an INI, a NUL).
@@ -112,6 +134,69 @@ pub mod codes {
     // Command-line program only.
     pub const USAGE: &str = "usage";
     pub const CONSENT_REQUIRED: &str = "consent-required";
+
+    /// Every code above, in the order they are declared: what a caller that maps codes to its own
+    /// words (the daemon's `games.state.*`, canary K15) must cover. A test holds it equal to the
+    /// constants of this module.
+    pub const ALL: &[&str] = &[
+        FETCH_FAILED,
+        TOO_LARGE,
+        DIGEST_MISMATCH,
+        ZIP_UNSAFE_ENTRY,
+        ZIP_TOO_MANY_ENTRIES,
+        MANIFEST_MISSING,
+        MANIFEST_INVALID,
+        SCHEMA_TOO_NEW,
+        UNKNOWN_KEY,
+        UNKNOWN_PLACEHOLDER,
+        ENGINE_MISMATCH,
+        EXE_NOT_FOUND,
+        ANTI_CHEAT,
+        VAC_UNCHECKED,
+        FOREIGN_LOADER,
+        SHARED_LOADER_CHANGED,
+        SWITCHED_OFF_LOADER,
+        GAME_MISMATCH,
+        PLATFORM_UNSUPPORTED,
+        PATH_ESCAPES,
+        NOT_INSTALLED,
+        GAME_RUNNING,
+        PLAN_STALE,
+        NEEDS_REINSTALL,
+        PROTON_PREFIX_MISSING,
+        STEAM_NOT_FOUND,
+        MODS_CHOICE_NEEDED,
+        MODS_SOURCE_MISSING,
+        MODS_LOADER_UNSUPPORTED,
+        MODS_MELONLOADER,
+        MODS_UNSUPPORTED,
+        DESCRIPTOR_INVALID,
+        DESCRIPTOR_SCHEMA_UNKNOWN,
+        DESCRIPTOR_TOO_LARGE,
+        DESCRIPTOR_TOO_BROAD,
+        DESCRIPTOR_FIRST_PARTY_ONLY,
+        DESCRIPTOR_UNSUPPORTED,
+        DESCRIPTOR_DUPLICATE,
+        DESCRIPTOR_OVER_LIMIT,
+        ENGINE_CODE_RESERVED,
+        ENGINE_NAME_RESERVED,
+        ENGINE_CODE_TAKEN,
+        ENGINE_AMBIGUOUS,
+        ANTI_CHEAT_UNKNOWN,
+        ENGINE_UNDECLARED,
+        NEEDS_NEWER_ASTRA,
+        LOADER_POLICY_CONFLICT,
+        CAPABILITY_UNDECLARED,
+        RESERVED_ID,
+        RESERVED_NAME,
+        LINK_INVALID,
+        MISSING_VARIABLE,
+        INVALID_VARIABLE,
+        CANCELLED,
+        IO,
+        USAGE,
+        CONSENT_REQUIRED,
+    ];
 }
 
 /// A refusal or failure: a stable code and its parameters.
@@ -221,6 +306,21 @@ impl LauncherError {
             codes::ANTI_CHEAT_UNKNOWN => {
                 "whether the game uses anti-cheat cannot be told from its folder"
             }
+            codes::ENGINE_UNDECLARED => {
+                "astra-gi.toml declares an engine but [target] engine does not name it"
+            }
+            codes::NEEDS_NEWER_ASTRA => "this integration needs a newer Astra",
+            codes::LOADER_POLICY_CONFLICT => {
+                "astra-gi.toml keeps a file at uninstall that is a mod loader"
+            }
+            codes::CAPABILITY_UNDECLARED => {
+                "astra-gi.toml passes the avatar bridge token on without declaring the capability"
+            }
+            codes::RESERVED_ID => "the integration's id is reserved for Astra's own integrations",
+            codes::RESERVED_NAME => {
+                "the integration's name is reserved for Astra's own integrations"
+            }
+            codes::LINK_INVALID => "astra-gi.toml's [integration.link] is past a limit",
             codes::MISSING_VARIABLE => "a variable the integration needs was not given",
             codes::INVALID_VARIABLE => "a variable's value holds a forbidden character",
             codes::CANCELLED => "cancelled",
@@ -247,5 +347,49 @@ impl std::error::Error for LauncherError {}
 impl From<std::io::Error> for LauncherError {
     fn from(err: std::io::Error) -> Self {
         LauncherError::io(err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The names and values of the `pub const X: &str = "…";` lines of `codes`, as written.
+    fn declared() -> Vec<(String, String)> {
+        let src = include_str!("error.rs");
+        let body = src
+            .split_once("pub mod codes {")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .expect("the codes module");
+        body.lines()
+            .filter_map(|l| {
+                let rest = l.trim().strip_prefix("pub const ")?;
+                let (name, rest) = rest.split_once(": &str = \"")?;
+                let (value, _) = rest.split_once('"')?;
+                Some((name.to_owned(), value.to_owned()))
+            })
+            .collect()
+    }
+
+    /// K15's launcher end: `codes::ALL` is every code, once, in declaration order; every code is
+    /// spelled as a code; each has its own sentence.
+    #[test]
+    fn all_is_every_code_and_each_has_a_sentence() {
+        let declared = declared();
+        assert!(declared.len() >= 50, "{} codes scraped", declared.len());
+        let values: Vec<&str> = declared.iter().map(|(_, v)| v.as_str()).collect();
+        assert_eq!(codes::ALL, values.as_slice());
+        let mut seen = std::collections::BTreeSet::new();
+        for (name, code) in &declared {
+            assert!(seen.insert(code.clone()), "{name}: {code} twice");
+            assert!(
+                code.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+                "{name}: {code}"
+            );
+            let code: &'static str = codes::ALL.iter().find(|c| **c == code).unwrap();
+            assert_ne!(LauncherError::new(code).sentence(), "error", "{name}");
+        }
     }
 }

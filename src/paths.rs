@@ -24,6 +24,9 @@ pub(crate) const PLAY_ARM_FILE: &str = "play-arm.json";
 /// The player's answer to "play with your mods?" for this game ([`crate::set_mods_choice`]).
 /// Never one of the ledger's files.
 pub(crate) const MODS_CHOICE_FILE: &str = "mods-choice.json";
+/// Astra Link's discovery file (marketplace plan A§3.1). Reserved now, before its writer ships
+/// (it waits for `link-v1` to freeze), so no integration installed meanwhile can hold the name.
+pub(crate) const LINK_FILE: &str = "astra-link.json";
 const TEMP_MARK: &str = ".astra-tmp-";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,15 +93,10 @@ pub(crate) fn parse_jailed(s: &str) -> Result<JailPath> {
     Ok(JailPath { root, rel, is_dir })
 }
 
-/// The profile's own bookkeeping: the ledger, its lock, the backups, the play-arm file, the mods
-/// choice. Case-insensitive.
+/// The profile's own files ([`crate::reserved::PROFILE_FILE_NAMES`]: the ledger, its lock, the
+/// backups, the play-arm file, the mods choice, `astra-link.json`). Case-insensitive.
 pub(crate) fn is_reserved(first: &str) -> bool {
-    let f = first.to_ascii_lowercase();
-    f == LEDGER_FILE
-        || f == LOCK_FILE
-        || f == BACKUP_DIR
-        || f == PLAY_ARM_FILE
-        || f == MODS_CHOICE_FILE
+    crate::reserved::profile_name_is_reserved(first)
 }
 
 /// One path component that is safe on every platform the launcher serves: no separators, no

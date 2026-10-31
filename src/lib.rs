@@ -34,6 +34,7 @@ mod package;
 mod paths;
 mod plan;
 mod proton;
+pub mod reserved;
 mod running;
 pub mod steam_appinfo;
 mod steam_userconfig;
@@ -64,8 +65,9 @@ pub use ledger::{
     LedgerState, LoaderBaseline, ProtonRecord,
 };
 pub use manifest::{
-    ConfigWrite, FileRule, GameFileRule, IntegrationInfo, Launch, MANIFEST_FILE, Manifest, SCHEMA,
-    Target, wine_dll_overrides,
+    BRIDGE_TOKEN_VARIABLE, COMPANION_PRESENTATION, ConfigWrite, FileRule, FoundationClaim,
+    GameFileRule, IntegrationInfo, KEEP_EXTENSIONS, Launch, LoaderDecl, MANIFEST_FILE, Manifest,
+    SCHEMA, Target, link_limits, wine_dll_overrides,
 };
 pub use mods::{
     ArmedBy, Choice, ChoiceKind, ChoiceSource, LOADER_STATUS_FILE_NAME, LastRun, LoaderKind,
@@ -73,7 +75,9 @@ pub use mods::{
     ModsEnv, ModsLoader, Unplayable, add_mods_root, default_mods_source, discover_mods,
     discover_mods_in, loader_status, mods_choice, mods_last_run, set_mods_choice,
 };
-pub use package::{GiPackage, Limits, PackageSummary, SummaryConfigWrite, SummaryGameFile};
+pub use package::{
+    GiPackage, Limits, PackageSummary, PlacedFile, SummaryConfigWrite, SummaryGameFile,
+};
 pub use plan::{
     Accept, FormerFile, GameAction, GameFileAction, InstallPlan, VALVE_ANTI_CHEAT, plan_install,
     vac_verdict,

@@ -46,7 +46,7 @@ use crate::v027::releases::{
     self, GhRelease, Gi, canonical_url, check_manifest, fallback_gi_with, pick_with, version_after,
 };
 use crate::v027::service::{consent_needed_for, same_repo};
-use crate::{Fatal, Finding, Scratch, report, trees};
+use crate::{Fatal, Finding, Probe, Scratch, report, trees};
 
 /// The port Astra 0.2.7 passes (`service.rs:36`, `DEFAULT_BRIDGE_PORT`).
 const BRIDGE_PORT: &str = "25600";
@@ -64,26 +64,6 @@ pub struct CompatArgs {
     pub notes: Option<PathBuf>,
 }
 
-/// One step's outcome.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Status {
-    Pass,
-    Fail,
-    Notice,
-    Skipped,
-}
-
-impl Status {
-    fn code(self) -> &'static str {
-        match self {
-            Status::Pass => "pass",
-            Status::Fail => "fail",
-            Status::Notice => "notice",
-            Status::Skipped => "skipped",
-        }
-    }
-}
-
 const STEPS: [&str; 6] = [
     "launcher 0.3.1 opens the zip and parses its manifest",
     "Astra 0.2.7's check_manifest, and pick's tag and asset rule, for the source",
@@ -92,54 +72,6 @@ const STEPS: [&str; 6] = [
     "the files under every `**` are the previous release's, or named in the notes",
     "the consent sheet's inputs are the previous release's",
 ];
-
-struct Probe {
-    steps: Vec<Value>,
-    findings: Vec<Finding>,
-    notices: Vec<Finding>,
-}
-
-impl Probe {
-    fn finding(&mut self, step: u8, f: Finding) {
-        self.findings.push(f.step(step));
-    }
-
-    fn notice(&mut self, step: u8, f: Finding) {
-        self.notices.push(f.step(step));
-    }
-
-    /// Closes `step`: `fail` when it added a finding, else `notice` when it added a notice, else
-    /// `pass`; `extra` joins the step's entry.
-    fn close(&mut self, step: u8, findings_before: usize, notices_before: usize, extra: Value) {
-        let status = if self.findings.len() > findings_before {
-            Status::Fail
-        } else if self.notices.len() > notices_before {
-            Status::Notice
-        } else {
-            Status::Pass
-        };
-        self.push(step, status, None, extra);
-    }
-
-    fn skip(&mut self, step: u8, why: &str) {
-        self.push(step, Status::Skipped, Some(why), Value::Null);
-    }
-
-    fn push(&mut self, step: u8, status: Status, why: Option<&str>, extra: Value) {
-        let mut v = json!({
-            "step": step,
-            "check": STEPS[usize::from(step) - 1],
-            "status": status.code(),
-        });
-        if let Some(why) = why {
-            v["why"] = json!(why);
-        }
-        if let (Value::Object(o), Value::Object(e)) = (&mut v, extra) {
-            o.extend(e);
-        }
-        self.steps.push(v);
-    }
-}
 
 fn refusal(e: &LauncherError, detail: &str) -> Finding {
     Finding::from_refusal(e.code, &e.params, detail)
@@ -202,11 +134,7 @@ pub fn run(a: &CompatArgs) -> Result<(Value, bool), Fatal> {
     };
     let zip_sha256 = sha256_hex(&zip);
     let scratch = Scratch::new("compat")?;
-    let mut p = Probe {
-        steps: Vec::new(),
-        findings: Vec::new(),
-        notices: Vec::new(),
-    };
+    let mut p = Probe::new(&STEPS);
 
     // 1. Open and parse.
     let pkg = match GiPackage::open(&zip, a.sha256.as_deref().unwrap_or(&zip_sha256)) {
@@ -715,12 +643,7 @@ fn step_consent(
                 )
                 .field("previous"),
             );
-            p.push(
-                6,
-                Status::Skipped,
-                Some("the previous release does not open"),
-                Value::Null,
-            );
+            p.skip(6, "the previous release does not open");
             return;
         }
     };
@@ -750,12 +673,7 @@ fn step_consent(
                 )
                 .field("previous"),
             );
-            p.push(
-                6,
-                Status::Skipped,
-                Some("the previous release does not install"),
-                Value::Null,
-            );
+            p.skip(6, "the previous release does not install");
             return;
         }
     };

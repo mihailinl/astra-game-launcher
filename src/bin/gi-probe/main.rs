@@ -15,10 +15,14 @@
 //!
 //! - `compat`: a release against Astra 0.2.7 and launcher 0.3.1, plan B §2's six C2 steps plus
 //!   0.2.7's own tag, asset and manifest rules ([`compat`]). Canary K4.
+//! - `check`: may a release be published — the launcher's own parse and zip hygiene, the
+//!   `[integration.*]` rules, reserved ids and names, Astra Link's limits, the engine descriptor,
+//!   `built_on` and `code_changed` ([`check`]). What a catalogue's ingest runs.
 //! - `validate-descriptor`: an `astra.engine/1` descriptor, the spec's §5 lint ([`descriptor`]).
 //! - `pick`: Astra 0.2.7's choice of release out of a GitHub releases listing, for
 //!   `tools/fetch-first-party-manifests.sh` (the replica, [`v027::releases::pick_with`]).
 
+mod check;
 mod compat;
 mod descriptor;
 mod trees;
@@ -42,6 +46,8 @@ USAGE
   gi-probe compat --zip <astra-gi.zip> --source <integration id> --tag <tag>
                   [--asset <name>] [--prerelease] [--sha256 <hex>]
                   [--previous <previous release's zip>] [--notes <release notes file>]
+  gi-probe check <astra-gi.zip | astra-gi.toml> [--provenance first-party|community]
+                 [--foundation <foundation's zip>] [--previous <previous release's zip>]
   gi-probe validate-descriptor <file> [--first-party]
   gi-probe pick --source <integration id> --listing <releases.json> [--prerelease]
   gi-probe --version
@@ -54,6 +60,14 @@ USAGE
                 inputs are the previous release's (a change is a notice, not a finding).
                 --asset defaults to the zip's file name. --prerelease: the release is a
                 GitHub prerelease (its tag may then be a semver pre-release).
+  check         may the release be published: the launcher opens it (zip hygiene, the manifest,
+                reserved profile names); a community release's id and name are not Astra's own;
+                ${bridge_token} only with the companion capability \"presentation\" declared;
+                [integration.link] within Astra Link v1's limits, its files in the zip;
+                [integration.engine] a descriptor Pass B admits, claiming no negative folder;
+                built_on (every file --foundation places, placed alike) and code_changed
+                (code new or changed since --previous) are reported. --provenance defaults to
+                community. A bare astra-gi.toml is checked without the zip's half.
   validate-descriptor
                 an astra.engine/1 descriptor (TOML, JSON, or a manifest's [integration.engine]):
                 it parses, Pass B admits it, and it claims none of the spec's negative folders.
@@ -113,6 +127,86 @@ impl Finding {
             detail: detail.to_owned(),
             params: params.clone(),
         }
+    }
+}
+
+/// One step's outcome.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Status {
+    Pass,
+    Fail,
+    Notice,
+    Skipped,
+}
+
+impl Status {
+    fn code(self) -> &'static str {
+        match self {
+            Status::Pass => "pass",
+            Status::Fail => "fail",
+            Status::Notice => "notice",
+            Status::Skipped => "skipped",
+        }
+    }
+}
+
+/// A subcommand's numbered steps (`steps[]`), its findings and its notices.
+pub struct Probe {
+    names: &'static [&'static str],
+    pub steps: Vec<Value>,
+    pub findings: Vec<Finding>,
+    pub notices: Vec<Finding>,
+}
+
+impl Probe {
+    /// Step `n` is `names[n - 1]`.
+    pub fn new(names: &'static [&'static str]) -> Probe {
+        Probe {
+            names,
+            steps: Vec::new(),
+            findings: Vec::new(),
+            notices: Vec::new(),
+        }
+    }
+
+    pub fn finding(&mut self, step: u8, f: Finding) {
+        self.findings.push(f.step(step));
+    }
+
+    pub fn notice(&mut self, step: u8, f: Finding) {
+        self.notices.push(f.step(step));
+    }
+
+    /// Closes `step`: `fail` when it added a finding, else `notice` when it added a notice, else
+    /// `pass`; `extra` joins the step's entry.
+    pub fn close(&mut self, step: u8, findings_before: usize, notices_before: usize, extra: Value) {
+        let status = if self.findings.len() > findings_before {
+            Status::Fail
+        } else if self.notices.len() > notices_before {
+            Status::Notice
+        } else {
+            Status::Pass
+        };
+        self.push(step, status, None, extra);
+    }
+
+    pub fn skip(&mut self, step: u8, why: &str) {
+        self.push(step, Status::Skipped, Some(why), Value::Null);
+    }
+
+    fn push(&mut self, step: u8, status: Status, why: Option<&str>, extra: Value) {
+        let mut v = json!({
+            "step": step,
+            "check": self.names[usize::from(step) - 1],
+            "status": status.code(),
+        });
+        if let Some(why) = why {
+            v["why"] = json!(why);
+        }
+        if let (Value::Object(o), Value::Object(e)) = (&mut v, extra) {
+            o.extend(e);
+        }
+        self.steps.push(v);
     }
 }
 
@@ -177,6 +271,9 @@ const KEY_ORDER: &[&str] = &[
     "integration",
     "descriptor",
     "negative_folders",
+    "link",
+    "built_on",
+    "code_changed",
     "release",
     "fallback",
     "steps",
@@ -319,6 +416,27 @@ fn run(argv: &[String]) -> Result<(Value, bool), Fatal> {
                 notes: a.opt("notes").map(PathBuf::from),
             };
             compat::run(&args)
+        }
+        "check" => {
+            let a = Args::parse(rest, &["provenance", "foundation", "previous"], &[])?;
+            let [file] = a.positional.as_slice() else {
+                return Err(Fatal::usage("check takes one zip or astra-gi.toml"));
+            };
+            let first_party = match a.opt("provenance").unwrap_or("community") {
+                "first-party" => true,
+                "community" => false,
+                other => {
+                    return Err(Fatal::usage(format!(
+                        "--provenance is first-party or community, not {other:?}"
+                    )));
+                }
+            };
+            check::run(&check::CheckArgs {
+                file: PathBuf::from(file),
+                first_party,
+                foundation: a.opt("foundation").map(PathBuf::from),
+                previous: a.opt("previous").map(PathBuf::from),
+            })
         }
         "validate-descriptor" => {
             let a = Args::parse(rest, &[], &["first-party"])?;
