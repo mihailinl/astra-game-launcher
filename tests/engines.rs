@@ -871,6 +871,76 @@ fn a_match_on_steams_hint_wins_within_its_standing() {
     write(&t.join("deep/a/b/c/d/Launcher.exe"), b"MZ");
     let got = d(t.path(), Some("deep/a/b/c/d/Launcher.exe"), &set);
     assert_eq!((got.engine.as_str(), got.hint_used), ("alpha", false));
+    // Not even by a first-party descriptor that does not skip wrappers: the hint's own jail.
+    let fp = alpha_like("beta", "beta.core")
+        .replace("first = 8 }", "first = 8, skip_wrappers = false }");
+    let set = set_of(&[(Moderation::Moderated, "astra", true, &fp)]);
+    assert_eq!(set.len(), 1, "{:?}", set.skipped());
+    write(
+        &t.join("deep/a/b/c/d/Tool.exe"),
+        b"PK not a program any more",
+    );
+    let got = d(t.path(), Some("deep/a/b/c/d/Launcher.exe"), &set);
+    assert!(got.engine.is_unknown() && !got.hint_used, "{got:?}");
+}
+
+/// Of one code at one depth, a rule that passes beats one that does not, even a larger one.
+#[test]
+fn at_one_depth_a_rule_that_passes_beats_a_fallback() {
+    let text = r#"
+schema = "astra.engine/1"
+engine = { codes = { zeta = "Zeta" } }
+[[rule]]
+tier = "strong"
+programs = { ext = ["exe"], first = 8 }
+require = [ { listed = "zeta.core", kind = "file" }, { child = "zdata", kind = "dir", as = "data" } ]
+code = "zeta"
+confidence = "high"
+evidence = "{data}"
+binary = "windows"
+[[rule]]
+tier = "strong-fallback"
+programs = { ext = ["exe"], first = 8 }
+require = [ { listed = "zeta.old", kind = "file" }, { child = "zdata", kind = "dir", as = "data" } ]
+code = "zeta"
+confidence = "low"
+passes = false
+evidence = "{data}"
+binary = "windows"
+"#;
+    let set = one(text);
+    assert_eq!(set.len(), 1, "{:?}", set.skipped());
+    let t = Tmp::new("passes");
+    write(&t.join("A/Game.exe"), b"MZ");
+    write(&t.join("A/zeta.old"), b"o");
+    write(&t.join("A/zdata/big.bin"), &[0u8; 32 * 1024]);
+    write(&t.join("B/Game.exe"), b"MZ");
+    write(&t.join("B/zeta.core"), b"c");
+    write(&t.join("B/zdata/small.bin"), b"s");
+    let got = d(t.path(), None, &set);
+    assert_eq!(
+        (got.exe, got.confidence),
+        (p("B/Game.exe"), Confidence::High)
+    );
+}
+
+/// `also_if` adds programs by what sits beside them, never a kind Pass B does not consider.
+#[test]
+fn also_if_never_admits_a_non_program() {
+    let text = alpha_like("alpha", "alpha.core").replace(
+        "first = 8 }",
+        "first = 8, also_if = { dir = \"{name}_Data\" } }",
+    );
+    let set = one(&text);
+    assert_eq!(set.len(), 1, "{:?}", set.skipped());
+    let t = Tmp::new("also-if");
+    write(&t.join("run.sh"), b"\x7fELF but a script by name");
+    write(&t.join("run.sh_Data/x"), b"x");
+    write(&t.join("alpha.core"), b"a");
+    assert!(d(t.path(), None, &set).engine.is_unknown());
+    write(&t.join("run"), b"\x7fELF");
+    write(&t.join("run_Data/x"), b"x");
+    assert_eq!(d(t.path(), None, &set).exe, p("run"));
 }
 
 #[test]
@@ -977,7 +1047,11 @@ version = { head = ["{res}/missing.txt", "{res}/version.txt"], template = "N{1,2
     write(&t.join("Run_res/lite.pak"), b"x");
     assert_eq!(d(t.path(), None, &set).engine, "gamma-lite");
     std::fs::remove_file(t.join("Run_res/lite.pak")).unwrap();
-    assert!(d(t.path(), None, &set).engine.is_unknown());
+    assert_eq!(
+        d(t.path(), None, &set),
+        detect_with(t.path(), None).unwrap(),
+        "classify's `unknown` names nothing: Pass A's answer, no descriptor in it"
+    );
     write(&t.join("Run_res/full.pak"), b"x");
     assert_eq!(d(t.path(), None, &set).engine, "gamma");
 
