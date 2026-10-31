@@ -262,17 +262,9 @@ fn fixtures() -> BTreeSet<&'static str> {
         pinned.insert("link-program-folder");
     }
 
-    // refused-name
+    // refused-name (a device name only compared with a listing is not one: `nul.pck` beside
+    // `nul.exe` is Godot on both sides, tests/detect.rs `a_name_only_compared_with_a_listing_…`)
     {
-        let t = Tmp::new("div-device-name");
-        write(&t.join("nul.exe"), b"MZ game");
-        write(&t.join("nul.pck"), b"GDPC");
-        let old = answered(legacy(t.path(), None));
-        assert_eq!(old.engine.as_str(), "godot", "0.4.1 matched nul.pck");
-        let new = detect_with(t.path(), None).unwrap();
-        assert!(new.engine.is_unknown() && new.evidence.is_none());
-        assert_eq!(new.exe.as_deref(), Some(Path::new("nul.exe")));
-
         let t = Tmp::new("div-device-hint");
         let name = "COM\u{00B9}";
         write(&t.join(&format!("{name}.exe")), b"MZ game");

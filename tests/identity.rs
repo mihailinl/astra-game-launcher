@@ -18,7 +18,7 @@
 //! `GameAction` for every file, the same refusal and its parameters.
 //!
 //! The tests in `tests/detect.rs` go through the same check, fixture by fixture. Where 0.5.0
-//! knowingly answers otherwise (a link, a FIFO, a name the launcher refuses), C1 has declared
+//! knowingly answers otherwise (a link, a FIFO, a hint naming a Windows device), C1 has declared
 //! exceptions, each pinned by `tests/divergence.rs` against `tests/corpus/divergence.txt`, where
 //! 0.4.1 runs in a child process with a timeout. The corpus holds links but no FIFO, and no link
 //! a read would follow, so 0.4.1 runs in-process here.
@@ -99,6 +99,10 @@ struct Counts {
     weak_shipping: AtomicUsize,
     paks_only: AtomicUsize,
     embedded_pck: AtomicUsize,
+    /// A built-in engine named for a game whose evidence holds a name only a Linux disk holds
+    /// (`corpus::ODD_NAMES`); and an Unreal project so named chosen over another.
+    odd_named: AtomicUsize,
+    odd_project: AtomicUsize,
     /// C1b: plans with Astra's own manifests, those that planned, the actions they hold, and
     /// every refusal by its code.
     c1b_plans: AtomicUsize,
@@ -501,6 +505,23 @@ fn one_tree(
         if d.engine == Engine::Godot && d.confidence == astra_game_launcher::Confidence::Low {
             bump(&counts.embedded_pck);
         }
+        if !d.engine.is_unknown()
+            && let Some(e) = &d.evidence
+        {
+            let odd = |c: &std::ffi::OsStr| {
+                let c = c.to_string_lossy();
+                corpus::ODD_NAMES.iter().any(|n| c.starts_with(n))
+            };
+            if e.iter().any(odd) {
+                bump(&counts.odd_named);
+            }
+            if d.engine == Engine::Unreal
+                && e.file_name()
+                    .is_some_and(|l| corpus::ODD_NAMES.iter().any(|n| l.to_string_lossy() == *n))
+            {
+                bump(&counts.odd_project);
+            }
+        }
         match d.exe_pick {
             Some(ExePick::LaunchConfig) => bump(&counts.pick_launch_config),
             Some(ExePick::Only) => bump(&counts.pick_only),
@@ -722,6 +743,8 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
         ("weak: any shipping program", get(&c.weak_shipping)),
         ("weak: paks, no program", get(&c.paks_only)),
         ("weak: embedded pck", get(&c.embedded_pck)),
+        ("odd names named", get(&c.odd_named)),
+        ("odd projects chosen", get(&c.odd_project)),
     ];
     eprintln!("C1 corpus:");
     for (k, v) in &report {
@@ -756,7 +779,13 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
         ("weak: any shipping program", 130),
         ("weak: paks, no program", 400),
         ("weak: embedded pck", 280),
+        ("odd names named", 1_400),
+        ("odd projects chosen", 750),
     ] {
+        // The odd names are laid on Unix only: no Windows disk holds them.
+        if !cfg!(unix) && k.starts_with("odd ") {
+            continue;
+        }
         let floor = (per_20k * trees as usize / 20_000).max(1);
         let got = report.iter().find(|(name, _)| *name == k).unwrap().1;
         assert!(

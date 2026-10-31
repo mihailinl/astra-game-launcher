@@ -1,7 +1,9 @@
 # Where launcher 0.5.0's detector and planning's engine check knowingly answer otherwise than
 # 0.4.1's (main 73bf11e, the `launcher_legacy` dev-dependency), canary C1's declared exceptions.
-# Each comes from one rule 0.5.0 holds everywhere: no read follows a link, waits on a FIFO, or
-# composes a name the launcher refuses. Everything else C1 holds byte for byte.
+# Each comes from one rule 0.5.0 holds everywhere: no read follows a link or waits on a FIFO, and
+# no hint is followed through a name the launcher refuses. A name only compared with a listing
+# already read is compared as 0.4.1 compared it, whatever it holds (`: ? " * | < > \`, a Windows
+# device's first segment). Everything else C1 holds byte for byte.
 #
 # One row per line: id | where | 0.4.1 | 0.5.0
 # tests/divergence.rs lays a fixture per row, runs 0.4.1 in a child process with a timeout (it
@@ -12,4 +14,4 @@ fifo-version-header | a FIFO where a Unity game's version header would be (Game_
 link-version-header | a link where a Unity game's version header would be | reads the version through the link, wherever it points | reads nothing through it: the game, with no version — what 0.4.1 says with the link gone
 link-in-a-stat | a link on the way to a file a rule asks for by its exact path (Game_Data/Managed linked to a folder holding Assembly-CSharp.dll) | follows it: Mono | refuses it: the flavour as if the link were not there
 link-program-folder | planning a program named through a linked folder (LinkedDir/Game.exe, LinkedDir a link to the game's own folder) | follows it: the engine of the program behind the link | reads nothing through it: engine-mismatch, got unknown
-refused-name | a name the launcher never composes or follows: a Windows device name (nul.pck beside nul.exe; a hint COM¹.exe, which Windows reads as COM1) | matched it by listing: Godot; followed the hint | composes none and follows none: unknown; the hint unused, the folder search finding the game
+refused-name | Steam's hint naming a Windows device the launcher never follows (COM¹.exe, which Windows reads as COM1, beside a Unity game's player and data) | followed the hint: hint_used | follows none: the hint unused, the folder search finding the same game

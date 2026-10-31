@@ -19,7 +19,7 @@
 //! adds: a folder of 10,000 names that a listing cut BEFORE it is sorted reads differently from
 //! one cut after, a game past the walk's cap with Steam's hint naming it, and the tree's Steam
 //! appid ([`extras`]); the shapes only a weak or a planning-only built-in rule answers
-//! ([`strays`], L2).
+//! ([`strays`], L2); games named as only a Linux disk names them ([`odd_names`], L2).
 
 use std::fs;
 use std::path::Path;
@@ -571,7 +571,121 @@ pub fn tree(seed: u64) -> Tree {
     };
     extras(seed, &mut t);
     strays(seed, &mut t);
+    odd_names(seed, &mut t);
     t
+}
+
+/// Names a Linux disk holds and a Windows one never does: `: ? " * | < > \`, control
+/// characters, a Windows device's first segment, a trailing dot or space.
+pub const ODD_NAMES: &[&str] = &[
+    "Game: X",
+    "Why?",
+    "Say \"Hi\"",
+    "a|b",
+    "<x>",
+    "star*",
+    "back\\slash",
+    "con.v1",
+    "nul",
+    "Aux",
+    "COM1",
+    "lpt3.x",
+    "A:B",
+    "Proj.",
+    "Proj ",
+    "tab\tname",
+    "bell\x07",
+];
+
+/// The fourth stream (L2, Unix): games and projects named with [`ODD_NAMES`] — a Unity game, a
+/// Godot pair, an Unreal project whose bootstrapper (or Steam's hint naming it) ranks it over a
+/// larger one, an Unreal project whose name alone breaks a tie of equal sizes. 0.4.1 compared
+/// such names with a listing as it compared any other; so must 0.5.0. Drawn from its own
+/// generator, laid after everything else.
+fn odd_names(seed: u64, t: &mut Tree) {
+    if !cfg!(unix) {
+        return;
+    }
+    let mut z = Rng::new(seed.rotate_left(17) ^ 0x0DD4_A3E5_0000_0003);
+    if !z.chance(6) {
+        return;
+    }
+    let file = |t: &mut Tree, path: String, bytes: &[u8]| {
+        t.nodes.push(Node::File(path, bytes.to_vec()));
+    };
+    let name = (*z.pick(ODD_NAMES)).to_owned();
+    let at = (*z.pick(&["", "", "Odd/", "Pack A/"])).to_owned();
+    match z.below(4) {
+        0 => {
+            let ext = *z.pick(PROGRAM_EXTS);
+            let program = if ext.is_empty() {
+                format!("{at}{name}")
+            } else {
+                format!("{at}{name}.{ext}")
+            };
+            file(t, program.clone(), b"MZ\x90\0 odd");
+            t.programs.push(program.clone());
+            if z.chance(40) {
+                t.hints.push(program);
+            }
+            let player = *z.pick(&["UnityPlayer.dll", "UnityPlayer.so"]);
+            file(t, format!("{at}{player}"), b"MZ player");
+            let data = format!("{at}{name}_Data");
+            match z.below(3) {
+                0 => file(t, format!("{data}/Managed/Assembly-CSharp.dll"), b"MZ cs"),
+                1 => file(t, format!("{at}GameAssembly.dll"), b"MZ ga"),
+                _ => t.nodes.push(Node::Dir(format!("{data}/Managed"))),
+            }
+            if z.chance(50) {
+                file(
+                    t,
+                    format!("{data}/globalgamemanagers"),
+                    b"\0\x162021.3.16f1\0",
+                );
+            }
+        }
+        1 => {
+            let ext = *z.pick(&["exe", "x86_64", "x86"]);
+            let program = format!("{at}{name}.{ext}");
+            file(t, program.clone(), b"\x7fELF odd");
+            t.programs.push(program);
+            file(t, format!("{at}{name}.pck"), b"GDPC");
+        }
+        2 => {
+            // The odd project is small, `Zed/` large: only its bootstrapper ranks it first.
+            for (project, size) in [(name.as_str(), 8usize), ("Zed", 32 * 1024)] {
+                let exe = format!("{at}{project}/Binaries/Win64/{project}-Win64-Shipping.exe");
+                file(t, exe.clone(), b"MZ");
+                t.programs.push(exe);
+                file(
+                    t,
+                    format!("{at}{project}/Content/Paks/pakchunk0-Windows.pak"),
+                    &vec![0u8; size],
+                );
+            }
+            let boot = format!("{at}{name}.exe");
+            if z.chance(60) {
+                file(t, boot.clone(), b"MZ bootstrapper");
+            }
+            if z.chance(50) {
+                t.hints.push(boot);
+            }
+        }
+        _ => {
+            // Two projects of equal size: the one whose program repeats its name wins, the odd
+            // one; `!Other` sorts first by path, so nothing else would choose it.
+            for (project, program) in [(name.as_str(), name.as_str()), ("!Other", "Else")] {
+                let exe = format!("{at}{project}/Binaries/Win64/{program}-Win64-Shipping.exe");
+                file(t, exe.clone(), b"MZ");
+                t.programs.push(exe);
+                file(
+                    t,
+                    format!("{at}{project}/Content/Paks/pakchunk0-Windows.pak"),
+                    &[0u8; 64],
+                );
+            }
+        }
+    }
 }
 
 /// The second stream: drawn from its own generator, laid after everything the first stream

@@ -950,3 +950,86 @@ fn paks_name_their_platform_by_the_first_that_carries_one() {
         (Engine::Unreal, None, p("Gameface"), Binary::Linux)
     );
 }
+
+/// Names a Linux disk holds and a Windows one never does — `: ? " * | < > \`, a Windows device
+/// name's first segment (`con.v1`), a trailing dot — are compared with a listing exactly as 0.4.1
+/// compared them: a game whose program carries one is still the game, and a bootstrapper named
+/// after such a project still ranks it. Nothing is opened by such a name (a stat or a read of a
+/// composed name still needs one the launcher accepts everywhere). Each also C1.
+#[cfg(unix)]
+#[test]
+fn a_name_only_compared_with_a_listing_is_compared_as_0_4_1_did() {
+    let unity = |stem: &str, ext: &str, player: &str| {
+        let t = Tmp::new("odd-name-unity");
+        let program = if ext.is_empty() {
+            stem.to_owned()
+        } else {
+            format!("{stem}.{ext}")
+        };
+        write(&t.join(&program), b"MZ game");
+        write(&t.join(player), b"MZ player");
+        write(
+            &t.join(&format!("{stem}_Data/Managed/Assembly-CSharp.dll")),
+            b"MZ cs",
+        );
+        let d = detect(t.path()).unwrap();
+        assert_eq!(
+            (eng(&d), d.confidence, d.exe, d.evidence),
+            (
+                Engine::UnityMono,
+                Confidence::High,
+                Some(PathBuf::from(&program)),
+                Some(PathBuf::from(format!("{stem}_Data")))
+            ),
+            "{program:?}"
+        );
+    };
+    unity("Game: X", "x86_64", "UnityPlayer.so");
+    unity("Say \"Hi\"", "", "UnityPlayer.so");
+    unity("con.v1", "exe", "UnityPlayer.dll");
+    unity("a|b<c>*", "exe", "UnityPlayer.dll");
+    unity("back\\slash", "x86_64", "UnityPlayer.so");
+    unity("aux.x", "exe", "UnityPlayer.dll");
+
+    for stem in ["Why?", "nul", "a:b", "tab\tname"] {
+        let t = Tmp::new("odd-name-godot");
+        write(&t.join(&format!("{stem}.x86_64")), b"\x7fELF game");
+        write(&t.join(&format!("{stem}.pck")), b"GDPC");
+        let d = detect(t.path()).unwrap();
+        assert_eq!(
+            (eng(&d), d.confidence, d.evidence),
+            (
+                Engine::Godot,
+                Confidence::High,
+                Some(PathBuf::from(format!("{stem}.pck")))
+            ),
+            "{stem:?}"
+        );
+    }
+
+    // Two paired projects at one depth: the one a bootstrapper beside it names (`Aux.exe`,
+    // `A:B.exe`) outranks a larger one, and a project leaf ending in a dot still names its
+    // shipping program alike.
+    for leaf in ["Aux", "A:B", "Proj."] {
+        let t = Tmp::new("odd-name-unreal");
+        for (project, size) in [(leaf, 8), ("Zed", 64 * 1024)] {
+            write(
+                &t.join(&format!(
+                    "{project}/Binaries/Win64/{project}-Win64-Shipping.exe"
+                )),
+                b"MZ",
+            );
+            write(
+                &t.join(&format!("{project}/Content/Paks/pakchunk0-Windows.pak")),
+                &vec![0u8; size],
+            );
+        }
+        write(&t.join(&format!("{leaf}.exe")), b"MZ bootstrapper");
+        let d = detect(t.path()).unwrap();
+        assert_eq!(
+            (eng(&d), d.evidence),
+            (Engine::Unreal, Some(PathBuf::from(leaf))),
+            "{leaf:?}"
+        );
+    }
+}

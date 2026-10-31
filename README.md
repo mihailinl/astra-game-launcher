@@ -266,8 +266,9 @@ rules: a launcher beside a Unity game is not a Unity game.
 Since 0.5.0 these rules are data: the built-in engine descriptors
 [`src/engines/builtin/`](src/engines/builtin) (`unity.toml`, `godot.toml`, `unreal.toml`), read
 by the same evaluator as any descriptor below and held to launcher 0.4.1's answers by canary C1.
-Where 0.5.0 answers otherwise — it follows no link and waits on no FIFO, where 0.4.1 did both in
-a few reads — is listed in [`tests/corpus/divergence.txt`](tests/corpus/divergence.txt).
+Where 0.5.0 answers otherwise — it follows no link, waits on no FIFO, and follows no Steam hint
+naming a Windows device (`COM¹.exe`), where 0.4.1 did all three — is listed in
+[`tests/corpus/divergence.txt`](tests/corpus/divergence.txt).
 
 ## Engines learned from data (0.5.0, in progress)
 

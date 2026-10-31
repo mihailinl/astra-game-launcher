@@ -5,7 +5,10 @@
 //! The one evaluator of engine descriptors, under two policies: the built-in set (Pass A) and an
 //! [`EngineSet`] (Pass B). Both read a game folder through the same lookups — never through a
 //! link, never blocking on a FIFO — and choose among matches the same way; they differ in what
-//! they are allowed, which is what each section below says.
+//! they are allowed, which is what each section below says. A name a template composes goes into
+//! a path the evaluator touches only when the launcher accepts it on every platform
+//! (`check_component`: no Windows device name, no `<>:"|?*\`); one only compared with a listing
+//! already read is compared whatever a listing can hold, as 0.4.1 compared it ([`Names`]).
 //!
 //! **Pass A: the built-in descriptors** (`builtin/*.toml`; Unity, Godot, Unreal, in that order).
 //! Astra's own, so nothing is counted against a budget and no program's magic is asked, and a
@@ -190,6 +193,18 @@ struct View<'p> {
     prog: Option<&'p Prog>,
     project: Option<Vec<String>>,
     captures: Vec<(String, Vec<Vec<String>>)>,
+}
+
+/// What a template's composed names are for, and so what they may be.
+#[derive(Clone, Copy)]
+enum Names {
+    /// Every part goes into a path the evaluator stats, lists or reads: [`check_component`].
+    Touched,
+    /// The folders on the way are touched; the last part is only compared with their listing
+    /// (`listed`): [`listable`].
+    LastCompared,
+    /// Every part is only compared with names already read (the walk's): [`listable`].
+    Compared,
 }
 
 /// A template part, expanded.
@@ -605,7 +620,9 @@ impl<'a> Game<'a> {
         }
     }
 
-    fn name_of(pieces: &[Piece], sc: &View) -> Option<String> {
+    /// A template part as composed, before it is judged: `None` when a placeholder has no value
+    /// here, or for a glob.
+    fn compose(pieces: &[Piece], sc: &View) -> Option<String> {
         let mut s = String::new();
         for p in pieces {
             match p {
@@ -614,12 +631,25 @@ impl<'a> Game<'a> {
                 Piece::Star => return None,
             }
         }
-        check_component(&s).then_some(s)
+        Some(s)
+    }
+
+    /// A composed name that goes into a path the evaluator touches (stats, lists, reads):
+    /// only one the launcher accepts on every platform ([`check_component`]).
+    fn name_of(pieces: &[Piece], sc: &View) -> Option<String> {
+        Game::compose(pieces, sc).filter(|s| check_component(s))
+    }
+
+    /// A composed name only compared with a listing already read (`listed`'s last part,
+    /// `named_alike`, `hint_stem`): nothing is opened by it, so any name a listing can hold is
+    /// compared ([`listable`]), as 0.4.1 compared it — `Game: X_Data` on a Linux disk included.
+    fn compared_name(pieces: &[Piece], sc: &View) -> Option<String> {
+        Game::compose(pieces, sc).filter(|s| listable(s))
     }
 
     /// The template's base (below the root) and its own parts, expanded; `None` when a
-    /// placeholder has no value here or a part expands to a name no folder may hold.
-    fn expand(t: &PathT, sc: &View) -> Option<(Vec<String>, Vec<Seg>)> {
+    /// placeholder has no value here or a part expands to a name it may not (`names`).
+    fn expand(t: &PathT, sc: &View, names: Names) -> Option<(Vec<String>, Vec<Seg>)> {
         let base = match &t.base {
             None | Some(PathVar::Dir) => sc.prog?.dir.clone(),
             Some(PathVar::Program) => sc.prog?.rel.clone(),
@@ -633,7 +663,8 @@ impl<'a> Game<'a> {
             }
         };
         let mut segs = Vec::new();
-        for seg in &t.segs {
+        let last = t.segs.len().saturating_sub(1);
+        for (i, seg) in t.segs.iter().enumerate() {
             if seg.contains(&Piece::Star) {
                 let mut parts = Vec::new();
                 for p in seg {
@@ -645,15 +676,24 @@ impl<'a> Game<'a> {
                 }
                 segs.push(Seg::Glob(parts));
             } else {
-                segs.push(Seg::Name(Game::name_of(seg, sc)?));
+                let compared = match names {
+                    Names::Touched => false,
+                    Names::LastCompared => i == last,
+                    Names::Compared => true,
+                };
+                segs.push(Seg::Name(if compared {
+                    Game::compared_name(seg, sc)?
+                } else {
+                    Game::name_of(seg, sc)?
+                }));
             }
         }
         Some((base, segs))
     }
 
-    /// A template with no glob, as one path below the root.
+    /// A template with no glob, as one path below the root, to be touched.
     fn full_path(t: &PathT, sc: &View) -> Option<Vec<String>> {
-        let (mut base, segs) = Game::expand(t, sc)?;
+        let (mut base, segs) = Game::expand(t, sc, Names::Touched)?;
         for s in segs {
             match s {
                 Seg::Name(n) => base.push(n),
@@ -677,7 +717,8 @@ impl<'a> Game<'a> {
         spent: &mut Spent,
     ) -> Step<Option<Vec<String>>> {
         self.lookup(spent)?;
-        let Some((mut parent, mut segs)) = Game::expand(path, sc) else {
+        // The folders on the way are listed; the last part is only compared with that listing.
+        let Some((mut parent, mut segs)) = Game::expand(path, sc, Names::LastCompared) else {
             return Ok(None);
         };
         let Some(last) = segs.pop() else {
@@ -722,8 +763,8 @@ impl<'a> Game<'a> {
         kind: Kind,
         spent: &mut Spent,
     ) -> Step<Option<Vec<String>>> {
-        let Some((base, segs)) =
-            Game::expand(path, sc).filter(|(b, s)| !s.is_empty() && self.real_dir(b))
+        let Some((base, segs)) = Game::expand(path, sc, Names::Touched)
+            .filter(|(b, s)| !s.is_empty() && self.real_dir(b))
         else {
             self.lookup(spent)?;
             return Ok(None);
@@ -1106,7 +1147,7 @@ impl<'a> Game<'a> {
         let named_alike = match (&rule.named_alike, sc.prog) {
             (NamedAlike::No, _) => false,
             (NamedAlike::Yes, _) => true,
-            (NamedAlike::Template(t), Some(prog)) => Game::name_of(t, &sc)
+            (NamedAlike::Template(t), Some(prog)) => Game::compared_name(t, &sc)
                 .is_some_and(|want| program_base(rule, &prog.name).eq_ignore_ascii_case(&want)),
             (NamedAlike::Template(_), None) => false,
         };
@@ -1240,7 +1281,8 @@ impl<'a> Game<'a> {
         if detect::is_wrapper_name(h.rsplit(['/', '\\']).next().unwrap_or(h)) {
             return false;
         }
-        Game::name_of(t, sc).is_some_and(|want| detect::hint_stem(h).eq_ignore_ascii_case(&want))
+        Game::compared_name(t, sc)
+            .is_some_and(|want| detect::hint_stem(h).eq_ignore_ascii_case(&want))
     }
 
     // ---- Pass A: the built-in descriptors ----
@@ -1418,7 +1460,8 @@ impl<'a> Game<'a> {
                 project: Some(project.to_vec()),
                 captures: Vec::new(),
             };
-            let (_, segs) = Game::expand(path, &sc)?;
+            // Compared with the walk's own names: nothing is touched by them.
+            let (_, segs) = Game::expand(path, &sc, Names::Compared)?;
             segs.iter()
                 .zip(tail)
                 .all(|(s, n)| match s {
@@ -1791,7 +1834,8 @@ fn program_base<'n>(rule: &Rule, name: &'n str) -> &'n str {
     detect::program_stem(name)
 }
 
-/// `also_if.dir`, for a program not yet chosen (only `{name}` and `{stem}` mean anything).
+/// `also_if.dir`, for a program not yet chosen (only `{name}` and `{stem}` mean anything). Only
+/// compared with the program's folder's listing, so any name a listing can hold ([`listable`]).
 fn also_if_name(pieces: &[Piece], name: &str) -> Option<String> {
     let mut s = String::new();
     for p in pieces {
@@ -1802,7 +1846,15 @@ fn also_if_name(pieces: &[Piece], name: &str) -> Option<String> {
             _ => return None,
         }
     }
-    check_component(&s).then_some(s)
+    listable(&s).then_some(s)
+}
+
+/// Whether a folder's listing can hold this name: not empty, not `.` or `..`, no `/` and no NUL.
+/// What a name only COMPARED with a listing must be; one put into a path the evaluator touches
+/// must pass [`check_component`] as well (no Windows device, no `<>:"|?*\`, no trailing dot or
+/// space), which a Linux disk's names need not — 0.4.1 compared them all, and so does this.
+fn listable(s: &str) -> bool {
+    !s.is_empty() && s != "." && s != ".." && !s.contains(['/', '\0'])
 }
 
 /// Whether the program's folder `dir` is where `at` says; with the `{project}` it captures
