@@ -103,6 +103,8 @@ struct Counts {
     /// (`corpus::ODD_NAMES`); and an Unreal project so named chosen over another.
     odd_named: AtomicUsize,
     odd_project: AtomicUsize,
+    /// Trees with nine or more programs at the top: past the weak Godot rule's `first = 8`.
+    crowded: AtomicUsize,
     /// C1b: plans with Astra's own manifests, those that planned, the actions they hold, and
     /// every refusal by its code.
     c1b_plans: AtomicUsize,
@@ -469,6 +471,19 @@ fn one_tree(
     if capped {
         bump(&counts.capped);
     }
+    let tops = walked
+        .iter()
+        .filter(|p| {
+            let lower = p.to_ascii_lowercase();
+            !p.contains('/')
+                && [".exe", ".x86_64", ".x86"]
+                    .iter()
+                    .any(|e| lower.ends_with(e))
+        })
+        .count();
+    if tops >= 9 {
+        bump(&counts.crowded);
+    }
     if tree.nodes.iter().any(|n| match n {
         Node::Many(_, k) | Node::Fill(_, k) => *k > MAX_ENTRIES,
         _ => false,
@@ -745,6 +760,7 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
         ("weak: embedded pck", get(&c.embedded_pck)),
         ("odd names named", get(&c.odd_named)),
         ("odd projects chosen", get(&c.odd_project)),
+        ("trees with 9+ top programs", get(&c.crowded)),
     ];
     eprintln!("C1 corpus:");
     for (k, v) in &report {
@@ -781,6 +797,7 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
         ("weak: embedded pck", 280),
         ("odd names named", 1_400),
         ("odd projects chosen", 750),
+        ("trees with 9+ top programs", 300),
     ] {
         // The odd names are laid on Unix only: no Windows disk holds them.
         if !cfg!(unix) && k.starts_with("odd ") {

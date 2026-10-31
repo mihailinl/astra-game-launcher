@@ -19,7 +19,8 @@
 //! adds: a folder of 10,000 names that a listing cut BEFORE it is sorted reads differently from
 //! one cut after, a game past the walk's cap with Steam's hint naming it, and the tree's Steam
 //! appid ([`extras`]); the shapes only a weak or a planning-only built-in rule answers
-//! ([`strays`], L2); games named as only a Linux disk names them ([`odd_names`], L2).
+//! ([`strays`], L2); games named as only a Linux disk names them ([`odd_names`], L2); nine or
+//! more programs at the top, a pck embedded in one ([`crowds`], L2).
 
 use std::fs;
 use std::path::Path;
@@ -572,7 +573,32 @@ pub fn tree(seed: u64) -> Tree {
     extras(seed, &mut t);
     strays(seed, &mut t);
     odd_names(seed, &mut t);
+    crowds(seed, &mut t);
     t
+}
+
+/// The fifth stream (L2): nine to twelve programs at the top of the folder, a wrapper among them
+/// now and then, and a pck embedded in one of them — before the eighth in walk order or after it
+/// — so the bound on the programs the weak Godot rule asks (0.4.1's `take(8)`) is reached. Drawn
+/// from its own generator, laid after everything else.
+fn crowds(seed: u64, t: &mut Tree) {
+    let mut c = Rng::new(seed.rotate_left(53) ^ 0xC20_3D5E_0000_0004);
+    if !c.chance(3) {
+        return;
+    }
+    let n = 9 + c.below(4);
+    let packed = c.below(n);
+    for i in 0..n {
+        let ext = *c.pick(&["exe", "exe", "x86_64", "x86"]);
+        let wrapper = if c.chance(15) { "Launcher" } else { "" };
+        let path = format!("C{i:02}{wrapper}.{ext}");
+        let mut bytes = b"MZ\x90\0 crowd".to_vec();
+        if i == packed {
+            bytes.extend_from_slice(b"GDPC packed GDPC");
+        }
+        t.nodes.push(Node::File(path.clone(), bytes));
+        t.programs.push(path);
+    }
 }
 
 /// Names a Linux disk holds and a Windows one never does: `: ? " * | < > \`, control

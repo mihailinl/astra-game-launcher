@@ -1033,3 +1033,31 @@ fn a_name_only_compared_with_a_listing_is_compared_as_0_4_1_did() {
         );
     }
 }
+
+/// The embedded pck is looked for in the first eight top-level programs only, in walk order and
+/// wrappers counted — 0.4.1's `take(8)`, the weak Godot rule's `first = 8, skip_wrappers =
+/// false`: a pck closing the ninth program is not seen; closing the eighth, it is.
+#[test]
+fn only_the_first_eight_top_level_programs_are_asked_for_an_embedded_pck() {
+    let mut packed = b"MZ program bytes".to_vec();
+    packed.extend_from_slice(b"GDPC");
+    for (plain, want) in [(7, Engine::Unknown), (6, Engine::Godot)] {
+        let t = Tmp::new("eight-programs");
+        for i in 0..plain {
+            write(&t.join(&format!("A{i}.exe")), b"MZ plain");
+        }
+        // A wrapper counts: 0.4.1 took the first eight programs of any name.
+        write(&t.join("Launcher.exe"), b"MZ launcher");
+        write(&t.join("Z.exe"), &packed);
+        let d = detect(t.path()).unwrap();
+        assert_eq!(eng(&d), want, "{} programs before Z.exe", plain + 1);
+        if want == Engine::Godot {
+            assert_eq!(
+                (d.confidence, d.exe),
+                (Confidence::Low, Some(PathBuf::from("Z.exe")))
+            );
+        } else {
+            assert_eq!((d.exe, d.evidence), (None, None));
+        }
+    }
+}
