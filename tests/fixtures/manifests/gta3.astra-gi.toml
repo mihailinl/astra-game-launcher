@@ -1,0 +1,221 @@
+# astra-gi-gta3.toml (schema 1, astra-bepinex/docs/GAME-INTEGRATION-MANIFEST.md; read by astra-game-launcher).
+#
+# "Astra for GTA III - The Definitive Edition", phase 1 / DISCOVERY BUILD. This is a SEPARATE integration
+# from astra-reshade's generic Unreal runner (astra-gi.toml, `exe = "*"`) - the owner's ruling: no GTA logic
+# in the generic foundation. GTA: The Trilogy - The Definitive Edition (GTA III / Vice City / San Andreas, all
+# on Rockstar's modified UE 4.26 "Gameface") needs its own code because the generic runner only partly works
+# on it: UE4SS's own pattern scan is ambiguous on these exes (game-signatures/README.md explains why and ships
+# the two overrides this manifest installs), the player controller never possesses a Pawn (AstraGTA's
+# player_actor() falls back to the view target), the gameplay view target is a far-away default actor, and UE
+# line traces never hit GTA's own collision (Rockstar's, not Unreal's). This build adds DISCOVERY MODE (on by
+# default - AstraGTA/Scripts/main.lua, M.DISCOVERY) so one supervised run tells us how the game represents its
+# player before any GTA-specific positioning logic gets written.
+#
+# `[target]` pins this exe (and its Steam appid) - exactly the safety property game-signatures/README.md relies
+# on: a Lua `UE4SS_Signatures/<Symbol>.lua` override REPLACES UE4SS's built-in scan for that symbol outright
+# (it does not fall back if the override's AOB finds nothing), so a GTA-III-specific byte pattern must never
+# reach any other Unreal game's copy of ue4ss/ - an exe-pinned manifest is what makes that safe with no
+# launcher change (src/plan.rs::plan_install already refuses a mismatched exe/appid, GAME_MISMATCH).
+#
+# Same build, same upstream pins (UE4SS, ReShade 6.8.0 Addon) and the same `[launch]`/`[[config_writes]]` shape
+# as astra-reshade's own runner manifests - built by tools/package-gta.sh from extern/astra-reshade's own
+# compositor + AstraGTA (this repo's own copy of AstraUE, never edited in astra-reshade - see AstraGTA's header
+# for what changed: the discovery block, and nothing in the generic camera path).
+schema = 1
+
+[integration]
+id = "astra.gta-trilogy.gta3"
+name = "Astra for GTA III - The Definitive Edition"
+version = "0.1.0-discovery"
+authors = ["mihailinl"]
+license = "MIT AND BSD-3-Clause AND CC0-1.0" # ours and UE4SS: MIT; ReShade: BSD-3-Clause; ReShade.fxh: CC0-1.0
+repo = "https://github.com/mihailinl/astra-gta-trilogy"
+
+[target]
+# engine = "unreal" intentionally OMITTED: astra-game-launcher plan_install (src/plan.rs) checks it with
+# detect::engine_of_exe, whose only Unreal rule (src/detect.rs::unreal) requires the exe name to end
+# "-Win64-Shipping.exe" - Rockstar's Gameface build does not follow that convention (this game's own
+# exe above has no such suffix), so the check would always report engine-mismatch on a real install.
+# [target].exe + steam_appid already fully pin this game (GAME_MISMATCH refuses anything else); the
+# engine check adds no extra safety here, only a false refusal. Confirmed with the launcher CLI against
+# a scratch fake layout, 2026-10-20 (plan/install/launch --dry-run/uninstall all succeed without it).
+exe = "Gameface/Binaries/Win64/LibertyCity.exe"
+steam_appid = 1546970
+platforms = ["windows-x64", "linux-proton"]
+anti_cheat = "none"
+
+# ---- the game folder: the real exe's folder (Gameface/Binaries/Win64, beside LibertyCity.exe) ----
+
+# UE4SS's proxy (upstream, unmodified)
+[[game_files]]
+from = "dwmapi.dll"
+to = "${game}/dwmapi.dll"
+sha256 = "3f11fad958a959dd7ab78ab0b42be90e33f8ef8e152fbdc3c8e4278cb590e6cc"
+
+# UE4SS, whole, beside the exe in its own layout (ue4ss/) - UE4SS 3.x's own layout (docs.ue4ss.com), the same
+# reason astra-reshade's runner ships it there and not the profile (some games' own launcher does not forward
+# --ue4ss-path to the real exe).
+[[game_files]]
+from = "ue4ss/LICENSE"
+to = "${game}/ue4ss/LICENSE"
+sha256 = "99e1d8f8b7cb68e8b2313380ae3b0c8115e39dfbc443fcf21fd67ab74ce1d57e"
+
+[[game_files]]
+from = "ue4ss/UE4SS.dll"
+to = "${game}/ue4ss/UE4SS.dll"
+sha256 = "87b494191b7bc9bcfd938f54190c09e9aaa01dc354f6927ba661b0a18bad13ee"
+
+[[game_files]]
+from = "ue4ss/UE4SS-settings.ini"
+to = "${game}/ue4ss/UE4SS-settings.ini"
+sha256 = "58614ee7b13464c1f5ae0804a35682443c9c3bdc570fe54940e899ae6139b695"
+
+[[game_files]]
+from = "ue4ss/UE4SS_SDK_Backends/UE4SS.json"
+to = "${game}/ue4ss/UE4SS_SDK_Backends/UE4SS.json"
+sha256 = "6b8c1725ff59a318b812d5952f63107778b4ceb22b882b297a3666ee9e06c8ff"
+
+[[game_files]]
+from = "ue4ss/Mods/BPML_GenericFunctions/Scripts/main.lua"
+to = "${game}/ue4ss/Mods/BPML_GenericFunctions/Scripts/main.lua"
+sha256 = "df87c361cdfc231ac8017ff9b930c323fac09f436ca4c41d48e952ff4b38d38f"
+
+[[game_files]]
+from = "ue4ss/Mods/BPModLoaderMod/load_order.txt"
+to = "${game}/ue4ss/Mods/BPModLoaderMod/load_order.txt"
+sha256 = "e260b9b0d8d472ee3ebab77204c838f3d2aad8a9d5f08b9b8cb6b42b7b5418b9"
+
+[[game_files]]
+from = "ue4ss/Mods/BPModLoaderMod/Scripts/main.lua"
+to = "${game}/ue4ss/Mods/BPModLoaderMod/Scripts/main.lua"
+sha256 = "c4d6602dc57559029e0e709650e43f33354bcb23f1a5df2ebe84d4651ebd08a3"
+
+[[game_files]]
+from = "ue4ss/Mods/CheatManagerEnablerMod/Scripts/main.lua"
+to = "${game}/ue4ss/Mods/CheatManagerEnablerMod/Scripts/main.lua"
+sha256 = "15c7722168eb8966ed454e900e04de4b0ade42657905d8016c0e0660c119cd9e"
+
+[[game_files]]
+from = "ue4ss/Mods/ConsoleCommandsMod/Scripts/dump_object.lua"
+to = "${game}/ue4ss/Mods/ConsoleCommandsMod/Scripts/dump_object.lua"
+sha256 = "365b7e8a803f8ae917f54f6c852854c681e388227dd1f94b0ea3f6fb938b5086"
+
+[[game_files]]
+from = "ue4ss/Mods/ConsoleCommandsMod/Scripts/main.lua"
+to = "${game}/ue4ss/Mods/ConsoleCommandsMod/Scripts/main.lua"
+sha256 = "5bf33cd4ef9f6a155fe5f7842218a6486c2c227858ffd99806e75d81d0da9f27"
+
+[[game_files]]
+from = "ue4ss/Mods/ConsoleCommandsMod/Scripts/set.lua"
+to = "${game}/ue4ss/Mods/ConsoleCommandsMod/Scripts/set.lua"
+sha256 = "876e7de49f0e30a4329c081472bc7d5e1948459c774b7abbb8be4b6323f16ec8"
+
+[[game_files]]
+from = "ue4ss/Mods/ConsoleCommandsMod/Scripts/summon_unloaded_assets.lua"
+to = "${game}/ue4ss/Mods/ConsoleCommandsMod/Scripts/summon_unloaded_assets.lua"
+sha256 = "194b557404b6078767f8b57b836aa44d084cf6f3f2cbde71a6831857567f8103"
+
+[[game_files]]
+from = "ue4ss/Mods/ConsoleEnablerMod/Scripts/main.lua"
+to = "${game}/ue4ss/Mods/ConsoleEnablerMod/Scripts/main.lua"
+sha256 = "2517ea80a074bc5e6f00c55263c1867bf8e74c6b8665a79217adb53fdbe04343"
+
+[[game_files]]
+from = "ue4ss/Mods/Keybinds/Scripts/main.lua"
+to = "${game}/ue4ss/Mods/Keybinds/Scripts/main.lua"
+sha256 = "297dd6f7f560e1cebc15cd4509ad481495d9179f5758a8034be4c417a369803a"
+
+[[game_files]]
+from = "ue4ss/Mods/LineTraceMod/Scripts/main.lua"
+to = "${game}/ue4ss/Mods/LineTraceMod/Scripts/main.lua"
+sha256 = "05c181a5cc3cb24e0bd7496d6bbc14a1111d0a1e731a2526203b41b07d972dae"
+
+[[game_files]]
+from = "ue4ss/Mods/shared/UEHelpers/UEHelpers.lua"
+to = "${game}/ue4ss/Mods/shared/UEHelpers/UEHelpers.lua"
+sha256 = "7476f02eef0c87bfeab169f2ffe2e704363faeaae4bf9f1bda574b1e34f4a0e9"
+
+[[game_files]]
+from = "ue4ss/Mods/SplitScreenMod/Scripts/main.lua"
+to = "${game}/ue4ss/Mods/SplitScreenMod/Scripts/main.lua"
+sha256 = "05094ab61f016ebfcb651a0271a4c614884881b847090e6a74e6a51754e088db"
+
+# ours: the overlay that turns UE4SS's own example mods off and AstraGTA on (ue4ss-overlay/Mods/)
+[[game_files]]
+from = "ue4ss/Mods/mods.txt"
+to = "${game}/ue4ss/Mods/mods.txt"
+sha256 = "@sha256:ue4ss/Mods/mods.txt@"
+
+[[game_files]]
+from = "ue4ss/Mods/mods.json"
+to = "${game}/ue4ss/Mods/mods.json"
+sha256 = "@sha256:ue4ss/Mods/mods.json@"
+
+# ours: AstraGTA itself (this repo's AstraGTA/)
+[[game_files]]
+from = "ue4ss/Mods/AstraGTA/enabled.txt"
+to = "${game}/ue4ss/Mods/AstraGTA/enabled.txt"
+sha256 = "@sha256:ue4ss/Mods/AstraGTA/enabled.txt@"
+
+[[game_files]]
+from = "ue4ss/Mods/AstraGTA/Scripts/main.lua"
+to = "${game}/ue4ss/Mods/AstraGTA/Scripts/main.lua"
+sha256 = "@sha256:ue4ss/Mods/AstraGTA/Scripts/main.lua@"
+
+# ours: the two signature overrides UE4SS's own scan cannot resolve on THIS exe (game-signatures/README.md,
+# carried over from astra-reshade verbatim - the evidence and exact AOBs are in each file's own header).
+# They land in UE4SS's own override folder, beside UE4SS.dll above.
+[[game_files]]
+from = "game-signatures/GTA3-DefinitiveEdition/UE4SS_Signatures/ConsoleManager.lua"
+to = "${game}/ue4ss/UE4SS_Signatures/ConsoleManager.lua"
+sha256 = "@sha256:game-signatures/GTA3-DefinitiveEdition/UE4SS_Signatures/ConsoleManager.lua@"
+
+[[game_files]]
+from = "game-signatures/GTA3-DefinitiveEdition/UE4SS_Signatures/StaticConstructObject.lua"
+to = "${game}/ue4ss/UE4SS_Signatures/StaticConstructObject.lua"
+sha256 = "@sha256:game-signatures/GTA3-DefinitiveEdition/UE4SS_Signatures/StaticConstructObject.lua@"
+
+# ReShade 6.8.0 with full add-on support: ReShade64.dll from ReShade_Setup_6.8.0_Addon.exe, renamed (upstream, unmodified)
+[[game_files]]
+from = "dxgi.dll"
+to = "${game}/dxgi.dll"
+sha256 = "0cee63f9c9f13f3ac909c5b4903f4dbb4b719a7ab3b4f13b0deaf83c814b94f7"
+
+# our add-on, beside dxgi.dll: ReShade loads add-ons from its own folder when no ReShade.ini says otherwise
+# (astra-reshade's own astra.addon64, bit-for-bit - this package ships no GTA-specific native code, only
+# AstraGTA's Lua above and this manifest)
+[[game_files]]
+from = "astra.addon64"
+to = "${game}/astra.addon64"
+sha256 = "@sha256:astra.addon64@"
+
+[[game_files]]
+from = "astra-reshade/Shaders/AstraPassthrough.fx"
+to = "${game}/astra-reshade/Shaders/AstraPassthrough.fx"
+sha256 = "@sha256:astra-reshade/Shaders/AstraPassthrough.fx@"
+
+# the effect's game hooks: the foundation's own, empty (unchanged - no game-specific compositor hook is needed yet)
+[[game_files]]
+from = "astra-reshade/Shaders/AstraGame.fxh"
+to = "${game}/astra-reshade/Shaders/AstraGame.fxh"
+sha256 = "@sha256:astra-reshade/Shaders/AstraGame.fxh@"
+
+# ReShade's shader header (crosire/reshade-shaders, branch slim at fd00221, CC0-1.0; upstream, unmodified)
+[[game_files]]
+from = "astra-reshade/Shaders/ReShade.fxh"
+to = "${game}/astra-reshade/Shaders/ReShade.fxh"
+sha256 = "6dabfbbaf968c3871905d2ea17f96572ff7b1cec01310b5d0e5252b66b30174f"
+
+[launch]
+# --ue4ss-path: harmless, not load-bearing - UE4SS.dll ships beside the exe (${game}/ue4ss/, above) where the
+# proxy finds it on its own. -AstraConfig: the ini below, where the add-on reads the engine's port and this
+# session's token - its PATH only, never the token. Each path is its own argument (a Windows path, Z:\... under
+# Proton).
+args = ["--ue4ss-path", "${game}/ue4ss/UE4SS.dll", "-AstraConfig", "${profile}/astra-reshade.ini"]
+proton_dll_overrides = { dwmapi = "native,builtin", dxgi = "native,builtin" }
+
+# written at every Play, in the profile only; the add-on reads [bridge] (astra-reshade's src/config.h)
+[[config_writes]]
+file = "${profile}/astra-reshade.ini"
+section = "bridge"
+set = { Port = "${bridge_port}", Token = "${bridge_token}" }

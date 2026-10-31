@@ -11,6 +11,12 @@
 //! `vac-unchecked` warning, and `engine-mismatch`'s `got` (the detector's `engine_of_exe`, which
 //! planning alone exposes).
 //!
+//! Canary C1b rides the same trees: every program planned again with one of Astra's own
+//! manifests ([`MANIFESTS`]: the Unity runners, the per-game BepInEx integrations, GTA III, and
+//! every Unreal runner release astra-reshade published), its game files laid beside the program
+//! now and then — absent, ours, or someone else's — and the plan held to 0.4.1's: the same
+//! `GameAction` for every file, the same refusal and its parameters.
+//!
 //! The tests in `tests/detect.rs` go through the same check, fixture by fixture. Where 0.5.0
 //! knowingly answers otherwise (a link, a FIFO, a name the launcher refuses), C1 has declared
 //! exceptions, each pinned by `tests/divergence.rs` against `tests/corpus/divergence.txt`, where
@@ -24,9 +30,10 @@ mod common;
 #[path = "corpus/gen.rs"]
 mod corpus;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use astra_game_launcher::{
@@ -36,7 +43,7 @@ use common::identity::{
     checked_with_hostile, hostile_lower_set, hostile_set, moderated_hostile_set, narrowed,
     open_to_descriptors,
 };
-use common::{E, Tmp, appinfo_vac, sha, zip};
+use common::{E, Tmp, appinfo_vac, sha, write, zip};
 use corpus::{App, Node};
 
 /// Fixed for good: a new seed is a new corpus, and the old one is what C1 was proven on.
@@ -87,6 +94,12 @@ struct Counts {
     pick_largest: AtomicUsize,
     tied: AtomicUsize,
     bootstrap_tie: AtomicUsize,
+    /// C1b: plans with Astra's own manifests, those that planned, the actions they hold, and
+    /// every refusal by its code.
+    c1b_plans: AtomicUsize,
+    c1b_planned: AtomicUsize,
+    c1b_actions: Mutex<BTreeMap<String, usize>>,
+    c1b_refusals: Mutex<BTreeMap<String, usize>>,
 }
 
 fn bump(a: &AtomicUsize) {
@@ -100,13 +113,179 @@ fn probe_zip(engine: &str) -> Vec<u8> {
     zip(&[E::File("astra-gi.toml", manifest.as_bytes())])
 }
 
+/// C1b's manifests: Astra's own, verbatim, each with where it was read (repository, commit,
+/// path). The game files' pins are rewritten to the bytes [`fixture`] makes up for them; nothing
+/// else is touched.
+const MANIFESTS: &[(&str, &str)] = &[
+    (
+        "astra-bepinex 793d408 runner/astra-gi.toml",
+        include_str!("fixtures/manifests/bepinex-mono.astra-gi.toml"),
+    ),
+    (
+        "astra-bepinex 793d408 runner/il2cpp/astra-gi.toml",
+        include_str!("fixtures/manifests/bepinex-il2cpp.astra-gi.toml"),
+    ),
+    (
+        "astra-lethal 0760fd1 astra-gi.toml",
+        include_str!("fixtures/manifests/lethal-company.astra-gi.toml"),
+    ),
+    (
+        "astra-peak 9dacb72 astra-gi.toml",
+        include_str!("fixtures/manifests/peak.astra-gi.toml"),
+    ),
+    (
+        "astra-repo 44fa6a4 astra-gi.toml",
+        include_str!("fixtures/manifests/repo.astra-gi.toml"),
+    ),
+    (
+        "astra-content-warning aebab96 astra-gi.toml",
+        include_str!("fixtures/manifests/content-warning.astra-gi.toml"),
+    ),
+    (
+        "astra-gta-trilogy 0e78023 manifests/astra-gi-gta3.toml",
+        include_str!("fixtures/manifests/gta3.astra-gi.toml"),
+    ),
+    (
+        "astra-reshade v0.2.0",
+        include_str!("fixtures/astra-reshade-unreal/v0.2.0.astra-gi.toml"),
+    ),
+    (
+        "astra-reshade v0.2.1",
+        include_str!("fixtures/astra-reshade-unreal/v0.2.1.astra-gi.toml"),
+    ),
+    (
+        "astra-reshade v0.2.2",
+        include_str!("fixtures/astra-reshade-unreal/v0.2.2.astra-gi.toml"),
+    ),
+    (
+        "astra-reshade v0.2.3",
+        include_str!("fixtures/astra-reshade-unreal/v0.2.3.astra-gi.toml"),
+    ),
+    (
+        "astra-reshade v0.2.4",
+        include_str!("fixtures/astra-reshade-unreal/v0.2.4.astra-gi.toml"),
+    ),
+    (
+        "astra-reshade v0.2.5",
+        include_str!("fixtures/astra-reshade-unreal/v0.2.5.astra-gi.toml"),
+    ),
+    (
+        "astra-reshade v0.2.6",
+        include_str!("fixtures/astra-reshade-unreal/v0.2.6.astra-gi.toml"),
+    ),
+    (
+        "astra-reshade v0.2.7",
+        include_str!("fixtures/astra-reshade-unreal/v0.2.7.astra-gi.toml"),
+    ),
+    (
+        "astra-reshade v0.2.8",
+        include_str!("fixtures/astra-reshade-unreal/v0.2.8.astra-gi.toml"),
+    ),
+    (
+        "astra-reshade v0.2.9",
+        include_str!("fixtures/astra-reshade-unreal/v0.2.9.astra-gi.toml"),
+    ),
+    (
+        "astra-reshade v0.2.10",
+        include_str!("fixtures/astra-reshade-unreal/v0.2.10.astra-gi.toml"),
+    ),
+    (
+        "astra-reshade v0.2.11",
+        include_str!("fixtures/astra-reshade-unreal/v0.2.11.astra-gi.toml"),
+    ),
+];
+
+/// One of [`MANIFESTS`] as an installable zip.
+struct Fixture {
+    name: &'static str,
+    zip: Vec<u8>,
+    appid: Option<u32>,
+    /// `[target] exe`.
+    exe: Option<String>,
+    /// Each game file that lands directly beside the program: its name, and our bytes.
+    beside: Vec<(String, Vec<u8>)>,
+}
+
+/// A zip of `manifest` and every file it names: each `[[game_files]]` source with bytes made up
+/// from its pin (one pin, one content, so a pin shared by two files still matches both) and the
+/// pin rewritten to them; each `[[files]]` pattern with a file under it.
+fn fixture(name: &'static str, manifest: &str) -> Fixture {
+    let table: toml::Table = toml::from_str(manifest).unwrap();
+    let mut text = manifest.to_owned();
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut beside = Vec::new();
+    let add = |entries: &mut Vec<(String, Vec<u8>)>, from: &str, bytes: Vec<u8>| {
+        let path = match from.strip_suffix("**") {
+            Some(dir) => format!("{dir}c1b.bin"),
+            None => from.to_owned(),
+        };
+        if !entries.iter().any(|(p, _)| *p == path) {
+            entries.push((path, bytes));
+        }
+    };
+    let list = |key: &str| {
+        table
+            .get(key)
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
+    for g in list("game_files") {
+        let from = g["from"].as_str().unwrap();
+        let to = g["to"].as_str().unwrap();
+        let bytes = match g.get("sha256").and_then(|v| v.as_str()) {
+            Some(pin) => {
+                let bytes = format!("C1b {pin}").into_bytes();
+                text = text.replace(pin, &sha(&bytes));
+                bytes
+            }
+            None => format!("C1b {from}").into_bytes(),
+        };
+        if let Some(leaf) = to.strip_prefix("${game}/")
+            && !leaf.contains('/')
+            && !from.ends_with("**")
+        {
+            beside.push((leaf.to_owned(), bytes.clone()));
+        }
+        add(&mut entries, from, bytes);
+    }
+    for f in list("files") {
+        let from = f["from"].as_str().unwrap();
+        add(&mut entries, from, format!("C1b {from}").into_bytes());
+    }
+    let mut zip_entries = vec![E::File("astra-gi.toml", text.as_bytes())];
+    for (p, b) in &entries {
+        zip_entries.push(E::File(p, b));
+    }
+    let appid = table
+        .get("target")
+        .and_then(|t| t.get("steam_appid"))
+        .and_then(|v| v.as_integer())
+        .map(|a| a as u32);
+    let exe = table
+        .get("target")
+        .and_then(|t| t.get("exe"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    Fixture {
+        name,
+        zip: zip(&zip_entries),
+        appid,
+        exe,
+        beside,
+    }
+}
+
 /// Where a plan runs: the tree, its program, the appid the caller vouches for, the appinfo.
+#[derive(Clone, Copy)]
 struct Planned<'a> {
     dir: &'a Path,
     exe: &'a Path,
     appid: Option<u32>,
     appinfo: &'a Path,
     profile: &'a Path,
+    /// Under Proton (with no prefix known), else native Linux.
+    proton: bool,
 }
 
 /// One plan, as text: the plan itself, or its refusal's code and params.
@@ -117,7 +296,11 @@ fn plan_new(p: &Planned, zip: &[u8]) -> String {
         dir: p.dir.to_path_buf(),
         exe: p.exe.to_path_buf(),
         steam_appid: p.appid,
-        platform: Platform::LinuxNative,
+        platform: if p.proton {
+            Platform::LinuxProton { prefix: None }
+        } else {
+            Platform::LinuxNative
+        },
         steam_appinfo: Some(p.appinfo.to_path_buf()),
     };
     match plan_install(&pkg, &game, p.profile) {
@@ -133,7 +316,11 @@ fn plan_legacy(p: &Planned, zip: &[u8]) -> String {
         dir: p.dir.to_path_buf(),
         exe: p.exe.to_path_buf(),
         steam_appid: p.appid,
-        platform: Platform::LinuxNative,
+        platform: if p.proton {
+            Platform::LinuxProton { prefix: None }
+        } else {
+            Platform::LinuxNative
+        },
         steam_appinfo: Some(p.appinfo.to_path_buf()),
     };
     match plan_install(&pkg, &game, p.profile) {
@@ -257,7 +444,13 @@ fn bootstrap_tie(root: &Path, d: &Detection) -> bool {
         && paired_projects_at(root, comps.len()) >= 2
 }
 
-fn one_tree(seed: u64, zips: &[(Engine, Vec<u8>)], appinfo: &Path, counts: &Counts) {
+fn one_tree(
+    seed: u64,
+    zips: &[(Engine, Vec<u8>)],
+    fixtures: &[Fixture],
+    appinfo: &Path,
+    counts: &Counts,
+) {
     let tree = corpus::tree(seed);
     let t = Tmp::new(&format!("corpus-{seed:x}"));
     tree.build(t.path());
@@ -355,6 +548,7 @@ fn one_tree(seed: u64, zips: &[(Engine, Vec<u8>)], appinfo: &Path, counts: &Coun
             appid,
             appinfo,
             profile: &profile,
+            proton: false,
         };
         // One probe per program, turning with the seed: a mismatch carries `got`, and a plan
         // means `got` was the probe's own engine, so one is enough to expose `engine_of_exe`.
@@ -380,6 +574,64 @@ fn one_tree(seed: u64, zips: &[(Engine, Vec<u8>)], appinfo: &Path, counts: &Coun
                 bump(&counts.mismatch);
             }
         }
+        c1b_plan(seed, k, &p, fixtures, counts);
+    }
+}
+
+/// C1b for one program: one of Astra's own manifests, turning with the seed, its game files laid
+/// beside the program now and then (ours, or someone else's), planned by both launchers.
+fn c1b_plan(seed: u64, k: usize, p: &Planned, fixtures: &[Fixture], counts: &Counts) {
+    let turn = (seed as usize).wrapping_mul(31).wrapping_add(k * 7);
+    let f = &fixtures[turn % fixtures.len()];
+    let program = p.dir.join(p.exe);
+    let game = program.parent().unwrap();
+    let real = |q: &Path, dir: bool| {
+        fs::symlink_metadata(q).is_ok_and(|m| if dir { m.is_dir() } else { m.is_file() })
+    };
+    if real(&program, false) && real(game, true) {
+        for (i, (leaf, ours)) in f.beside.iter().enumerate() {
+            let at = game.join(leaf);
+            if fs::symlink_metadata(&at).is_err() {
+                match (turn + i) % 5 {
+                    0 => write(&at, ours),
+                    1 => write(&at, b"MZ someone else's"),
+                    _ => {}
+                }
+            }
+        }
+    }
+    let p = Planned {
+        appid: match f.appid {
+            Some(a) if turn.is_multiple_of(2) => Some(a),
+            _ => p.appid,
+        },
+        proton: true,
+        ..*p
+    };
+    let new = plan_new(&p, &f.zip);
+    let old = plan_legacy(&p, &f.zip);
+    assert_eq!(
+        new, old,
+        "C1b: Astra's own manifest {} plans and refuses exactly as with 0.4.1 (seed {seed:#x}, exe {:?}, appid {:?})",
+        f.name, p.exe, p.appid
+    );
+    bump(&counts.c1b_plans);
+    if new.starts_with('{') {
+        bump(&counts.c1b_planned);
+        let mut actions = counts.c1b_actions.lock().unwrap();
+        for a in [
+            "add",
+            "replace",
+            "reuse-known-proxy",
+            "keep-existing",
+            "share-loader",
+        ] {
+            *actions.entry(a.to_owned()).or_default() +=
+                new.matches(&format!("\"action\":\"{a}\"")).count();
+        }
+    } else {
+        let code = new.split(' ').next().unwrap_or("").to_owned();
+        *counts.c1b_refusals.lock().unwrap().entry(code).or_default() += 1;
     }
 }
 
@@ -394,13 +646,17 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
         .filter(|e| **e != Engine::Unknown)
         .map(|e| (*e, probe_zip(e.code())))
         .collect();
+    let fixtures: Vec<Fixture> = MANIFESTS.iter().map(|(n, m)| fixture(n, m)).collect();
     let world = Tmp::new("corpus-appinfo");
     let appinfo = world.join("appinfo.vdf");
-    fs::write(
-        &appinfo,
-        appinfo_vac(&[(VAC, Some(true)), (CLEAR, Some(false))]),
-    )
-    .unwrap();
+    let mut apps = vec![(VAC, Some(true)), (CLEAR, Some(false))];
+    apps.extend(
+        fixtures
+            .iter()
+            .filter_map(|f| f.appid)
+            .map(|a| (a, Some(false))),
+    );
+    fs::write(&appinfo, appinfo_vac(&apps)).unwrap();
     assert_eq!(
         [VAC, CLEAR, UNLISTED].map(|id| valve_anti_cheat(&appinfo, id)),
         [Some(true), Some(false), None],
@@ -414,11 +670,11 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
     let counts = Counts::default();
     std::thread::scope(|s| {
         for w in 0..THREADS {
-            let (zips, counts, appinfo) = (&zips, &counts, appinfo.as_path());
+            let (zips, fixtures, counts, appinfo) = (&zips, &fixtures, &counts, appinfo.as_path());
             s.spawn(move || {
                 let mut i = w;
                 while i < trees {
-                    one_tree(SEED.wrapping_add(i), zips, appinfo, counts);
+                    one_tree(SEED.wrapping_add(i), zips, fixtures, appinfo, counts);
                     i += THREADS;
                 }
             });
@@ -486,6 +742,157 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
         assert!(
             got >= floor,
             "{k}: {got} < {floor}: the corpus no longer reaches it"
+        );
+    }
+
+    // C1b: one manifest plan per program, beside C1's probe plan; and every outcome it is for.
+    let actions = c.c1b_actions.lock().unwrap().clone();
+    let refusals = c.c1b_refusals.lock().unwrap().clone();
+    eprintln!(
+        "C1b corpus: {} plans, {} planned\n  actions {actions:?}\n  refusals {refusals:?}",
+        get(&c.c1b_plans),
+        get(&c.c1b_planned)
+    );
+    assert_eq!(get(&c.c1b_plans), get(&c.plans));
+    // About half what the seed reaches in 20,000 trees, as C1's floors are.
+    let action = |a: &str| actions.get(a).copied().unwrap_or(0);
+    let refusal = |r: &str| refusals.get(r).copied().unwrap_or(0);
+    let c1b_floors: Vec<(&str, usize, usize)> = vec![
+        ("planned", get(&c.c1b_planned), 2_500),
+        ("add", action("add"), 44_000),
+        ("replace", action("replace"), 1_300),
+        ("reuse-known-proxy", action("reuse-known-proxy"), 1_300),
+        ("keep-existing", action("keep-existing"), 40),
+        ("engine-mismatch", refusal("engine-mismatch"), 15_000),
+        ("game-mismatch", refusal("game-mismatch"), 9_000),
+        ("anti-cheat", refusal("anti-cheat"), 6_000),
+        ("foreign-loader", refusal("foreign-loader"), 700),
+    ];
+    for (k, got, per_20k) in c1b_floors {
+        let floor = (per_20k * trees as usize / 20_000).max(1);
+        assert!(
+            got >= floor,
+            "C1b {k}: {got} < {floor}: the corpus no longer reaches it"
+        );
+    }
+}
+
+/// C1b on the games each manifest is for, beside the corpus (where a pinned program such as
+/// GTA III's `Gameface/Binaries/Win64/LibertyCity.exe` never occurs): every manifest planned on
+/// a Unity Mono, a Unity IL2CPP, an Unreal and an unshipped-Unreal game, and on each pinned
+/// program's own, with its game files absent, ours, or someone else's — and every manifest
+/// planning at least once.
+#[test]
+fn c1b_every_manifest_plans_as_0_4_1_on_the_games_it_is_for() {
+    let fixtures: Vec<Fixture> = MANIFESTS.iter().map(|(n, m)| fixture(n, m)).collect();
+    let world = Tmp::new("c1b-appinfo");
+    let appinfo = world.join("appinfo.vdf");
+    let apps: Vec<(u32, Option<bool>)> = fixtures
+        .iter()
+        .filter_map(|f| f.appid)
+        .map(|a| (a, Some(false)))
+        .collect();
+    fs::write(&appinfo, appinfo_vac(&apps)).unwrap();
+
+    let mono = |exe: &str| {
+        let exe = exe.to_owned();
+        move |d: &Path| {
+            let stem = exe.trim_end_matches(".exe");
+            write(&d.join(&exe), b"MZ game");
+            write(&d.join("UnityPlayer.dll"), b"MZ player");
+            write(
+                &d.join(format!("{stem}_Data/Managed/Assembly-CSharp.dll")),
+                b"MZ cs",
+            );
+        }
+    };
+    type Lay = Box<dyn Fn(&Path)>;
+    let mut shapes: Vec<(String, Lay)> = vec![
+        ("Game.exe".into(), Box::new(mono("Game.exe"))),
+        (
+            "Game.exe".into(),
+            Box::new(|d: &Path| {
+                write(&d.join("Game.exe"), b"MZ game");
+                write(&d.join("UnityPlayer.dll"), b"MZ player");
+                write(&d.join("GameAssembly.dll"), b"MZ ga");
+                fs::create_dir_all(d.join("Game_Data/il2cpp_data")).unwrap();
+            }),
+        ),
+        (
+            "Game/Binaries/Win64/Game-Win64-Shipping.exe".into(),
+            Box::new(|d: &Path| {
+                write(
+                    &d.join("Game/Binaries/Win64/Game-Win64-Shipping.exe"),
+                    b"MZ game",
+                );
+                write(&d.join("Game/Content/Paks/pakchunk0-Windows.pak"), b"pak");
+            }),
+        ),
+        (
+            "Gameface/Binaries/Win64/LibertyCity.exe".into(),
+            Box::new(|d: &Path| {
+                write(
+                    &d.join("Gameface/Binaries/Win64/LibertyCity.exe"),
+                    b"MZ game",
+                );
+                write(&d.join("Gameface/Content/Paks/gta3.pak"), b"pak");
+                write(&d.join("PlayGTA3.exe"), b"MZ bootstrapper");
+            }),
+        ),
+    ];
+    for f in &fixtures {
+        if let Some(exe) = &f.exe
+            && exe != "*"
+            && !exe.contains('/')
+        {
+            shapes.push((exe.clone(), Box::new(mono(exe))));
+        }
+    }
+    let mut planned: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut plans = 0;
+    for f in &fixtures {
+        for (i, (exe, lay)) in shapes.iter().enumerate() {
+            for variant in 0..3 {
+                let t = Tmp::new("c1b-game");
+                lay(t.path());
+                let game = t.path().join(exe);
+                let game = game.parent().unwrap();
+                for (leaf, ours) in &f.beside {
+                    match variant {
+                        1 => write(&game.join(leaf), ours),
+                        2 => write(&game.join(leaf), b"MZ someone else's"),
+                        _ => {}
+                    }
+                }
+                let profile = Tmp::new("c1b-profile");
+                let p = Planned {
+                    dir: t.path(),
+                    exe: Path::new(exe),
+                    appid: f.appid,
+                    appinfo: &appinfo,
+                    profile: &profile.join("p"),
+                    proton: true,
+                };
+                let new = plan_new(&p, &f.zip);
+                let old = plan_legacy(&p, &f.zip);
+                assert_eq!(
+                    new, old,
+                    "C1b: {} on shape {i} ({exe}), variant {variant}",
+                    f.name
+                );
+                plans += 1;
+                if new.starts_with('{') {
+                    *planned.entry(f.name).or_default() += 1;
+                }
+            }
+        }
+    }
+    eprintln!("C1b on its own games: {plans} plans; planned per manifest {planned:?}");
+    for f in &fixtures {
+        assert!(
+            planned.get(f.name).is_some_and(|n| *n > 0),
+            "C1b: {} never planned on a game it is for",
+            f.name
         );
     }
 }

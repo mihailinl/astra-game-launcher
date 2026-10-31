@@ -1,0 +1,49 @@
+schema = 1
+
+[integration]                      # metadata: shown to the user, never acted on
+id = "astra.repo"
+name = "Astra for R.E.P.O."
+version = "0.2.0"
+authors = ["mihailinl"]
+license = "MIT"
+repo = "https://github.com/mihailinl/astra-repo"
+
+[target]                           # which game
+steam_appid = 3241660
+exe = "REPO.exe"                   # relative to the game folder
+platforms = ["windows-x64", "linux-proton"]
+anti_cheat = "none"
+
+# Into the PROFILE (Astra's own folder for this game; never the game folder).
+[[files]]
+from = "BepInEx/core/**"           # paths inside the zip; ** = everything below
+to = "${profile}/BepInEx/core/"
+
+[[files]]
+from = "BepInEx/plugins/**"        # the foundation (Astra/) AND this integration (AstraRepo/)
+to = "${profile}/BepInEx/plugins/"
+
+# Beside the game's exe — the only files that touch the game folder. Each one is on the consent
+# sheet, pinned by its digest, backed up if it replaces a game file and restored on uninstall.
+[[game_files]]
+from = "winhttp.dll"               # Doorstop's proxy: BepInEx_win_x64_5.4.23.5.zip, unmodified
+to = "${game}/winhttp.dll"
+sha256 = "8c6cdbc38836dee87e3368f5de1994d7c0ccebf29e4ce7aba3c0981f9375412c"
+
+[[game_files]]
+from = "doorstop_config.ini"       # ships with enabled = false: Steam's own Play stays vanilla
+to = "${game}/doorstop_config.ini"
+
+[launch]
+# An argv ARRAY, never a shell string. Placeholders are filled per element (as Windows paths,
+# Z:\…, under Proton).
+args = ["--doorstop-enabled", "true",
+        "--doorstop-target-assembly", "${profile}/BepInEx/core/BepInEx.Preloader.dll"]
+# Wine DLL override for the game's Proton prefix (Linux), written into that prefix only.
+proton_dll_overrides = { winhttp = "native,builtin" }
+
+# INI keys set at every Play, inside the profile only.
+[[config_writes]]
+file = "${profile}/BepInEx/config/astra.unity-foundation.cfg"
+section = "Connection"
+set = { Port = "${bridge_port}", Token = "${bridge_token}" }

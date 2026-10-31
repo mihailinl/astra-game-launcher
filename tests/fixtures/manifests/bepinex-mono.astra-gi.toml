@@ -1,0 +1,69 @@
+schema = 1
+
+[integration]                      # metadata: shown to the user, never acted on
+id = "astra.unity"
+name = "Astra for any Unity game"
+version = "0.8.1"
+authors = ["mihailinl"]
+license = "MIT"
+repo = "https://github.com/mihailinl/astra-bepinex"
+
+# Play together with the player's own BepInEx (their mod manager's profile, or a BepInEx in the game
+# folder): a launcher that understands this plays Doorstop on `chain` instead of the preloader, which
+# hands the game to THEIR preloader and adds this profile's BepInEx/plugins (docs/GAME-INTEGRATION-
+# MANIFEST.md §7). Nested under [integration] ON PURPOSE, not a top-level [mods] table: every
+# unknown key directly under [target]/[[files]]/[[game_files]]/[launch]/[[config_writes]] is
+# refused by every launcher, but [integration] is metadata, read with no key check at all (it is
+# only checked for being a table, then deserialized with unknown fields silently dropped — verified
+# against astra-game-launcher 9aa7874's src/manifest.rs). So an OLDER launcher installs this exact
+# runner release and plays Astra-only, exactly as today; only a launcher that knows to read
+# integration.mods offers "play with mods".
+[integration.mods]
+loader = "bepinex5"
+chain = "${profile}/chain/Astra.Chain.dll"
+chain_config = "${profile}/chain/chain.ini"
+
+[target]                           # a RUNNER: any Unity (Mono) game the user picks
+engine = "unity-mono"
+exe = "*"                          # the user picks the game; the launcher checks it is Unity Mono
+platforms = ["windows-x64", "linux-proton"]
+anti_cheat = "none"
+
+# Into the PROFILE (Astra's own folder for this game; never the game folder).
+[[files]]
+from = "BepInEx/core/**"           # paths inside the zip; ** = everything below
+to = "${profile}/BepInEx/core/"
+
+[[files]]
+from = "BepInEx/plugins/**"        # the foundation (Astra/) alone: no per-game integration
+to = "${profile}/BepInEx/plugins/"
+
+[[files]]
+from = "chain/**"                  # Astra.Chain.dll + Astra.Chain.Hooks.dll: only used when a
+to = "${profile}/chain/"           # launcher plays "with mods"; harmless extra files otherwise
+
+# Beside the game's exe — the only files that touch the game folder. Each one is on the consent
+# sheet, pinned by its digest, backed up if it replaces a game file and restored on uninstall.
+[[game_files]]
+from = "winhttp.dll"               # Doorstop's proxy: BepInEx_win_x64_5.4.23.5.zip, unmodified
+to = "${game}/winhttp.dll"
+sha256 = "8c6cdbc38836dee87e3368f5de1994d7c0ccebf29e4ce7aba3c0981f9375412c"
+
+[[game_files]]
+from = "doorstop_config.ini"       # ships with enabled = false: Steam's own Play stays vanilla
+to = "${game}/doorstop_config.ini"
+
+[launch]
+# An argv ARRAY, never a shell string. Placeholders are filled per element (as Windows paths,
+# Z:\…, under Proton).
+args = ["--doorstop-enabled", "true",
+        "--doorstop-target-assembly", "${profile}/BepInEx/core/BepInEx.Preloader.dll"]
+# Wine DLL override for the game's Proton prefix (Linux), written into that prefix only. Mirrors
+# the Steam launch option from a per-game integration's README (`WINEDLLOVERRIDES="winhttp=n,b" %command%`).
+proton_dll_overrides = { winhttp = "native,builtin" }
+
+# INI keys set at every Play, inside the profile only.
+[[config_writes]]
+file = "${profile}/BepInEx/config/astra.unity-foundation.cfg"
+section = "Connection"
+set = { Port = "${bridge_port}", Token = "${bridge_token}" }
