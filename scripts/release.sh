@@ -20,7 +20,9 @@
 #   1. Refuse unless the working tree is clean (untracked files count).
 #   2. Refuse unless HEAD is origin/main (fetched fresh).
 #   3. Refuse unless Cargo.toml's [package] version equals <version>.
-#   4. cargo test, cargo clippy --all-targets -D warnings — both must pass.
+#   4. cargo test --all-features, cargo clippy --all-targets --all-features -D warnings — both
+#      must pass. Every feature: `gi-probe` (and its tests, canary K4 among them) is a feature,
+#      and a release whose probe does not build or pass is not cut.
 #   5. Extract `git archive HEAD` into a scratch directory (never the working tree, which could
 #      disagree with HEAD in ways `git status` doesn't show, e.g. a dirty mtime-only rebuild).
 #      Recompute its tree hash two independent ways — scripts/tree-hash.sh's shell algorithm, and
@@ -119,13 +121,13 @@ say "ok: Cargo.toml version is $VERSION"
 # ---------------------------------------------------------------------------
 # 4. cargo test, cargo clippy.
 # ---------------------------------------------------------------------------
-say "running: cargo test"
-cargo test --quiet
-say "ok: cargo test"
+say "running: cargo test --all-features"
+cargo test --all-features --quiet
+say "ok: cargo test --all-features"
 
-say "running: cargo clippy --all-targets -- -D warnings"
-cargo clippy --all-targets --quiet -- -D warnings
-say "ok: cargo clippy (0 warnings)"
+say "running: cargo clippy --all-targets --all-features -- -D warnings"
+cargo clippy --all-targets --all-features --quiet -- -D warnings
+say "ok: cargo clippy --all-features (0 warnings)"
 
 # ---------------------------------------------------------------------------
 # 5. Fresh `git archive HEAD` extraction: prove the shell recompute and build.rs's compiled-in

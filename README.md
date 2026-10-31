@@ -308,6 +308,71 @@ let d = detect_with_engines(&dir, hint, &engines)?;      // Pass A, then perhaps
   `anti-cheat-unknown` in `anti_cheat` when the walk stopped at its cap or a `*.sys` ships.
   None of these fields appear in a Pass A detection's JSON.
 
+## `gi-probe`: checking a release before anybody installs it (0.5.0)
+
+A second program, built only with `--features gi-probe` (it links launcher 0.3.1, which neither
+the CLI nor Astra's daemon ever builds):
+
+```
+cargo build --features gi-probe --bin gi-probe
+gi-probe compat --zip astra-gi.zip --source astra.unreal --tag v0.2.1 [--asset NAME]
+                [--prerelease] [--sha256 HEX] [--previous PREV.zip] [--notes NOTES.md]
+gi-probe validate-descriptor engine.toml [--first-party]
+gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
+```
+
+- **`compat`** holds a game integration's release to what Astra 0.2.7 users run: launcher 0.3.1
+  and 0.2.7's own rules (`src/bin/gi-probe/v027.rs`, copied from tag v0.2.7 and held to it token
+  for token by `tests/gi_probe.rs`). Every first-party release script runs it on the real zip.
+  Its six steps:
+  1. 0.3.1 opens the zip and parses its manifest;
+  2. 0.2.7's `check_manifest` passes for the source (`--source`, an `[integration] id` from
+     `src/bin/gi-probe/compat-0.2.7.json`, which canary K4 holds equal to 0.2.7's `pins.rs`):
+     its id and repository, a runner's `[target] engine` with no appid or a game's own appid,
+     the tag's version; and 0.2.7's tag rule (the source's prefix, an optional `v`, semver,
+     stable unless `--prerelease`) and asset (`--asset`, else the zip's file name);
+  3. 0.3.1 plans the zip exactly as it plans the zip rebuilt without its `[integration.*]`
+     tables (but `[integration.mods]`), on a synthetic Steam game that fits the source — so a
+     new table is only ever data 0.3.1 ignores;
+  4. 0.3.1 installs that plan and prepares a launch with exactly `{bridge_port, bridge_token}`,
+     the variables 0.2.7 passes (a new `${var}` fails here);
+  5. with `--previous`: every file under a `**` `[[files]]` entry is the previous release's, or
+     the release notes (`--notes`) name each one added or gone;
+  6. with `--previous`: what 0.2.7's `consent_needed_for` weighs (id, repository, license,
+     authors, `[target]`, `[launch]`, `[[config_writes]]`, the update's game files) is unchanged.
+     A change is the notice `consent-sheet-expected`: 0.2.7 will show its sheet again.
+
+  The digest and canonical-URL halves of 0.2.7's choice need GitHub's published asset, so
+  `compat` checks the digest only when given `--sha256`. `pick` is that choice over a releases
+  listing; `tools/fetch-first-party-manifests.sh` uses it to keep
+  `tests/fixtures/first-party/` (each source's manifest as 0.2.7 would install it today) fresh.
+- **`validate-descriptor`** is the lint of the engine descriptor specification
+  (AstraPlugins `spec/games/engine-descriptor-v1.md` §5): the descriptor (TOML, JSON, or a
+  foundation's `astra-gi.toml` holding `[integration.engine]`) parses, Pass B admits it, and it
+  claims none of the spec's negative folders (empty, an exe alone, an exe among bare system
+  DLLs, `steam_api64.dll` beside an exe), each detected with it alone
+  (`descriptor-too-broad`, `reason=negative:<folder>`). The report gives its digest,
+  `sha256(JCS(descriptor))`.
+
+**The report** is one JSON object on stdout:
+
+```json
+{"schema": "astra.gi-probe/1",
+ "tool": {"version": "0.5.0", "source_tree_sha256": "<hex>"},
+ "subcommand": "compat", "verdict": "pass",
+ "input": {}, "source": {}, "against": {"astra": {}, "launcher": {}},
+ "steps": [{"step": 1, "check": "…", "status": "pass"}],
+ "notices": [{"code": "consent-sheet-expected", "step": 6, "detail": "…"}],
+ "findings": [{"code": "release-mismatch", "step": 2, "field": "integration.version",
+               "detail": "…", "params": {}}]}
+```
+
+`verdict` is `pass` or `fail`; a step's `status` is `pass`, `fail`, `notice` or `skipped` (with
+its `why`). `step`, `field` and `params` appear where they apply; a finding's `code` is the
+launcher's or 0.2.7's own refusal code where one refused. **Exit 0**: no findings (notices
+allowed). **Exit 1**: findings. **Exit 2**: a wrong command line or an unreadable file; the
+report then carries `error: {code, detail}` instead, and nothing was concluded.
+
 ## Safety rules the code enforces
 
 - **Verified input.** A zip is used only when its SHA-256 matches the one the caller expects.
@@ -476,6 +541,7 @@ let d = detect_with_engines(&dir, hint, &engines)?;      // Pass A, then perhaps
 cargo build
 cargo test        # every fixture is built by the tests; the first build fetches launcher
                   # 0.4.1 (main 73bf11e), the dev-dependency canary C1 compares against
+cargo test --all-features   # also gi-probe and its tests (canary K4); what scripts/release.sh runs
 ```
 
 ## Verifying a release against what Astra compiles in

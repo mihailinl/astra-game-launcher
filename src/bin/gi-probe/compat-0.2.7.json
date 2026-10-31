@@ -1,0 +1,246 @@
+{
+  "schema": "astra.gi-probe.compat-0.2.7/1",
+  "astra": {
+    "tag": "v0.2.7",
+    "commit": "6fea01a01c1ca4209a967ff69d9afa065bdb22bb",
+    "file": "astra-rs/astra-daemon/src/games/pins.rs"
+  },
+  "launcher": {
+    "version": "0.3.1",
+    "rev": "9aa7874b60f6b10bd67411b7aad40fcc968b78bc"
+  },
+  "sources": [
+    {
+      "id": "astra.unity",
+      "repo": "mihailinl/astra-bepinex",
+      "repo_id": 1408152993,
+      "tag_prefix": "v",
+      "asset": "astra-gi.zip",
+      "target": {
+        "runner": {
+          "engine": "unity-mono"
+        }
+      },
+      "fallback": {
+        "tag": "v0.8.1",
+        "sha256": "1ea3ef142e718afeffc9bbbc9dfab12e04a14d657d97524d9e7ba2225789a687",
+        "prerelease": false
+      },
+      "predecessor": null
+    },
+    {
+      "id": "astra.unity-il2cpp",
+      "repo": "mihailinl/astra-bepinex",
+      "repo_id": 1408152993,
+      "tag_prefix": "v",
+      "asset": "astra-gi-il2cpp.zip",
+      "target": {
+        "runner": {
+          "engine": "unity-il2cpp"
+        }
+      },
+      "fallback": {
+        "tag": "v0.8.1",
+        "sha256": "42c8e2b1bddcd5e62d9f87eaccc78c6beed9d7306028ea4706a50c2a08a7d20e",
+        "prerelease": false
+      },
+      "predecessor": null
+    },
+    {
+      "id": "astra.unreal",
+      "repo": "mihailinl/astra-reshade",
+      "repo_id": 1412685270,
+      "tag_prefix": "v",
+      "asset": "astra-gi.zip",
+      "target": {
+        "runner": {
+          "engine": "unreal"
+        }
+      },
+      "fallback": {
+        "tag": "v0.2.1",
+        "sha256": "e89fcd792fe53816dd47bf6f7cafd436cd59b1c766d6dba5aeb853ac1a1c4eea",
+        "prerelease": false
+      },
+      "predecessor": null
+    },
+    {
+      "id": "astra.unreal.gta3-definitive-edition",
+      "repo": "mihailinl/astra-reshade",
+      "repo_id": 1412685270,
+      "tag_prefix": "v",
+      "asset": "astra-gi-gta3.zip",
+      "target": {
+        "game": {
+          "appid": "1546970",
+          "exe": "Gameface/Binaries/Win64/LibertyCity.exe"
+        }
+      },
+      "fallback": {
+        "tag": "v0.2.2",
+        "sha256": "ff49114b2108193ca6f009e07cce679793438f959f797c30cc8968c06b873017",
+        "prerelease": true
+      },
+      "predecessor": null
+    },
+    {
+      "id": "astra.lethal-company",
+      "repo": "mihailinl/astra-lethal",
+      "repo_id": 1409552539,
+      "tag_prefix": "v",
+      "asset": "astra-gi.zip",
+      "target": {
+        "game": {
+          "appid": "1966720",
+          "exe": null
+        }
+      },
+      "fallback": {
+        "tag": "v0.2.0",
+        "sha256": "08b6683b447dc37e96a35632287cdbbae8f9f9733dbf2aaa488e6b1213544178",
+        "prerelease": false
+      },
+      "predecessor": null
+    },
+    {
+      "id": "astra.content-warning",
+      "repo": "mihailinl/astra-content-warning",
+      "repo_id": 1409552609,
+      "tag_prefix": "v",
+      "asset": "astra-gi.zip",
+      "target": {
+        "game": {
+          "appid": "2881650",
+          "exe": null
+        }
+      },
+      "fallback": {
+        "tag": "v0.2.0",
+        "sha256": "bbdc6559904e17e1c4ac97aae021e96402abca78eea76ca651c91cd92fc18a38",
+        "prerelease": false
+      },
+      "predecessor": null
+    },
+    {
+      "id": "astra.peak",
+      "repo": "mihailinl/astra-peak",
+      "repo_id": 1409552680,
+      "tag_prefix": "v",
+      "asset": "astra-gi.zip",
+      "target": {
+        "game": {
+          "appid": "3527290",
+          "exe": null
+        }
+      },
+      "fallback": {
+        "tag": "v0.3.1",
+        "sha256": "0fc9fe9443f1940517f185e260e02176439e08d1f5b18891496971fa7e23b73d",
+        "prerelease": false
+      },
+      "predecessor": null
+    },
+    {
+      "id": "astra.repo",
+      "repo": "mihailinl/astra-repo",
+      "repo_id": 1409552749,
+      "tag_prefix": "v",
+      "asset": "astra-gi.zip",
+      "target": {
+        "game": {
+          "appid": "3241660",
+          "exe": null
+        }
+      },
+      "fallback": {
+        "tag": "v0.2.0",
+        "sha256": "dd069578b7b2a3ccf7756e9054041a2b985800956296a840a1106a11f0827296",
+        "prerelease": false
+      },
+      "predecessor": null
+    },
+    {
+      "id": "astra.death-stranding",
+      "repo": "mihailinl/astra-in-death-stranding",
+      "repo_id": 1405082830,
+      "tag_prefix": "v",
+      "asset": "astra-gi-ds1.zip",
+      "target": {
+        "game": {
+          "appid": "1850570",
+          "exe": "ds.exe"
+        }
+      },
+      "fallback": {
+        "tag": "v0.1.1",
+        "sha256": "7b88de52cecaec665fa9683eaa1b1e332497668b51b7760e4dea49dbec9ef71c",
+        "prerelease": false
+      },
+      "predecessor": null
+    },
+    {
+      "id": "astra.death-stranding-2",
+      "repo": "mihailinl/astra-in-death-stranding",
+      "repo_id": 1405082830,
+      "tag_prefix": "v",
+      "asset": "astra-gi-ds2.zip",
+      "target": {
+        "game": {
+          "appid": "3280350",
+          "exe": "DS2.exe"
+        }
+      },
+      "fallback": {
+        "tag": "v0.1.1",
+        "sha256": "9b2728ff1a06cdef01465003d38486cd23e99f87b32a304489653aa6c0d26479",
+        "prerelease": false
+      },
+      "predecessor": null
+    },
+    {
+      "id": "astra.gta-trilogy.gta3",
+      "repo": "mihailinl/astra-gta-trilogy",
+      "repo_id": 1427110216,
+      "tag_prefix": "v",
+      "asset": "astra-gi-gta3.zip",
+      "target": {
+        "game": {
+          "appid": "1546970",
+          "exe": "Gameface/Binaries/Win64/LibertyCity.exe"
+        }
+      },
+      "fallback": null,
+      "predecessor": "astra.unreal.gta3-definitive-edition"
+    },
+    {
+      "id": "astra.gta-trilogy.vicecity",
+      "repo": "mihailinl/astra-gta-trilogy",
+      "repo_id": 1427110216,
+      "tag_prefix": "v",
+      "asset": "astra-gi-vicecity.zip",
+      "target": {
+        "game": {
+          "appid": "1546990",
+          "exe": "Gameface/Binaries/Win64/ViceCity.exe"
+        }
+      },
+      "fallback": null,
+      "predecessor": null
+    },
+    {
+      "id": "astra.gta-trilogy.sanandreas",
+      "repo": "mihailinl/astra-gta-trilogy",
+      "repo_id": 1427110216,
+      "tag_prefix": "v",
+      "asset": "astra-gi-sanandreas.zip",
+      "target": {
+        "game": {
+          "appid": "1547000",
+          "exe": "Gameface/Binaries/Win64/SanAndreas.exe"
+        }
+      },
+      "fallback": null,
+      "predecessor": null
+    }
+  ]
+}

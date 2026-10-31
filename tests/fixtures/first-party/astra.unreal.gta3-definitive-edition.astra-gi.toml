@@ -1,0 +1,103 @@
+# gi-probe first-party fixture (tools/fetch-first-party-manifests.sh): the release's astra-gi.toml, verbatim below.
+# source: astra.unreal.gta3-definitive-edition
+# repo: mihailinl/astra-reshade
+# tag: v0.2.2
+# asset: astra-gi-gta3.zip
+# sha256: ff49114b2108193ca6f009e07cce679793438f959f797c30cc8968c06b873017
+# chosen: fallback-pin
+# github-prerelease: true
+# --- verbatim below ---
+# astra-gi-gta3.toml (schema 1, astra-bepinex/docs/GAME-INTEGRATION-MANIFEST.md; read by astra-game-launcher).
+# "Astra for GTA III - The Definitive Edition": NOT the runner (astra-gi.toml, `exe = "*"`) - this manifest
+# pins `[target] exe` and `steam_appid` to this one game, so the launcher refuses it on any other exe
+# (src/plan.rs::plan_install, GAME_MISMATCH) the same way it already refuses a mismatched appid. That pin is
+# what makes it SAFE to add UE4SS_Signatures/ game-signatures/GTA3-DefinitiveEdition/ (see its sibling
+# README.md for why): those two files replace UE4SS's own pattern scan outright for this game's exe, and must
+# never reach any OTHER Unreal game's profile - which the shared runner's ue4ss-overlay/ cannot promise, but
+# an exe-pinned manifest can, with NO launcher change needed.
+#
+# Everything else below is the SAME as astra-gi.toml - same build, same upstream pins, same launch args - by
+# deliberate near-duplication: this manifest schema has no include/extends, and the two are independently
+# selectable packages a player picks between in the launcher, not one layered on the other. Touch BOTH files
+# together for anything that is not the `[target]`/`[[files]]` difference below (tools/package-unreal.sh
+# stages this package from the SAME build of astra.addon64/ReShade/UE4SS as astra-gi.toml, plus this
+# manifest's own extra UE4SS_Signatures files, so a digest drift between the two would fail the build, not a
+# player's install).
+schema = 1
+
+[integration]
+id = "astra.unreal.gta3-definitive-edition"
+name = "Astra for GTA III - The Definitive Edition"
+version = "0.2.2"
+authors = ["mihailinl"]
+license = "MIT AND BSD-3-Clause AND CC0-1.0" # ours and UE4SS: MIT; ReShade: BSD-3-Clause; ReShade.fxh: CC0-1.0
+repo = "https://github.com/mihailinl/astra-reshade"
+
+[target]
+engine = "unreal"
+exe = "Gameface/Binaries/Win64/LibertyCity.exe"
+steam_appid = 1546970
+platforms = ["windows-x64", "linux-proton"]
+anti_cheat = "none"
+
+# UE4SS, whole, into the profile - same as astra-gi.toml.
+[[files]]
+from = "ue4ss/**"
+to = "${profile}/ue4ss/"
+
+# ...plus the two signature overrides UE4SS's own scan cannot resolve on THIS exe (game-signatures/README.md):
+# they land in UE4SS's own override folder, beside UE4SS.dll (docs.ue4ss.com/guides/fixing-compatibility-problems).
+[[files]]
+from = "game-signatures/GTA3-DefinitiveEdition/UE4SS_Signatures/**"
+to = "${profile}/ue4ss/UE4SS_Signatures/"
+
+# ---- the game folder: the real exe's folder (Gameface/Binaries/Win64, beside LibertyCity.exe) ----
+
+# UE4SS's proxy (upstream, unmodified)
+[[game_files]]
+from = "dwmapi.dll"
+to = "${game}/dwmapi.dll"
+sha256 = "3f11fad958a959dd7ab78ab0b42be90e33f8ef8e152fbdc3c8e4278cb590e6cc"
+
+# ReShade 6.8.0 with full add-on support: ReShade64.dll from ReShade_Setup_6.8.0_Addon.exe, renamed (upstream, unmodified)
+[[game_files]]
+from = "dxgi.dll"
+to = "${game}/dxgi.dll"
+sha256 = "0cee63f9c9f13f3ac909c5b4903f4dbb4b719a7ab3b4f13b0deaf83c814b94f7"
+
+# our add-on, beside dxgi.dll: ReShade loads add-ons from its own folder when no ReShade.ini says otherwise
+[[game_files]]
+from = "astra.addon64"
+to = "${game}/astra.addon64"
+sha256 = "c5a11cc2516efd338fa5c1748248d964d58b809f1e849e5c0e96805a5f13dfc4"
+
+[[game_files]]
+from = "astra-reshade/Shaders/AstraPassthrough.fx"
+to = "${game}/astra-reshade/Shaders/AstraPassthrough.fx"
+sha256 = "9d59ca4b3fc9ada151267ea91b7e1f2e850290954bf649535774de1706031b3b"
+
+# the effect's game hooks: the foundation's own, empty (a game integration ships its own in place of it)
+[[game_files]]
+from = "astra-reshade/Shaders/AstraGame.fxh"
+to = "${game}/astra-reshade/Shaders/AstraGame.fxh"
+sha256 = "e7592a656d8251ca18eafbec5e788c5df1cd7aee56c55f6de6401fb1a9cb10f0"
+
+# ReShade's shader header (crosire/reshade-shaders, branch slim at fd00221, CC0-1.0; upstream, unmodified)
+[[game_files]]
+from = "astra-reshade/Shaders/ReShade.fxh"
+to = "${game}/astra-reshade/Shaders/ReShade.fxh"
+sha256 = "6dabfbbaf968c3871905d2ea17f96572ff7b1cec01310b5d0e5252b66b30174f"
+
+[launch]
+# --ue4ss-path: UE4SS from the profile (the game folder gets only its proxy). -AstraConfig: the ini below, where the
+# add-on reads the engine's port and this session's token - its PATH only, never the token (an UE game ignores both;
+# a Steam launch carries arguments, not environment). Each path is its own argument, so the launcher writes it as a
+# Windows path (Z:\... under Proton).
+args = ["--ue4ss-path", "${profile}/ue4ss/UE4SS.dll", "-AstraConfig", "${profile}/astra-reshade.ini"]
+proton_dll_overrides = { dwmapi = "native,builtin", dxgi = "native,builtin" }
+
+# written at every Play, in the profile only; the add-on reads [bridge] (src/config.h)
+[[config_writes]]
+file = "${profile}/astra-reshade.ini"
+section = "bridge"
+set = { Port = "${bridge_port}", Token = "${bridge_token}" }

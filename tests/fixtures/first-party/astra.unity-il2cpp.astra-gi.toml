@@ -1,0 +1,72 @@
+# gi-probe first-party fixture (tools/fetch-first-party-manifests.sh): the release's astra-gi.toml, verbatim below.
+# source: astra.unity-il2cpp
+# repo: mihailinl/astra-bepinex
+# tag: v0.8.1
+# asset: astra-gi-il2cpp.zip
+# sha256: 42c8e2b1bddcd5e62d9f87eaccc78c6beed9d7306028ea4706a50c2a08a7d20e
+# chosen: release
+# github-prerelease: false
+# --- verbatim below ---
+schema = 1
+
+[integration]                      # metadata: shown to the user, never acted on
+id = "astra.unity-il2cpp"
+name = "Astra for any Unity game (IL2CPP, experimental)"
+version = "0.8.1"
+authors = ["mihailinl"]
+license = "MIT"
+repo = "https://github.com/mihailinl/astra-bepinex"
+
+[target]                           # a RUNNER: any Unity IL2CPP game the user picks
+engine = "unity-il2cpp"
+exe = "*"                          # the user picks the game; the launcher checks it is Unity IL2CPP
+platforms = ["windows-x64", "linux-proton"]
+anti_cheat = "none"
+
+# Into the PROFILE (Astra's own folder for this game; never the game folder).
+[[files]]
+from = "BepInEx/core/**"           # BepInEx 6 (IL2CPP): the preloader, Il2CppInterop, Cpp2IL
+to = "${profile}/BepInEx/core/"
+
+[[files]]
+from = "dotnet/**"                 # the .NET runtime BepInEx 6 hosts its plugins in
+to = "${profile}/dotnet/"
+
+[[files]]
+from = "BepInEx/plugins/**"        # the foundation's IL2CPP flavour (Astra/)
+to = "${profile}/BepInEx/plugins/"
+
+# Beside the game's exe — the only files that touch the game folder. Each one is on the consent
+# sheet, pinned by its digest, backed up if it replaces a game file and restored on uninstall.
+[[game_files]]
+from = "winhttp.dll"               # Doorstop 4.5.0's proxy (the same file BepInEx 5 ships)
+to = "${game}/winhttp.dll"
+sha256 = "8c6cdbc38836dee87e3368f5de1994d7c0ccebf29e4ce7aba3c0981f9375412c"
+
+[[game_files]]
+from = "doorstop_config.ini"       # ships with enabled = false: Steam's own Play stays vanilla
+to = "${game}/doorstop_config.ini"
+
+[launch]
+# An argv ARRAY, never a shell string. Placeholders are filled per element (as Windows paths,
+# Z:\…, under Proton).
+args = ["--doorstop-enabled", "true",
+        "--doorstop-target-assembly", "${profile}/BepInEx/core/BepInEx.Unity.IL2CPP.dll",
+        "--doorstop-clr-corlib-dir", "${profile}/dotnet",
+        "--doorstop-clr-runtime-coreclr-path", "${profile}/dotnet/coreclr.dll"]
+# Wine DLL override for the game's Proton prefix (Linux), written into that prefix only. Mirrors
+# the Steam launch option from a per-game integration's README (`WINEDLLOVERRIDES="winhttp=n,b" %command%`).
+proton_dll_overrides = { winhttp = "native,builtin" }
+
+# INI keys set at every Play, inside the profile only.
+[[config_writes]]
+file = "${profile}/BepInEx/config/astra.unity-foundation.cfg"
+section = "Connection"
+set = { Port = "${bridge_port}", Token = "${bridge_token}" }
+
+# BepInEx 6 opens a console window with its log by default (BepInEx 5 does not): a player sees
+# nothing to act on there, and the log is in the profile's BepInEx/LogOutput.log anyway.
+[[config_writes]]
+file = "${profile}/BepInEx/config/BepInEx.cfg"
+section = "Logging.Console"
+set = { Enabled = "false" }

@@ -1,0 +1,8 @@
+# Astra's games code as Astra 0.2.7 shipped it, verbatim: gi-probe's replicas (src/bin/gi-probe/v027.rs)
+# are held to these files' functions, and compat-0.2.7.json to pins.rs's table (tests/gi_probe.rs, K4).
+# Refresh never: the tag is a release. Reproduce: git -C <Astra> show v0.2.7:<original path>
+tag v0.2.7
+commit 6fea01a01c1ca4209a967ff69d9afa065bdb22bb
+a8038eadf951c4d91c84b8e27d755282ebc3b644e6261f7a859ead6750c30400  pins.rs  astra-rs/astra-daemon/src/games/pins.rs
+d13abd2ef052f5d80dedc52c6985a95951ec8a2d40c21a4b431544f43abdf763  releases.rs  astra-rs/astra-daemon/src/games/releases.rs
+2e6515b093c3d617dfbf66b0c384104d1353a01468ce51693dbd0deb81397910  service.rs  astra-rs/astra-daemon/src/games/service.rs

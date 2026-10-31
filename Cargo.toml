@@ -19,11 +19,22 @@ name = "astra-game-launcher"
 path = "src/bin/astra-game-launcher.rs"
 required-features = ["cli"]
 
+# The release-time probe: `compat` (a GI release against Astra 0.2.7 and launcher 0.3.1) and
+# `validate-descriptor`. See the README's "gi-probe" section.
+[[bin]]
+name = "gi-probe"
+path = "src/bin/gi-probe/main.rs"
+required-features = ["gi-probe"]
+
 [features]
 default = ["cli"]
 # The command-line program and its HTTP client. The daemon builds with
 # `default-features = false` and injects its own `Fetch`.
 cli = ["dep:ureq"]
+# `gi-probe` links launcher 0.3.1 (what Astra 0.2.7 ships) as a normal dependency, so it is never
+# a default: the daemon and the CLI never build 0.3.1 (`cargo tree -e normal --no-default-features`
+# names no 9aa7874). `toml/display` rewrites a manifest without its `[integration.*]` tables.
+gi-probe = ["dep:launcher_031", "dep:semver", "toml/display"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -33,6 +44,10 @@ sha2 = "0.10"
 hex = "0.4"
 zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 ureq = { version = "3", optional = true, default-features = false, features = ["rustls"] }
+# gi-probe only (the feature above): launcher 0.3.1, the same rev as the dev-dependency below.
+launcher_031 = { package = "astra-game-launcher", git = "https://github.com/mihailinl/astra-game-launcher", rev = "9aa7874b60f6b10bd67411b7aad40fcc968b78bc", default-features = false, optional = true }
+# gi-probe only: Astra 0.2.7's tag rule (`releases::version_after`) is semver's.
+semver = { version = "1", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 # O_NOFOLLOW / O_NONBLOCK for reading a play-arm that may have been swapped for a link or a FIFO.

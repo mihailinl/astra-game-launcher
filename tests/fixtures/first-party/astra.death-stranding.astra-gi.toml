@@ -1,0 +1,90 @@
+# gi-probe first-party fixture (tools/fetch-first-party-manifests.sh): the release's astra-gi.toml, verbatim below.
+# source: astra.death-stranding
+# repo: mihailinl/astra-in-death-stranding
+# tag: v0.1.1
+# asset: astra-gi-ds1.zip
+# sha256: 7b88de52cecaec665fa9683eaa1b1e332497668b51b7760e4dea49dbec9ef71c
+# chosen: release
+# github-prerelease: false
+# --- verbatim below ---
+# astra-gi.toml (schema 1, astra-bepinex/docs/GAME-INTEGRATION-MANIFEST.md): Astra in Death Stranding Director's Cut.
+# The release tagged ds1-v<version> carries it as astra-gi.zip (Death Stranding 2's is gi/ds2/, tagged ds2-v<version>:
+# one repository, one release per game - a manifest names one game).
+# ReShade (BSD-3-Clause) runs two add-ons, both ours (MIT). The Minecraft in Death Stranding mod can share the same
+# ReShade (its own files sit under reshade-shaders/; ours sit under astra-reshade/, the foundation's own search
+# path, compiled in - the two never collide):
+#   astra.addon64     the Astra foundation (astra-reshade): her engine's pictures composited with DS's depth
+#   astra-ds.addon64  Death Stranding's part: DS's camera, Sam, the sun, where she walks
+# No ReShade.ini ships: ReShade rewrites it while the game runs, and the launcher checks every file it placed
+# against its digest at each Play. The foundation's add-on sets at load what her effect needs and ReShade's
+# defaults lack (its own EffectSearchPaths entry, PresetPath, TutorialProgress), only where missing.
+# tools/package-gi.sh builds the zip from this file: it fills in the digests of OUR files (they change with every
+# build); the upstream digests below are fixed by the pinned releases.
+schema = 1
+
+[integration]
+id = "astra.death-stranding"
+name = "Astra in Death Stranding Director's Cut"
+version = "0.1.1"
+authors = ["mihailinl"]
+license = "MIT AND BSD-3-Clause AND CC0-1.0" # ours: MIT; ReShade: BSD-3-Clause; ReShade.fxh: CC0-1.0
+repo = "https://github.com/mihailinl/astra-in-death-stranding"
+
+[target]
+steam_appid = 1850570                        # DEATH STRANDING DIRECTOR'S CUT (Steam build 13300582)
+exe = "ds.exe"
+platforms = ["windows-x64", "linux-proton"]
+anti_cheat = "none"
+
+# the licences of everything in here, into Astra's own folder for this game
+[[files]]
+from = "LICENSES/**"
+to = "${profile}/LICENSES/"
+
+# ---- the game folder (beside ds.exe) ----
+
+# ReShade 6.8.0 with full add-on support: ReShade64.dll from ReShade_Setup_6.8.0_Addon.exe, renamed (upstream,
+# unmodified). Already there with this digest (another mod installed the same ReShade): reused, never removed.
+[[game_files]]
+from = "dxgi.dll"
+to = "${game}/dxgi.dll"
+sha256 = "0cee63f9c9f13f3ac909c5b4903f4dbb4b719a7ab3b4f13b0deaf83c814b94f7"
+
+[[game_files]]
+from = "astra.addon64"
+to = "${game}/astra.addon64"
+sha256 = "a8330fee6ce4bffc19948321dbb4d4897e859eee7cacb7ccbb49dc06b980ac3b"
+
+[[game_files]]
+from = "astra-ds.addon64"
+to = "${game}/astra-ds.addon64"
+sha256 = "1137dd434fd14074a8708748336d8c3dd5139011d4aca1acf9733899a293bb03"
+
+[[game_files]]
+from = "astra-reshade/Shaders/AstraPassthrough.fx"
+to = "${game}/astra-reshade/Shaders/AstraPassthrough.fx"
+sha256 = "9d59ca4b3fc9ada151267ea91b7e1f2e850290954bf649535774de1706031b3b"
+
+# DS's hooks into the foundation's effect (DS's UI over her; the Minecraft mod's blocks in front of her)
+[[game_files]]
+from = "astra-reshade/Shaders/AstraGame.fxh"
+to = "${game}/astra-reshade/Shaders/AstraGame.fxh"
+sha256 = "e3b6fa8e743f1350c73d60ab8380687b52745c8e888441f23032458686eddae3"
+
+# ReShade's shader header (crosire/reshade-shaders, branch slim at fd00221, CC0-1.0; upstream, unmodified)
+[[game_files]]
+from = "astra-reshade/Shaders/ReShade.fxh"
+to = "${game}/astra-reshade/Shaders/ReShade.fxh"
+sha256 = "6dabfbbaf968c3871905d2ea17f96572ff7b1cec01310b5d0e5252b66b30174f"
+
+[launch]
+# -AstraConfig <ini>: where the foundation reads her engine's port and this session's token (DS ignores the
+# argument; a Steam launch carries arguments, not environment). Each path is its own argument, so the launcher
+# writes it as a Windows path (Z:\... under Proton).
+args = ["-AstraConfig", "${profile}/astra-reshade.ini"]
+proton_dll_overrides = { dxgi = "native,builtin" }
+
+[[config_writes]]
+file = "${profile}/astra-reshade.ini"
+section = "bridge"
+set = { Port = "${bridge_port}", Token = "${bridge_token}" }
