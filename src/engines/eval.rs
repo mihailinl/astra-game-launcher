@@ -2182,6 +2182,53 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// The unshipped rule never takes a program named `-Win64-Shipping.exe`, even when the
+    /// listing of its folder was cut before it (Steam's hint into a folder past 5,000 names): in
+    /// 0.4.1 every shipping name went to the shipping rule, which takes none with nothing before
+    /// the suffix.
+    #[test]
+    fn no_built_in_rule_takes_a_bare_shipping_name_on_the_hint() {
+        let root = std::env::temp_dir().join(format!("agl-eval-bare-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for (rel, bytes) in [
+            ("Proj/Binaries/Win64/-Win64-Shipping.exe", &b"MZ"[..]),
+            ("Proj/Content/Paks/pakchunk0-Windows.pak", b"pak"),
+        ] {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, bytes).unwrap();
+        }
+        let rel: Vec<String> = ["Proj", "Binaries", "Win64", "-Win64-Shipping.exe"]
+            .map(str::to_owned)
+            .to_vec();
+        let game = Game::new(&root, &[], None, Policy::BuiltIn);
+        let members = members(crate::engines::builtin());
+        let whole = game.folder(&rel[..3]).unwrap();
+        let cut = Rc::new(Folder::new(Vec::new()));
+        for folder in [whole, cut] {
+            for (mb, rule) in ordered(&members, |r| r.tier == RuleTier::Strong) {
+                let got = game.on_program(mb, rule, &rel, &folder, &mut Spent::default());
+                assert!(matches!(got, Ok(None)), "a strong rule took {rel:?}");
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `child` looks through the first 5,000 names a `read_dir` returns, as 0.4.1's `child()`
+    /// did, never more.
+    #[test]
+    fn childs_window_is_the_first_5000_names_read() {
+        let root = std::env::temp_dir().join(format!("agl-eval-window-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        for i in 0..MAX_ENTRIES + 10 {
+            fs::write(root.join(format!("{i:05}.dat")), b"").unwrap();
+        }
+        let game = Game::new(&root, &[], None, Policy::BuiltIn);
+        assert_eq!(game.window(&[]).map(|w| w.len()), Some(MAX_ENTRIES));
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn globs_match_as_written() {
         let g = |s: &str| -> Vec<GPart> {

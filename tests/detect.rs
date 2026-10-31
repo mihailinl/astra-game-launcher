@@ -896,3 +896,57 @@ fn at_one_depth_a_program_that_passes_beats_a_legacy_one() {
     let d = detect(t.path()).unwrap();
     assert_eq!((d.exe, d.confidence), (p("B/New.exe"), Confidence::High));
 }
+
+// ---- L2: edges the built-in descriptors read exactly as 0.4.1's code did (each also C1) ----
+
+/// A program with nothing before its extension has no stem to pair with: never Unity, whatever
+/// `_Data/` and player sit beside it.
+#[test]
+fn a_program_with_no_stem_is_never_unity() {
+    let t = Tmp::new("no-stem");
+    write(&t.join(".exe"), b"MZ");
+    write(&t.join("UnityPlayer.dll"), b"MZ");
+    write(&t.join("_Data/Managed/Assembly-CSharp.dll"), b"MZ");
+    let d = detect(t.path()).unwrap();
+    assert_eq!((eng(&d), d.evidence), (Engine::Unknown, None));
+}
+
+/// `Content` spelled two ways, neither exactly: the least spelling is the one looked in, as
+/// 0.4.1's `child()` did — here the one with no `Paks/`, so the pairing is half.
+#[cfg(target_os = "linux")]
+#[test]
+fn of_two_spellings_of_a_folder_the_least_is_looked_in() {
+    let t = Tmp::new("content-spellings");
+    write(
+        &t.join("Proj/Binaries/Win64/Proj-Win64-Shipping.exe"),
+        b"MZ",
+    );
+    std::fs::create_dir_all(t.join("Proj/CONTENT")).unwrap();
+    write(&t.join("Proj/content/Paks/pakchunk0-Windows.pak"), b"pak");
+    let d = detect(t.path()).unwrap();
+    assert_eq!(
+        (eng(&d), d.confidence, d.evidence),
+        (Engine::Unreal, Confidence::Low, p("Proj"))
+    );
+}
+
+/// Paks with no program name their build's platform by the first of the project's paks that
+/// carries one, in walk order — not merely the first pak.
+#[test]
+fn paks_name_their_platform_by_the_first_that_carries_one() {
+    let t = Tmp::new("paks-first-that-says");
+    write(&t.join("Gameface/Content/Paks/Game.pak"), b"pak");
+    write(
+        &t.join("Gameface/Content/Paks/pakchunk0-LinuxNoEditor.pak"),
+        b"pak",
+    );
+    write(
+        &t.join("Gameface/Content/Paks/pakchunk1-WindowsNoEditor.pak"),
+        b"pak",
+    );
+    let d = detect(t.path()).unwrap();
+    assert_eq!(
+        (eng(&d), d.exe, d.evidence, d.binary),
+        (Engine::Unreal, None, p("Gameface"), Binary::Linux)
+    );
+}

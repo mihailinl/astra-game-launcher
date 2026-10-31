@@ -94,6 +94,11 @@ struct Counts {
     pick_largest: AtomicUsize,
     tied: AtomicUsize,
     bootstrap_tie: AtomicUsize,
+    /// Answers only a weak built-in rule gives: any shipping program (no evidence), paks with
+    /// no program, a pck embedded in a top-level program.
+    weak_shipping: AtomicUsize,
+    paks_only: AtomicUsize,
+    embedded_pck: AtomicUsize,
     /// C1b: plans with Astra's own manifests, those that planned, the actions they hold, and
     /// every refusal by its code.
     c1b_plans: AtomicUsize,
@@ -487,6 +492,15 @@ fn one_tree(
         if d.unity_version.is_some() {
             bump(&counts.unity_version);
         }
+        if d.engine == Engine::Unreal && d.evidence.is_none() && d.exe.is_some() {
+            bump(&counts.weak_shipping);
+        }
+        if d.engine == Engine::Unreal && d.exe.is_none() {
+            bump(&counts.paks_only);
+        }
+        if d.engine == Engine::Godot && d.confidence == astra_game_launcher::Confidence::Low {
+            bump(&counts.embedded_pck);
+        }
         match d.exe_pick {
             Some(ExePick::LaunchConfig) => bump(&counts.pick_launch_config),
             Some(ExePick::Only) => bump(&counts.pick_only),
@@ -705,6 +719,9 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
         ("exe_pick largest", get(&c.pick_largest)),
         ("trees with 5+ ties", get(&c.tied)),
         ("bootstrapper ties", get(&c.bootstrap_tie)),
+        ("weak: any shipping program", get(&c.weak_shipping)),
+        ("weak: paks, no program", get(&c.paks_only)),
+        ("weak: embedded pck", get(&c.embedded_pck)),
     ];
     eprintln!("C1 corpus:");
     for (k, v) in &report {
@@ -736,6 +753,9 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
         ("exe_pick largest", 1_300),
         ("trees with 5+ ties", 380),
         ("bootstrapper ties", 45),
+        ("weak: any shipping program", 130),
+        ("weak: paks, no program", 400),
+        ("weak: embedded pck", 280),
     ] {
         let floor = (per_20k * trees as usize / 20_000).max(1);
         let got = report.iter().find(|(name, _)| *name == k).unwrap().1;

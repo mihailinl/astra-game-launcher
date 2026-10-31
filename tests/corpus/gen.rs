@@ -14,10 +14,12 @@
 //! Pieces may collide (a file where another piece wants a folder); [`Tree::build`] keeps the first,
 //! deterministically, and both detectors read whatever is on disk.
 //!
-//! Pieces added after C1 was first proven draw from their own stream ([`extras`]), so every tree
-//! of the first corpus is laid exactly as before and only gains what the new stream adds: a
-//! folder of 10,000 names that a listing cut BEFORE it is sorted reads differently from one cut
-//! after, a game past the walk's cap with Steam's hint naming it, and the tree's Steam appid.
+//! Pieces added after C1 was first proven draw from their own streams ([`extras`], [`strays`]),
+//! so every tree of the first corpus is laid exactly as before and only gains what a new stream
+//! adds: a folder of 10,000 names that a listing cut BEFORE it is sorted reads differently from
+//! one cut after, a game past the walk's cap with Steam's hint naming it, and the tree's Steam
+//! appid ([`extras`]); the shapes only a weak or a planning-only built-in rule answers
+//! ([`strays`], L2).
 
 use std::fs;
 use std::path::Path;
@@ -568,6 +570,7 @@ pub fn tree(seed: u64) -> Tree {
         app: None,
     };
     extras(seed, &mut t);
+    strays(seed, &mut t);
     t
 }
 
@@ -647,6 +650,134 @@ fn extras(seed: u64, t: &mut Tree) {
         "later/GAME.exe".into(),
     ] {
         t.hints.push(h);
+    }
+}
+
+/// The third stream (L2): shapes only a weak or a planning-only built-in rule answers, which
+/// neither stream above lays — a shipping program outside any `<Project>/Binaries/Win64/` (a bare
+/// suffix, a wrapper's, under `Engine/`), paks with no program, a pck embedded in a program below
+/// the top, a wrapper in an unshipped project's `Binaries/Win64/`, a program with no stem,
+/// `Content/` spelled two ways, a pre-2017.2 Unity game below the top. Drawn from its own
+/// generator, laid after everything else, so it changes no tree of the streams above but by
+/// adding to it. Every program it lays is planned; some are Steam's hint.
+fn strays(seed: u64, t: &mut Tree) {
+    fn lay(t: &mut Tree, y: &mut Rng, path: &str, bytes: &[u8], program: bool) {
+        t.nodes.push(Node::File(path.to_owned(), bytes.to_vec()));
+        if program {
+            t.programs.push(path.to_owned());
+            if y.chance(40) {
+                t.hints.push(path.to_owned());
+            }
+        }
+    }
+    let mut y = Rng::new(seed.rotate_left(43) ^ 0x57A4_5C0F_FEE0_0002);
+    if !y.chance(10) {
+        return;
+    }
+    for _ in 0..1 + y.below(3) {
+        match y.below(8) {
+            0 => {
+                let at = *y.pick(&["", "tools/", "a/b/", "Engine/Binaries/Win64/", "Win64/"]);
+                let name = *y.pick(&[
+                    "Stray-Win64-Shipping.exe",
+                    "-Win64-Shipping.exe",
+                    "Launcher-Win64-Shipping.exe",
+                    "stray-win64-shipping.EXE",
+                ]);
+                lay(t, &mut y, &format!("{at}{name}"), b"MZ\x90\0 stray", true);
+            }
+            1 => {
+                let project = *y.pick(&["Cooked", "Engine", "GameLauncher", "a"]);
+                let content = *y.pick(&["Content", "content", "CONTENT"]);
+                for _ in 0..1 + y.below(2) {
+                    let pak = *y.pick(&[
+                        "Game.pak",
+                        "pakchunk0-LinuxNoEditor.pak",
+                        "pakchunk0-WinGDK.pak",
+                        "pakchunk1-WindowsNoEditor.pak",
+                    ]);
+                    lay(
+                        t,
+                        &mut y,
+                        &format!("{project}/{content}/Paks/{pak}"),
+                        &[0; 16],
+                        false,
+                    );
+                }
+            }
+            2 => {
+                let at = *y.pick(&["bin/", "a/b/", "Win64/", ""]);
+                let name = *y.pick(&["Game.exe", "Launcher.exe", "Game.x86_64"]);
+                lay(
+                    t,
+                    &mut y,
+                    &format!("{at}{name}"),
+                    b"MZ\x90\0 a pck follows GDPC",
+                    true,
+                );
+            }
+            3 => {
+                let wrapper = *y.pick(&[
+                    "Launcher.exe",
+                    "CrashReportClient.exe",
+                    "UE4PrereqSetup_x64.exe",
+                ]);
+                let path = format!("Wrapped/Binaries/Win64/{wrapper}");
+                lay(t, &mut y, &path, b"MZ wrapper", true);
+                lay(
+                    t,
+                    &mut y,
+                    "Wrapped/Content/Paks/pakchunk0-Windows.pak",
+                    &[0; 8],
+                    false,
+                );
+            }
+            4 => {
+                lay(t, &mut y, ".exe", b"MZ nameless", true);
+                lay(t, &mut y, "UnityPlayer.dll", b"MZ player", false);
+                lay(
+                    t,
+                    &mut y,
+                    "_Data/Managed/Assembly-CSharp.dll",
+                    b"MZ cs",
+                    false,
+                );
+            }
+            5 => {
+                let exe = "Twice/Binaries/Win64/Twice-Win64-Shipping.exe";
+                lay(t, &mut y, exe, b"MZ twice", true);
+                t.nodes.push(Node::Dir("Twice/CONTENT".into()));
+                lay(
+                    t,
+                    &mut y,
+                    "Twice/content/Paks/pakchunk0-Windows.pak",
+                    &[0; 8],
+                    false,
+                );
+            }
+            6 => {
+                let exe = "Once/Binaries/Win64/Once-Win64-Shipping.exe";
+                lay(t, &mut y, exe, b"MZ once", true);
+                lay(
+                    t,
+                    &mut y,
+                    "Once/content/Paks/pakchunk0-Windows.pak",
+                    &[0; 8],
+                    false,
+                );
+            }
+            _ => {
+                let name = *y.pick(&["Old.exe", "Old.x86_64", "Old"]);
+                lay(t, &mut y, &format!("legacy/{name}"), b"MZ old", true);
+                lay(
+                    t,
+                    &mut y,
+                    "legacy/Old_Data/Managed/Assembly-CSharp.dll",
+                    b"MZ cs",
+                    false,
+                );
+            }
+        }
     }
 }
 
