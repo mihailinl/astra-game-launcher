@@ -18,6 +18,7 @@
 //! a game file.
 
 pub mod anti_cheat_services;
+pub mod content;
 mod ctx;
 mod detect;
 mod digest;
@@ -43,6 +44,7 @@ pub mod steam_appinfo;
 mod steam_userconfig;
 mod zip_consistency;
 
+pub use content::{ContentKind, ContentPart};
 pub use ctx::{Ctx, Progress};
 pub use detect::{
     ANTI_CHEAT_CODES, ANTI_CHEAT_SIGNATURES, AntiCheatSignature, Binary, Confidence, Detection,

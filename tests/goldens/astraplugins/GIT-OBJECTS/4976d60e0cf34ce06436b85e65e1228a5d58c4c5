@@ -1,0 +1,35 @@
+tree 5f5037a9801dc91d3c249771879a5cceb8ea02f9
+parent 516ba38fcb30082c98ab2cb882184998690fca61
+author Miha <mishasamil32@outlook.com> 1793536344 -0800
+committer Miha <mishasamil32@outlook.com> 1793536344 -0800
+
+games content: E_CONTENT_FORMAT, so a duplicate key cannot make an avatar look plain
+
+The games gate parsed glTF JSON with json.loads, which keeps the LAST of
+two members with the same name. A GLB whose JSON named `extensions`
+twice, an avatar that prohibits redistribution first and `{}` second,
+read as plain. 516ba38 judges plain glTF only in character parts, so in
+an animations part that file published with no licence verdict at all.
+minice-01 found the same shape in the content catalogue
+(animset-glb-duplicate-key) after this branch's review, and pointed at
+it here. A JSON chunk declared past EOF and an https image uri passed as
+well.
+
+Every GLB and .gltf, in any part and of any class, is now held to the
+content catalogue's step 10 BEFORE it is classified, and a failure is
+E_CONTENT_FORMAT:
+- the GLB is whole (its header length is the file size; its JSON chunk
+  ends inside the file);
+- its JSON parses with no member named twice;
+- a GLB's images[]/buffers[] uris are data: only;
+- a .gltf's uris are data: or a plain relative path to a file the
+  release holds, so nothing Astra loads makes it fetch a URL that tells a
+  third party who is looking.
+
+New goldens: vrm-duplicate-key, glb-duplicate-extensions,
+vrm-chunk-past-eof, vrm-header-length-wrong, glb-remote-uri, glb-data-uri
+(accepted as unknown), and the release goldens animation-duplicate-key,
+gltf-uri-escape and gltf-relative-uri (accepted). Mutations: parsing
+leniently again fails 3 goldens; letting any uri through fails 2.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

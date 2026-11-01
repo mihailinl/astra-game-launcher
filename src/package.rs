@@ -5,7 +5,7 @@
 //! `astra-gi.zip`: verified against its SHA-256, every entry checked, the manifest read, and
 //! the files the manifest names resolved. Only those files are ever extracted.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io::{Cursor, Read};
 
 use serde::Serialize;
@@ -74,6 +74,8 @@ pub struct GiPackage {
     manifest_text: String,
     pub(crate) profile_files: Vec<PackFile>,
     pub(crate) game_files: Vec<PackFile>,
+    /// Every file of the zip, folders left out: (index, name, size), in the zip's order.
+    entries: Vec<(usize, String, u64)>,
 }
 
 impl std::fmt::Debug for GiPackage {
@@ -366,6 +368,7 @@ impl GiPackage {
             manifest_text,
             profile_files,
             game_files,
+            entries: files,
         })
     }
 
@@ -432,6 +435,40 @@ impl GiPackage {
                 .collect(),
             variables: m.variables().into_iter().collect(),
         }
+    }
+
+    /// `[[integration.content]]` against this release's files ([`crate::content::judge`]): every
+    /// file of the zip is one it may name, each with a content-typed extension has its first bytes
+    /// read ([`crate::content::is_content_typed`]), and each declared part is read whole. Never
+    /// asked by an install: what a catalogue's ingest and `gi-probe check` ask before a release is
+    /// listed.
+    pub fn content(&self) -> Result<crate::content::Report> {
+        let mut ar = self.archive()?;
+        let present: BTreeSet<String> = self.entries.iter().map(|(_, n, _)| n.clone()).collect();
+        let mut found = BTreeSet::new();
+        for (index, name, _) in &self.entries {
+            if !crate::content::has_content_extension(name) {
+                continue;
+            }
+            let f = ar
+                .by_index(*index)
+                .map_err(|e| unsafe_entry(name, "corrupt").with("detail", e.to_string()))?;
+            let mut head = Vec::with_capacity(crate::content::SNIFF_BYTES);
+            f.take(crate::content::SNIFF_BYTES as u64)
+                .read_to_end(&mut head)
+                .map_err(|e| unsafe_entry(name, "corrupt").with("detail", e.to_string()))?;
+            if crate::content::is_content_typed(name, &head) {
+                found.insert(name.clone());
+            }
+        }
+        crate::content::judge(self.manifest.content(), &found, &present, |path| {
+            let &(index, ref name, size) = self
+                .entries
+                .iter()
+                .find(|(_, n, _)| n == path)
+                .ok_or_else(|| unsafe_entry(path, "missing"))?;
+            read_entry(&mut ar, index, name, size)
+        })
     }
 
     pub(crate) fn archive(&self) -> Result<ZipArchive<Cursor<&[u8]>>> {

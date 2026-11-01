@@ -37,7 +37,17 @@
 //!    name whose digest the allowlist lists with `default_enabled` false), or `other` (a notice,
 //!    `loader-other`: the red sheet line and the red moderator line). Labels only (merged plan
 //!    §2.5): the allowlist never permits what the manifest does not declare, and an undeclared
-//!    loader is step 2's `loader-undeclared` (K18).
+//!    loader is step 2's `loader-undeclared` (K18);
+//! 8. `content`: the release's own animations, characters, art and audio against
+//!    `[[integration.content]]` ([`GiPackage::content`], spec `manifest.md` §2.7, the codes the
+//!    catalogue's content check raises before gi-probe, in this launcher's spelling): every
+//!    content-typed file one declared part (`content-undeclared`, `content-missing`; a path
+//!    declared twice is step 1's `content-duplicate`), every GLB and `.gltf` whole and
+//!    self-contained (`content-format`), the VRM licence gate (`content-licence-refused`,
+//!    `content-licence-conflict`; an unknown meta is the notice `content-vrm-meta-unknown`, an
+//!    unreadable `.astrachar` `content-astrachar-unreadable`), and a licence for every part
+//!    (`content-licence-undeclared`). The report's `content.parts` is what a catalogue entry's
+//!    `content[]` carries.
 //!
 //! Step 2 holds a community release to what a community integration may place and launch
 //! ([`Manifest::lint`]: `loader-undeclared`, `community-limit` for a `[[game_files]]` folder, `[launch]
@@ -61,7 +71,7 @@ use crate::compat::sha256_hex;
 use crate::descriptor::{negative_folders, summary};
 use crate::{Fatal, Finding, Probe, report};
 
-const STEPS: [&str; 7] = [
+const STEPS: [&str; 8] = [
     "the launcher opens the zip and parses its manifest",
     "identity, capabilities, what a community release may place and launch, Astra Link's limits, the foundation claim and the engine descriptor",
     "every file [integration.link] names is in the zip, within its size",
@@ -69,6 +79,7 @@ const STEPS: [&str; 7] = [
     "built on the foundation: every file it places, placed alike",
     "code changed since the previous release",
     "the loader each game file is: none, allowlisted or other",
+    "every animation, model, picture and sound is one declared part, whole, with a licence the VRM gate allows",
 ];
 
 /// What a file holding code ends in: A§4.2's `.dll .so .dylib .jar .lua .py .js .exe`, and what
@@ -496,6 +507,41 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
         }
     }
 
+    // 8. Content.
+    let mut content = Value::Null;
+    match &pkg {
+        None if !is_zip => p.skip(
+            8,
+            "a manifest, not a zip: the content check reads the release's files",
+        ),
+        None => p.skip(8, unread("the release does not open (step 1)")),
+        Some(pkg) => {
+            let (f0, n0) = (p.findings.len(), p.notices.len());
+            let r = pkg
+                .content()
+                .map_err(|e| Fatal::io(&a.file, e.to_string()))?;
+            for e in &r.refusals {
+                p.finding(8, refusal(e));
+            }
+            for f in &r.flags {
+                let detail = match f.code {
+                    astra_game_launcher::content::FLAG_VRM_META_UNKNOWN => {
+                        "the VRM licence gate cannot read this part's licence (no VRM meta, or a token it does not know): it passes with the licence its entry declares, flagged"
+                    }
+                    _ => {
+                        "this .astrachar's body cannot be read as the spec reads a bundle, so the VRM licence gate never saw it: it passes with the licence its entry declares, flagged"
+                    }
+                };
+                p.notice(8, Finding::from_refusal(f.code, &f.params, detail));
+            }
+            content = json!({
+                "content_files": r.content_files,
+                "parts": r.parts,
+            });
+            p.close(8, f0, n0, Value::Null);
+        }
+    }
+
     let integration = manifest.as_ref().map_or(Value::Null, |m| {
         json!({
             "id": m.integration.id,
@@ -529,6 +575,7 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
         "built_on": built_on,
         "code_changed": code_changed,
         "loaders": loaders,
+        "content": content,
         "steps": p.steps,
         "notices": p.notices,
     });

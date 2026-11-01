@@ -12,9 +12,11 @@
 //!   `engine-code-taken` by [`EngineSet::build`] behind the golden it is paired with, the rest by
 //!   the parser or [`Descriptor::check_pass_b`] (a community descriptor). Each manifest golden is
 //!   accepted or refused as labelled by [`Manifest::parse_and_lint`] — `runner-builtin` as
-//!   Astra's own, the rest as community.
-//! - **K13.** `reserved.yaml`'s profile file names, id prefixes and name substrings are
-//!   [`reserved`]'s, and every engine code it reserves the launcher refuses to descriptors.
+//!   Astra's own, the rest as community. The content goldens (`testdata/games/content/`) are
+//!   `tests/content.rs`'s.
+//! - **K13.** `reserved.yaml`'s profile file names, id prefixes, name substrings and reserved
+//!   `[integration.*]` keys are [`reserved`]'s, and every engine code it reserves the launcher
+//!   refuses to descriptors.
 //!
 //! The verdict AND the code are pinned, never a reason's text. Every disagreement at this pin is
 //! one entry of `SPEC_DEFECTS_AT_PIN` (`tests/common/spec_goldens.rs`), which asserts it still
@@ -326,6 +328,28 @@ fn k13_reserved_names_and_ids_are_the_specs() {
         y["integration_name_reserved_substrings"],
         reserved::INTEGRATION_NAME_SUBSTRINGS
     );
+    // `[integration.*]` keys a later schema defines: equal, and each one refused at parse.
+    assert_eq!(
+        y["integration_reserved_keys"],
+        reserved::INTEGRATION_RESERVED_KEYS
+    );
+    for k in reserved::INTEGRATION_RESERVED_KEYS {
+        let text = golden_text("manifests/valid/runner-builtin.toml").replacen(
+            "[target]",
+            &format!("[[integration.{k}]]\nid = \"x\"\n\n[target]"),
+            1,
+        );
+        let e = Manifest::parse(&text).unwrap_err();
+        assert_eq!(
+            (e.code, e.param("key"), e.param("reason")),
+            (
+                codes::UNKNOWN_KEY,
+                Some(format!("integration.{k}").as_str()),
+                Some("reserved")
+            ),
+            "{k}"
+        );
+    }
 
     // Engine codes: every one the spec reserves, the launcher refuses to descriptors, and the
     // spec's list is the built-in codes and `unknown`.
@@ -355,6 +379,7 @@ fn k13_reserved_names_and_ids_are_the_specs() {
         "max_engine_codes_per_descriptor",
         "integration_id_reserved_prefixes",
         "integration_name_reserved_substrings",
+        "integration_reserved_keys",
         "profile_file_names",
     ];
     let unread: Vec<&String> = y.keys().filter(|k| !KEYS.contains(&k.as_str())).collect();
@@ -477,8 +502,9 @@ fn every_fixture_manifest_parses_with_this_launcher_and_with_031() {
 }
 
 /// What 0.3.1 makes of the spec's manifest goldens: it reads past every `[integration.*]` table
-/// (a game-specific GI with a Link, a foundation claim), and refuses a foundation of an engine
-/// it does not know at parse, so no 0.2.7 user is ever offered one (plan B §2).
+/// (a game-specific GI with a Link, a foundation claim, content parts, the reserved `uses`), and
+/// refuses a foundation of an engine it does not know at parse, so no 0.2.7 user is ever offered
+/// one (plan B §2).
 #[test]
 fn launcher_031_reads_past_the_integration_tables() {
     for rel in [
@@ -486,6 +512,10 @@ fn launcher_031_reads_past_the_integration_tables() {
         "manifests/valid/foundation-dependency-claim.toml",
         "manifests/valid/runner-builtin.toml",
         "manifests/invalid/capability-undeclared.toml",
+        // A game integration's own content, and the reserved `uses`: data 0.3.1 never reads.
+        "manifests/valid/content-parts.toml",
+        "manifests/invalid/integration-uses-reserved.toml",
+        "content/releases/allowed/astra-gi.toml",
     ] {
         launcher_031::Manifest::parse(&golden_text(rel))
             .unwrap_or_else(|e| panic!("{rel}: 0.3.1 refuses it: {e:?}"));

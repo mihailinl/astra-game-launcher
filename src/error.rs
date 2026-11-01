@@ -163,6 +163,25 @@ pub mod codes {
     /// `file`, `exe-not-a-program` with `exe`, `launch-env`, `launch-override` or
     /// `launch-arg-path` with `field`).
     pub const COMMUNITY_LIMIT: &str = "community-limit";
+    // A game integration's own content: `[[integration.content]]` (`crate::content`, AstraPlugins
+    // `manifest.md` §2.7; the spec's `E_CONTENT_*`). `field` names the entry, `path` the file.
+    /// A content-typed file of the release (`path`) that no `[[integration.content]]` entry covers.
+    pub const CONTENT_UNDECLARED: &str = "content-undeclared";
+    /// An entry (`field`) whose `path` is no content-typed file of the release: absent, or a file
+    /// whose first bytes are not what its extension says.
+    pub const CONTENT_MISSING: &str = "content-missing";
+    /// Two entries declare one `path` (`field` the second, `first` the first).
+    pub const CONTENT_DUPLICATE: &str = "content-duplicate";
+    /// A GLB or `.gltf` part (or an `.astrachar`'s body or bundle) that breaks the format rules
+    /// (`reason`): not whole, JSON that does not parse or names a member twice, an external URI.
+    pub const CONTENT_FORMAT: &str = "content-format";
+    /// The VRM licence gate refuses a part: its meta (`meta`, its `value` as JSON, `defaulted`
+    /// when absent) refuses redistribution or names who alone may use the avatar.
+    pub const CONTENT_LICENCE_REFUSED: &str = "content-licence-refused";
+    /// A part carries a VRM 0.x and a VRM 1.0 meta that read differently (`vrm0`, `vrm1`).
+    pub const CONTENT_LICENCE_CONFLICT: &str = "content-licence-conflict";
+    /// A part with no readable VRM licence and no `licence` of its own.
+    pub const CONTENT_LICENCE_UNDECLARED: &str = "content-licence-undeclared";
     // Other.
     pub const MISSING_VARIABLE: &str = "missing-variable";
     /// A variable's value holds a character it may not carry (a newline into an INI, a NUL).
@@ -237,6 +256,13 @@ pub mod codes {
         LINK_INVALID,
         LOADER_UNDECLARED,
         COMMUNITY_LIMIT,
+        CONTENT_UNDECLARED,
+        CONTENT_MISSING,
+        CONTENT_DUPLICATE,
+        CONTENT_FORMAT,
+        CONTENT_LICENCE_REFUSED,
+        CONTENT_LICENCE_CONFLICT,
+        CONTENT_LICENCE_UNDECLARED,
         MISSING_VARIABLE,
         INVALID_VARIABLE,
         CANCELLED,
@@ -394,6 +420,25 @@ impl LauncherError {
             }
             codes::COMMUNITY_LIMIT => {
                 "astra-gi.toml does something only Astra's own integrations may do"
+            }
+            codes::CONTENT_UNDECLARED => {
+                "the release holds an animation, model, picture or sound that astra-gi.toml does not declare"
+            }
+            codes::CONTENT_MISSING => {
+                "astra-gi.toml declares an animation, model, picture or sound the release does not hold"
+            }
+            codes::CONTENT_DUPLICATE => "astra-gi.toml declares one content file twice",
+            codes::CONTENT_FORMAT => {
+                "a 3D model or animation in the release is not a whole, self-contained file"
+            }
+            codes::CONTENT_LICENCE_REFUSED => {
+                "a model's licence does not allow it to be shared, or allows only named people to use it"
+            }
+            codes::CONTENT_LICENCE_CONFLICT => {
+                "a model carries two licences that say different things"
+            }
+            codes::CONTENT_LICENCE_UNDECLARED => {
+                "a content file of the release has no licence: neither its own nor a declared one"
             }
             codes::MISSING_VARIABLE => "a variable the integration needs was not given",
             codes::INVALID_VARIABLE => "a variable's value holds a forbidden character",

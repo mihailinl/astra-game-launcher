@@ -299,8 +299,9 @@ restore_game_files(&profile_dir, &game)?;                // a withdrawn integrat
 | planning | `plan_install_in(pkg, game, profile, &EngineSet, Provenance, pick)`, `Provenance::{FirstParty, Community}`, `InstallPlan::{engine_descriptor, provenance}` (`PinnedDescriptor`), `HIJACK_NAMES`, `is_hijack_name`, `Manifest::parse` (`engine-undeclared`), `Manifest::lint(first_party)`, `Manifest::parse_and_lint`, `LoaderDecl`, `FoundationClaim`, `link_limits`, `KEEP_EXTENSIONS` |
 | install and restore | `restore_game_files`, `UninstallReport::{kept_reasons, warnings}`, `KEPT_FOLDER_GAINED_FILES`, `Ledger::{provenance, descriptor_sha256, proxy_folders}`, `LEDGER_SCHEMA` 4 (`restored`) |
 | Steam | `store_categories`, `store_categories_of`, `online_game`, `online_codes`, `ONLINE_CATEGORIES`, `VAC_CATEGORY` |
-| reserved names | `reserved` (one list, held to the spec's `reserved.yaml`, canary K13): `PROFILE_FILE_NAMES`, `INTEGRATION_ID_PREFIXES` (`astra.`, `minice.`), `INTEGRATION_NAME_SUBSTRINGS`, `engine_codes`, `id_is_reserved`, `integration_name_is_reserved`, `profile_name_is_reserved`, `check_identity`; `is_reserved_code`, `is_valid_engine_code` |
-| new codes (`codes::ALL`) | `anti-cheat-unknown`, `capability-undeclared`, `community-limit`, `descriptor-duplicate`, `descriptor-first-party-only`, `descriptor-invalid`, `descriptor-mismatch`, `descriptor-over-limit`, `descriptor-schema-unknown`, `descriptor-too-broad`, `descriptor-too-large`, `descriptor-unsupported`, `engine-ambiguous`, `engine-code-reserved`, `engine-code-taken`, `engine-name-reserved`, `engine-undeclared`, `foreign-file`, `kernel-anti-cheat`, `link-invalid`, `listed-anti-cheat`, `loader-policy-conflict`, `loader-undeclared`, `needs-newer-astra`, `reserved-id`, `reserved-name` |
+| reserved names | `reserved` (one list, held to the spec's `reserved.yaml`, canary K13): `PROFILE_FILE_NAMES`, `INTEGRATION_ID_PREFIXES` (`astra.`, `minice.`), `INTEGRATION_NAME_SUBSTRINGS`, `INTEGRATION_RESERVED_KEYS` (`uses`), `engine_codes`, `id_is_reserved`, `integration_name_is_reserved`, `profile_name_is_reserved`, `check_identity`; `is_reserved_code`, `is_valid_engine_code` |
+| a release's own content | `Manifest::content` (`ContentPart`, `ContentKind`), `GiPackage::content` (a `content::Report`: `content_files`, `parts`, `refusals`, `flags`), `content::{judge, vrm_gate, meta_verdict, class_of, format_problem, is_content_typed, SPEC_CODES, launcher_code, FLAG_VRM_META_UNKNOWN, FLAG_ASTRACHAR_UNREADABLE}` (below) |
+| new codes (`codes::ALL`) | `anti-cheat-unknown`, `capability-undeclared`, `community-limit`, `content-duplicate`, `content-format`, `content-licence-conflict`, `content-licence-refused`, `content-licence-undeclared`, `content-missing`, `content-undeclared`, `descriptor-duplicate`, `descriptor-first-party-only`, `descriptor-invalid`, `descriptor-mismatch`, `descriptor-over-limit`, `descriptor-schema-unknown`, `descriptor-too-broad`, `descriptor-too-large`, `descriptor-unsupported`, `engine-ambiguous`, `engine-code-reserved`, `engine-code-taken`, `engine-name-reserved`, `engine-undeclared`, `foreign-file`, `kernel-anti-cheat`, `link-invalid`, `listed-anti-cheat`, `loader-policy-conflict`, `loader-undeclared`, `needs-newer-astra`, `reserved-id`, `reserved-name` |
 | new warnings | `foreign-loader-in-backup` (a plan), `restore-partial` (an uninstall or restore) |
 | `gi-probe` | `compat`, `check`, `validate-descriptor [--corpus]`, `capture`, `pick` (below) |
 
@@ -384,6 +385,27 @@ restore_game_files(&profile_dir, &game)?;                // a withdrawn integrat
   left `restored` (schema 4, which launchers 0.3.1 and 0.4.1 refuse as `schema-too-new`): Play is
   `needs-reinstall` (`reason` = `restored`), `uninstall` removes the profile, and an install over
   it is a fresh one.
+- **A game integration's own content** (`[[integration.content]]`, AstraPlugins
+  `spec/games/manifest.md` §2.7; `astra_game_launcher::content`). A release may ship its own
+  animations, characters, art and audio, one entry each (`path`, `kind` = `animations`
+  `character` `art` `audio`, `title`, `credit`, `licence`), so its author confirms the rights to
+  each at publication. `Manifest::parse` reads the table and refuses a path declared twice
+  (`content-duplicate`) and a `builtin:` reference (no `:` in a path); launcher 0.3.1 ignores the
+  table. `GiPackage::content` holds the zip to it, which `gi-probe check` (step 8) and a
+  catalogue's ingest ask before a release is listed, never an install: every file whose
+  extension AND first bytes make it content (`.astrapack .astrachar .vrma .glb .vrm .gltf .fbx`,
+  images, audio; code never) is one declared part (`content-undeclared`, `content-missing`);
+  every GLB and `.gltf` whole, its JSON naming no member twice, with no external URI
+  (`content-format`); the VRM licence gate on what its glTF extensions make an avatar, never its
+  name, in any part (and a plain glTF in a `character` part, and the body of an `.astrachar`),
+  every VRM meta read by its own spec's defaults, an unrecognised token unknown and never
+  allowed (`content-licence-refused`, `content-licence-conflict`; unknown is the flag
+  `content-vrm-meta-unknown`); and a licence for every part, the VRM meta's or the entry's own
+  (`content-licence-undeclared`). The codes are the spec's `E_CONTENT_*` in this launcher's
+  spelling (`content::SPEC_CODES`), held to the spec's goldens (`tests/content.rs`).
+- **`[[integration.uses]]` is reserved** (spec `manifest.md` §2.8, `reserved.yaml`): a later
+  schema's reference to a catalogue item. `Manifest::parse` refuses it whatever its shape
+  (`unknown-key{key=integration.uses, reason=reserved}`).
 - **A token is the user's alone.** A `[[config_writes]]` entry that sets a caller's variable
   (anything but `${profile}` and `${game}`; today the bridge's port and token) is written mode
   0600 on Unix, and an existing file's looser mode is tightened even when its text is unchanged.
@@ -432,7 +454,7 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
   listing; `tools/fetch-first-party-manifests.sh` uses it to keep
   `tests/fixtures/first-party/` (each source's manifest as 0.2.7 would install it today) fresh.
 - **`check`** is what a catalogue's ingest asks of a release before it is listed (AstraPlugins
-  `spec/games/manifest.md` §4), with this launcher's own parser. Its seven steps:
+  `spec/games/manifest.md` §4), with this launcher's own parser. Its eight steps:
   1. the launcher opens the zip (one archive to every reader, its hygiene, the manifest, every
      file it names, no reserved profile name placed — `src/reserved.rs`, the one list, canary
      K13). A zip refused as two archives (`zip-inconsistent`) is read no further: no later step
@@ -453,7 +475,12 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
   7. `loaders`: each game file `none`, `allowlisted` (a loader's name whose digest `--loaders`,
      the catalogue's `loaders[]`, lists as off by default) or `other` (a notice,
      `loader-other`). Labels only: the allowlist never permits what the manifest does not
-     declare.
+     declare;
+  8. `content`: the release's own animations, characters, art and audio against
+     `[[integration.content]]` (`GiPackage::content`, above): coverage, the format of every GLB
+     and `.gltf`, the VRM licence gate and a licence for every part; `content.parts` is what a
+     catalogue entry's `content[]` carries (`sha256`, `licence_source`, `vrm_licence`). A path
+     declared twice is step 1's (`content-duplicate`).
 
   Given a bare `astra-gi.toml` instead of a zip, it makes the steps that need no zip and says
   so.

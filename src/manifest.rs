@@ -28,6 +28,12 @@
 //! - `[integration.link]` ([`Manifest::link`]): read as it is, never refused here; the launcher
 //!   acts on none of it, and [`Manifest::lint`] holds it to Astra Link v1's limits.
 //! - `[integration] sdk` ([`Manifest::sdk`]): an `https://` URL, metadata.
+//! - `[[integration.content]]` ([`Manifest::content`]): the integration's own animations,
+//!   characters, art and audio, one entry each ([`crate::content`]). Its shape and a path declared
+//!   twice (`content-duplicate`) are refused here; whether the release's files are what it
+//!   declares is [`crate::GiPackage::content`]'s.
+//! - `[[integration.uses]]`, and any key of [`crate::reserved::INTEGRATION_RESERVED_KEYS`]:
+//!   reserved for a later schema, refused (`unknown-key{reason=reserved}`).
 //!
 //! None of these changes what [`IntegrationInfo`], [`crate::InstallPlan`] or [`crate::Ledger`]
 //! serialise to.
@@ -36,6 +42,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::content::{self, ContentPart};
 use crate::detect::Engine;
 use crate::digest::normalize_hex;
 use crate::engines::{Descriptor, EngineCode};
@@ -182,6 +189,8 @@ struct IntegrationTables {
     /// `[integration] sdk` is there but no usable URL: metadata, so never a refusal at parse —
     /// [`Manifest::lint`]'s finding.
     sdk_unusable: bool,
+    /// `[[integration.content]]`, in the manifest's order (empty when absent).
+    content: Vec<ContentPart>,
 }
 
 // `toml::Value` is not `Eq` (it may hold a float); the tables are equal when their values are.
@@ -195,6 +204,7 @@ impl PartialEq for IntegrationTables {
             && self.link == o.link
             && self.sdk == o.sdk
             && self.sdk_unusable == o.sdk_unusable
+            && self.content == o.content
     }
 }
 
@@ -518,6 +528,16 @@ impl IntegrationTables {
     /// `[integration.engine]`'s (kept) and `[integration.link]`'s (never made here).
     fn read(integration: &toml::Table) -> Result<IntegrationTables> {
         let mut t = IntegrationTables::default();
+        // A key a later schema defines: whatever it holds, it cannot mean that here.
+        if let Some(k) = crate::reserved::INTEGRATION_RESERVED_KEYS
+            .iter()
+            .find(|k| integration.contains_key(**k))
+        {
+            return Err(unknown_key(format!("integration.{k}")).with("reason", "reserved"));
+        }
+        if let Some(v) = integration.get(content::TABLE) {
+            t.content = content::read_table(v)?;
+        }
         if let Some(v) = integration.get("engine") {
             t.engine = Some((v.clone(), Descriptor::from_toml_value(v)));
         }
@@ -960,6 +980,13 @@ impl Manifest {
     /// 2,048 bytes); the latter is [`Manifest::lint`]'s finding.
     pub fn sdk(&self) -> Option<&str> {
         self.tables.sdk.as_deref()
+    }
+
+    /// `[[integration.content]]`: the integration's own parts, in the manifest's order (empty
+    /// when it declares none). What an install sheet lists (title, credit) and a report may name;
+    /// [`crate::GiPackage::content`] holds the release's files to it.
+    pub fn content(&self) -> &[ContentPart] {
+        &self.tables.content
     }
 
     /// `capability-undeclared{capability, variable}` when the manifest hands `${bridge_token}` on

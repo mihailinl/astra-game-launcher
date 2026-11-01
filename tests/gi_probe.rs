@@ -18,7 +18,10 @@
 //!   program (`tests/descriptors/hostile/`, and debt row 33's weakness pinned).
 //! - `check` answers every manifest golden of the specification as `tests/goldens.rs` judges the
 //!   library (the same `SPEC_DEFECTS_AT_PIN`), and on release zips: Link files, reserved ids by
-//!   provenance, the descriptor's negative folders, `built_on` and `code_changed`.
+//!   provenance, the descriptor's negative folders, `built_on`, `code_changed`, and the release's
+//!   own content — every content golden of the specification (`testdata/games/content/`) with the
+//!   verdict and the code `vectors.json` gives, every hostile content fixture refused
+//!   (`tests/common/content_fixtures.rs`, which `tests/content.rs` runs through the library).
 //! - `capture` records what detection lists and only the bytes the rules read, refuses a
 //!   recording over 1 MiB, and replays as the folder it was taken from; the format's reader
 //!   (`tests/corpus/replay.rs`) refuses what breaks it; `validate-descriptor --corpus` refuses a
@@ -27,6 +30,8 @@
 #![cfg(feature = "gi-probe")]
 
 mod common;
+#[path = "common/content_fixtures.rs"]
+mod content_fixtures;
 #[path = "common/spec_goldens.rs"]
 mod spec_goldens;
 
@@ -1228,6 +1233,38 @@ fn compat_passes_a_well_formed_release_of_every_source() {
     }
 }
 
+/// A release's own content (`[[integration.content]]`, spec `manifest.md` §2.7) is data launcher
+/// 0.3.1 reads past: `compat` passes a release that declares a part, with nothing 0.3.1 plans
+/// otherwise once the table is taken out (step 3 names it), and `check` passes the same zip.
+#[test]
+fn compat_and_check_pass_a_release_with_its_own_content() {
+    let tmp = Tmp::new("compat-content");
+    let s = src("astra.unity");
+    let manifest = manifest_for(&s, "1.2.3").replacen(
+        "[target]",
+        "[[integration.content]]\npath = \"anim/climb.fbx\"\nkind = \"animations\"\ntitle = \"Climb\"\ncredit = \"someone\"\nlicence = \"CC-BY-4.0\"\n\n[target]",
+        1,
+    );
+    let mut entries = vec![
+        E::File("astra-gi.toml", manifest.as_bytes()),
+        E::File("astra-probe.dll", DLL),
+        E::File("anim/climb.fbx", content_fixtures::FBX),
+    ];
+    entries.extend(PAYLOAD.iter().map(|p| E::File(p, b"payload")));
+    let zip = zip(&entries);
+    let z = put(&tmp, "r", s.asset, &zip);
+    let (code, r) = probe(&["compat", "--zip", &z, "--source", s.id, "--tag", "v1.2.3"]);
+    assert_eq!(code, 0, "{r:#}");
+    assert_eq!(
+        r["steps"][2]["stripped"],
+        json!(["integration.capabilities", "integration.content"])
+    );
+    let (code, r) = check(&z, &["--provenance", "first-party"]);
+    assert_eq!(code, 0, "{r:#}");
+    assert_eq!(r["content"]["parts"][0]["path"], "anim/climb.fbx");
+    assert_eq!(r["content"]["parts"][0]["licence_source"], "declared");
+}
+
 /// Every kind of break fails at the step that owns it, and no earlier one.
 #[test]
 fn compat_fails_each_break_at_its_step() {
@@ -2202,7 +2239,7 @@ fn check_passes_a_well_formed_community_release_and_says_what_it_did_not_check()
     assert_eq!(
         statuses(&r),
         [
-            "pass", "pass", "notice", "skipped", "skipped", "skipped", "pass"
+            "pass", "pass", "notice", "skipped", "skipped", "skipped", "pass", "pass"
         ]
     );
     assert_eq!(r["loaders"]["files"][0]["dest"], "${game}/astra-probe.dll");
@@ -2522,7 +2559,7 @@ fn check_refuses_a_zip_that_reads_as_two_archives_and_reads_no_further() {
                 )],
                 "{name}: {r:#}"
             );
-            for step in [2, 3, 4, 7] {
+            for step in [2, 3, 4, 7, 8] {
                 let s = &r["steps"][step - 1];
                 assert_eq!(s["status"], "skipped", "{name} step {step}: {r:#}");
                 assert_eq!(
@@ -2533,6 +2570,227 @@ fn check_refuses_a_zip_that_reads_as_two_archives_and_reads_no_further() {
             assert_eq!(r["integration"], Value::Null, "{name}");
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// `gi-probe check`: the release's own content (step 8).
+// ---------------------------------------------------------------------------------------------
+
+/// A finding's or notice's params.
+fn params_of(f: &Value) -> BTreeMap<String, String> {
+    f["params"]
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_owned()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `gi-probe check` of a release zip as `content_fixtures` answers: every finding, and step 8's
+/// notices.
+fn content_check(
+    tmp: &Tmp,
+    name: &str,
+    zip: &[u8],
+) -> (i32, Value, spec_goldens::Answer, spec_goldens::Answer) {
+    let (exit, r) = check(&put(tmp, name, "astra-gi.zip", zip), &[]);
+    let refused = r["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| content_fixtures::key_of(f["code"].as_str().unwrap(), &params_of(f)))
+        .collect();
+    let flagged = r["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|n| n["step"] == 8)
+        .map(|n| content_fixtures::key_of(n["code"].as_str().unwrap(), &params_of(n)))
+        .collect();
+    (exit, r, refused, flagged)
+}
+
+/// **The content goldens through `gi-probe check`**: each folder of `content/releases/`, zipped
+/// as it is, refused with exactly the one code `vectors.json` gives or passed; and each file of
+/// `content/vrm/` as the one `character` part of a release (its licence declared), refused
+/// exactly where the gate refuses (the deciding field; the format rule), passed with
+/// `licence_source = vrm` where it allows, flagged `content-vrm-meta-unknown` and passed with
+/// the declared licence where it reads unknown. The same goldens as AstraPlugins'
+/// `tools/check-games-goldens.py`, judged by the same verdicts.
+#[test]
+fn check_gives_every_content_golden_its_verdict_and_code() {
+    let tmp = Tmp::new("check-content-goldens");
+    let mut out = Vec::new();
+    for (name, files, code) in content_fixtures::release_vectors() {
+        let (exit, r, refused, _) = content_check(&tmp, &name, &content_fixtures::zip_of(&files));
+        let codes: Vec<&str> = refused.iter().map(|(c, _)| c.as_str()).collect();
+        let ok = match code {
+            None => exit == 0 && codes.is_empty() && r["steps"][7]["status"] != "skipped",
+            Some(c) => exit == 1 && codes == [c],
+        };
+        if !ok {
+            out.push(format!(
+                "release {name}: {refused:?}; wants {code:?}: {r:#}"
+            ));
+        }
+    }
+    for (name, file, bytes, want) in content_fixtures::gate_vectors() {
+        let zip = content_fixtures::gate_release(&file, &bytes);
+        let (exit, r, refused, flagged) = content_check(&tmp, &format!("vrm-{name}"), &zip);
+        let path = format!("character/{file}");
+        let source = &r["content"]["parts"][0]["licence_source"];
+        use content_fixtures::GateWant;
+        let ok = match &want {
+            GateWant::Accept => exit == 0 && flagged.is_empty() && source == "vrm",
+            GateWant::Refuse(field, value, defaulted) => {
+                let f = &r["findings"][0]["params"];
+                refused == [("content-licence-refused".to_owned(), field.clone())]
+                    && serde_json::from_str::<Value>(f["value"].as_str().unwrap()).unwrap()
+                        == *value
+                    && f["defaulted"].as_str() == Some(if *defaulted { "true" } else { "false" })
+                    && r["findings"][0]["step"] == 8
+            }
+            GateWant::Unknown(deciding) => {
+                let n = &r["notices"][0]["params"];
+                exit == 0
+                    && flagged == [("content-vrm-meta-unknown".to_owned(), path.clone())]
+                    && source == "declared"
+                    && match deciding {
+                        None => n.get("meta").is_none(),
+                        Some((field, value)) => {
+                            n["meta"] == field.as_str()
+                                && serde_json::from_str::<Value>(n["value"].as_str().unwrap())
+                                    .unwrap()
+                                    == *value
+                        }
+                    }
+            }
+            GateWant::Conflict => {
+                refused.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>()
+                    == ["content-licence-conflict"]
+            }
+            GateWant::Format(reason) => {
+                refused == [("content-format".to_owned(), (*reason).to_owned())]
+            }
+        };
+        if !ok {
+            out.push(format!(
+                "vrm {name}: {refused:?} flagged {flagged:?}; wants {want:?}"
+            ));
+        }
+    }
+    assert!(out.is_empty(), "\n{}", out.join("\n"));
+}
+
+/// **Every hostile content fixture through `gi-probe check`**: refused as the library refuses it
+/// (`tests/content.rs`), and its near miss passing, flagged as it says.
+#[test]
+fn check_refuses_every_hostile_content_fixture_and_passes_its_near_miss() {
+    let tmp = Tmp::new("check-content-hostile");
+    let mut out = Vec::new();
+    for (i, f) in content_fixtures::hostile().iter().enumerate() {
+        let (_, _, refused, flagged) =
+            content_check(&tmp, &format!("h{i}"), &content_fixtures::zip_of(&f.files));
+        out.extend(content_fixtures::fixture_failure(f, &refused, &flagged));
+        out.extend(content_fixtures::near_miss_failure(f, |zip| {
+            let (_, _, r, fl) = content_check(&tmp, &format!("h{i}-near"), zip);
+            (r, fl)
+        }));
+    }
+    assert!(out.is_empty(), "\n{}", out.join("\n"));
+}
+
+/// What step 8 reports of a release that passes: every content-typed file, and each part as a
+/// catalogue entry's `content[]` carries it (`games-index-v1.md` §2.1) — what ingest hashed,
+/// where its licence came from, the VRM licence read.
+#[test]
+fn check_reports_the_parts_a_catalogue_entry_carries() {
+    let tmp = Tmp::new("check-content-parts");
+    let (_, files, _) = content_fixtures::release_vectors()
+        .into_iter()
+        .find(|(n, _, _)| n == "allowed")
+        .unwrap();
+    let (exit, r, _, _) = content_check(&tmp, "allowed", &content_fixtures::zip_of(&files));
+    assert_eq!(exit, 0, "{r:#}");
+    assert_eq!(r["steps"][7]["status"], "pass");
+    assert_eq!(
+        r["content"]["content_files"],
+        json!(["art/cover.png", "character/avatar.vrm"])
+    );
+    let parts = r["content"]["parts"].as_array().unwrap();
+    let avatar = files
+        .iter()
+        .find(|(n, _)| n == "character/avatar.vrm")
+        .unwrap();
+    assert_eq!(parts[1]["sha256"], sha(&avatar.1));
+    assert_eq!(parts[1]["licence_source"], "vrm");
+    assert_eq!(parts[1]["vrm_licence"]["vrm_version"], "0.x");
+    assert_eq!(parts[1]["gltf"], "avatar");
+    assert_eq!(parts[0]["licence_source"], "declared");
+    assert_eq!(parts[0]["licence"], "CC0-1.0");
+    assert!(parts[0].get("vrm_licence").is_none());
+    for p in parts {
+        let keys: BTreeSet<&str> = p.as_object().unwrap().keys().map(String::as_str).collect();
+        let allowed: BTreeSet<&str> = [
+            "path",
+            "kind",
+            "title",
+            "credit",
+            "licence",
+            "licence_source",
+            "sha256",
+            "vrm_licence",
+            "gltf",
+        ]
+        .into();
+        assert!(keys.is_subset(&allowed), "{keys:?}");
+    }
+    // A bare manifest: the step says why it did not look.
+    let m = tmp.join("astra-gi.toml");
+    fs::write(
+        &m,
+        &files.iter().find(|(n, _)| n == "astra-gi.toml").unwrap().1,
+    )
+    .unwrap();
+    let (exit, r) = check(m.to_str().unwrap(), &[]);
+    assert_eq!(exit, 0, "{r:#}");
+    assert_eq!(r["steps"][7]["status"], "skipped");
+    assert!(r["content"].is_null());
+}
+
+/// Merged plan §5.3, which the catalogue's ingest raises as `E_CAPABILITY_UNDECLARED`: a release
+/// whose `[[config_writes]]` hand `${bridge_token}` on without `[integration.capabilities]
+/// companion = ["presentation"]` is refused (`capability-undeclared`, step 2) — the
+/// specification's own golden, as the release zip it would be — and declaring it is enough.
+#[test]
+fn check_refuses_a_bridge_token_release_without_the_capability() {
+    let tmp = Tmp::new("check-capability");
+    let text = spec_goldens::golden_text("manifests/invalid/capability-undeclared.toml");
+    let z = zip(&[E::File("astra-gi.toml", text.as_bytes())]);
+    let (exit, r) = check(&put(&tmp, "undeclared", "astra-gi.zip", &z), &[]);
+    assert_eq!(exit, 1, "{r:#}");
+    assert_eq!(
+        codes_of(&r)
+            .into_iter()
+            .map(|(s, c, p)| (s, c, p["capability"].clone(), p["variable"].clone()))
+            .collect::<Vec<_>>(),
+        [(
+            2,
+            "capability-undeclared".to_owned(),
+            json!("companion.presentation"),
+            json!("bridge_token")
+        )]
+    );
+    let declared = text.replacen(
+        "[target]",
+        "[integration.capabilities]\ncompanion = [\"presentation\"]\n\n[target]",
+        1,
+    );
+    let z = zip(&[E::File("astra-gi.toml", declared.as_bytes())]);
+    let (exit, r) = check(&put(&tmp, "declared", "astra-gi.zip", &z), &[]);
+    assert_eq!(exit, 0, "{r:#}");
 }
 
 // ---------------------------------------------------------------------------------------------

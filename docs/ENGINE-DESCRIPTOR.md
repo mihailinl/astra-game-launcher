@@ -8,9 +8,9 @@ reads the places the definition leaves open. It is not a second copy of the defi
 ## The definition
 
 The normative text is AstraPlugins'
-[`spec/games/engine-descriptor-v1.md`](https://github.com/mihailinl/AstraPlugins/blob/d46e44a089387589018f28cfc3403399f7c3b89d/spec/games/engine-descriptor-v1.md)
-at commit **`d46e44a089387589018f28cfc3403399f7c3b89d`** (PR #117), with its schema,
-[`spec/games/schemas/engine-descriptor-v1.schema.json`](https://github.com/mihailinl/AstraPlugins/blob/d46e44a089387589018f28cfc3403399f7c3b89d/spec/games/schemas/engine-descriptor-v1.schema.json),
+[`spec/games/engine-descriptor-v1.md`](https://github.com/mihailinl/AstraPlugins/blob/4976d60e0cf34ce06436b85e65e1228a5d58c4c5/spec/games/engine-descriptor-v1.md)
+at commit **`4976d60e0cf34ce06436b85e65e1228a5d58c4c5`**, with its schema,
+[`spec/games/schemas/engine-descriptor-v1.schema.json`](https://github.com/mihailinl/AstraPlugins/blob/4976d60e0cf34ce06436b85e65e1228a5d58c4c5/spec/games/schemas/engine-descriptor-v1.schema.json),
 and its goldens, `testdata/games/descriptors/`. That commit is the one in
 `tests/goldens/astraplugins/PIN`: the launcher's copy of the goldens is vendored from it, and
 `tests/goldens.rs` holds the commit named here equal to `PIN`. A re-pin

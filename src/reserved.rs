@@ -19,6 +19,11 @@
 //!   walked around. Whether a descriptor may declare a code at all is the wider rule of
 //!   [`crate::is_reserved_code`] (look-alikes, family-name and `astra`/`unknown` prefixes,
 //!   `ambiguous`), which every one of these codes meets.
+//! - **`[integration.*]` keys** ([`INTEGRATION_RESERVED_KEYS`]): a table schema 1 does not define
+//!   yet but will (`[[integration.uses]]`, a reference to a catalogue item, spec `manifest.md`
+//!   §2.8). [`crate::Manifest::parse`] refuses one (`unknown-key{reason=reserved}`) whatever its
+//!   shape, so nothing shipped early can collide with what it comes to mean. Launcher 0.3.1
+//!   ignores it, as every `[integration]` key.
 
 use crate::detect::Engine;
 use crate::engines::EngineCode;
@@ -48,6 +53,10 @@ pub const INTEGRATION_ID_PREFIXES: &[&str] = &["astra.", "minice."];
 /// [`name_words`]: case, marks and look-alike letters and digits ignored, a word split only
 /// where the name has a separator, and a run of one- and two-letter pieces read as one word.
 pub const INTEGRATION_NAME_SUBSTRINGS: &[&str] = &["Minice", "Official"];
+
+/// The keys below `[integration]` no manifest of schema 1 may use: reserved for a later schema
+/// (`reserved.yaml`'s `integration_reserved_keys`).
+pub const INTEGRATION_RESERVED_KEYS: &[&str] = &["uses"];
 
 /// The engine codes no descriptor may declare by name: every built-in engine's, `unknown` last.
 pub fn engine_codes() -> Vec<EngineCode> {

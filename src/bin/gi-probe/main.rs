@@ -17,7 +17,8 @@
 //!   0.2.7's own tag, asset and manifest rules ([`compat`]). Canary K4.
 //! - `check`: may a release be published — the launcher's own parse and zip hygiene, the
 //!   `[integration.*]` rules, reserved ids and names, Astra Link's limits, the engine descriptor,
-//!   `built_on` and `code_changed` ([`check`]). What a catalogue's ingest runs.
+//!   `built_on`, `code_changed`, the loaders and the release's own content ([`check`]). What a
+//!   catalogue's ingest runs.
 //! - `validate-descriptor`: an `astra.engine/1` descriptor, the spec's §5 lint ([`descriptor`]),
 //!   with `--corpus` its claims over labelled recordings too.
 //! - `capture`: a recording of a real game folder, `astra.list-shape/1` ([`capture`]; the format
@@ -79,7 +80,10 @@ USAGE
                 id, and no [launch] env, foreign overrides or path arguments outside
                 ${profile}/ and ${game}/; built_on (every file --foundation places, placed
                 alike) and code_changed (code new or changed since --previous) are reported,
-                and each game file's loader (none, allowlisted by --loaders, or other).
+                and each game file's loader (none, allowlisted by --loaders, or other);
+                every animation, model, picture and sound of the zip is one
+                [[integration.content]] part, each GLB and .gltf whole and self-contained, the
+                VRM licence gate allows each avatar, and every part has a licence.
                 --provenance defaults to community. A bare astra-gi.toml is checked without the
                 zip's half.
   validate-descriptor

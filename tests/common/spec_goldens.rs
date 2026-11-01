@@ -351,6 +351,20 @@ pub const SCHEMA_REFUSALS: &[(&str, &[(&str, &str)])] = &[
         "manifests/invalid/unknown-top-level-key.toml",
         &[("unknown-key", "mods")],
     ),
+    // `command` is no kind of a game integration's part (`content::ContentKind`).
+    (
+        "manifests/invalid/content-kind-not-allowed.toml",
+        &[("manifest-invalid", "integration.content[0].kind")],
+    ),
+    (
+        "manifests/invalid/content-path-traversal.toml",
+        &[("manifest-invalid", "integration.content[0].path")],
+    ),
+    // `reserved::INTEGRATION_RESERVED_KEYS` (`reason` = `reserved`).
+    (
+        "manifests/invalid/integration-uses-reserved.toml",
+        &[("unknown-key", "integration.uses")],
+    ),
 ];
 
 /// What `record` (a `vectors.json` entry) wants.
