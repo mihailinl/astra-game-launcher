@@ -1,0 +1,26 @@
+tree 5f5037a9801dc91d3c249771879a5cceb8ea02f9
+parent 7804f9a910fac572879f8cb03f086d8d26228f63
+parent 4976d60e0cf34ce06436b85e65e1228a5d58c4c5
+author Mihailin <mishasamil32@outlook.com> 1793570877 -0800
+committer GitHub <noreply@github.com> 1793570877 -0800
+gpgsig -----BEGIN PGP SIGNATURE-----
+ 
+ wsFcBAABCAAQBQJq57g9CRC1aQ7uu5UhlAAASZkQAIlzN29M6aCnvUUDM2PRfCuX
+ X4NT0i+yZu/uJHYUYNgzVov9Rp2EwYYqfxW9djeYDh991M9kCkXgxEira++JTlb2
+ N0LnBcGFrFm1DiYLsN7rpq8bnraExbUeBybYnry800yXcddJfSLfZpi0Yl4ReprL
+ cx+dR7ZA+4awQ3JcXfaP6FSJWfN/bNwxAa8winIAGdWUOlq0WCgTkH8NIXnAvBTi
+ irR03jI1AyGNuSJZvW0VxO4ESTha5ZwLCCBVqkDuuJ/ANrHr54h12ttHLBul2JB8
+ mjk27XAtBzRnQ6jsn64G8ncUI62xDnLCLJo+giE1TrjKANagaZyGJdYDZMbg67Yj
+ jy8aUAxE68Y6lMZRbgw4MFyt4l7oN0yYgzgZ9Ir4DtoNByDgnDZCXlDWfj+enpuX
+ yZiyXpeO8HvFCmxQ4xX7WAlfkipYTydURgOfKHOytnMRlSn+L6CZ57/Psf+1pxz4
+ Wdpp6/rXM/kfCVEi8Sih0GP1aKiK8Phox58f0hBJZ00qqdR9RFalfgKG81Hddg8g
+ WeKn3DZ1OGQfRcZxB8TKATBb8UH0ysb1cxBZcQocehoubQRqgUdfp3QB2y47kd5Z
+ Rp7vEiTTxiii2SXjGahbeGuuqGCULH0Q9yALpj0wzwnyLTLJcyc5t4scI6yrj09z
+ gDeWXrgOuuiFEibIWEHl
+ =NiFO
+ -----END PGP SIGNATURE-----
+ 
+
+Merge pull request #123 from mihailinl/spec/games-vrm-conflict-kindkeys
+
+spec/games: refuse a VRM whose 0.x and 1.0 metas disagree (E_CONTENT_LICENCE_CONFLICT); keys via trust.json kind_keys
