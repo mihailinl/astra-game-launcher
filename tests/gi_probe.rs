@@ -1318,6 +1318,87 @@ fn compat_holds_a_pack_inbox_release_to_astra_0_2_8() {
     );
 }
 
+/// Step 1 asks this launcher too, for every refusal: a release 0.3.1 installs (it reads past
+/// every `[integration.*]` table) and this launcher refuses — the reserved
+/// `[[integration.uses]]`, a content kind it does not know — fails there with this launcher's
+/// refusal (`launcher` its version), or Astra 0.2.7 would install a release the next Astra then
+/// refuses to Play (it parses the ledger's manifest again) or reinstall. And a
+/// `${astra_pack_inbox}` release this launcher refuses is that refusal, never
+/// `needs-newer-astra`'s "Astra 0.2.8 reads it".
+#[test]
+fn compat_fails_a_release_this_launcher_refuses() {
+    let tmp = Tmp::new("compat-refused-by-0.5");
+    let s = src("astra.unity");
+    let with_table = |table: &str| {
+        manifest_for(&s, "1.2.3").replacen("[target]", &format!("{table}\n[target]"), 1)
+    };
+    for (what, manifest, code, key, reason) in [
+        (
+            "the reserved [[integration.uses]]",
+            with_table("[[integration.uses]]\nid = \"someone.pack\"\nversion_req = \"=1.0.0\"\n"),
+            "unknown-key",
+            Some("integration.uses"),
+            Some("reserved"),
+        ),
+        (
+            "a content kind this launcher does not know",
+            with_table(
+                "[[integration.content]]\npath = \"anim/climb.fbx\"\nkind = \"command\"\ntitle = \"Climb\"\ncredit = \"someone\"\nlicence = \"CC-BY-4.0\"\n",
+            ),
+            "manifest-invalid",
+            Some("integration.content[0].kind"),
+            None,
+        ),
+    ] {
+        let zip = release_zip(&manifest, PAYLOAD);
+        assert!(
+            launcher_031::GiPackage::open(&zip, &sha(&zip)).is_ok(),
+            "{what}: 0.3.1 installs it, or this shows nothing"
+        );
+        let z = put(&tmp, code, s.asset, &zip);
+        let (exit, r) = probe(&["compat", "--zip", &z, "--source", s.id, "--tag", "v1.2.3"]);
+        assert_eq!(exit, 1, "{what}: {r:#}");
+        let findings = r["findings"].as_array().unwrap();
+        assert_eq!(findings.len(), 1, "{what}: {r:#}");
+        let f = &findings[0];
+        assert_eq!(
+            (f["step"].as_u64(), f["code"].as_str()),
+            (Some(1), Some(code)),
+            "{what}"
+        );
+        assert_eq!(f["params"]["key"].as_str(), key, "{what}: {r:#}");
+        assert_eq!(f["params"]["reason"].as_str(), reason, "{what}");
+        assert_eq!(f["params"]["launcher"], env!("CARGO_PKG_VERSION"), "{what}");
+        assert_eq!(
+            statuses(&r),
+            [
+                "fail", "skipped", "skipped", "skipped", "skipped", "skipped"
+            ],
+            "{what}"
+        );
+    }
+
+    // A pack-inbox release in a folder below the inbox: both launchers refuse it, and the finding
+    // is this one's (`pack-inbox-invalid`), never needs-newer-astra.
+    let manifest = manifest_for(&s, "1.2.3")
+        + "\n[[files]]\nfrom = \"packs/**\"\nto = \"${astra_pack_inbox}/sub/\"\n";
+    let mut entries = vec![
+        E::File("astra-gi.toml", manifest.as_bytes()),
+        E::File("astra-probe.dll", DLL),
+        E::File("packs/climb.astrapack", b"PK\x05\x06"),
+    ];
+    entries.extend(PAYLOAD.iter().map(|p| E::File(p, b"payload")));
+    let zip = zip(&entries);
+    let z = put(&tmp, "in-a-folder", s.asset, &zip);
+    let (exit, r) = probe(&["compat", "--zip", &z, "--source", s.id, "--tag", "v1.2.3"]);
+    assert_eq!(exit, 1, "{r:#}");
+    let findings = r["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1, "{r:#}");
+    assert_eq!(findings[0]["code"], "pack-inbox-invalid", "{r:#}");
+    assert_eq!(findings[0]["params"]["reason"], "in-a-folder");
+    assert_eq!(findings[0]["params"]["launcher"], env!("CARGO_PKG_VERSION"));
+}
+
 /// Every kind of break fails at the step that owns it, and no earlier one.
 #[test]
 fn compat_fails_each_break_at_its_step() {

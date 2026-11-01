@@ -430,9 +430,13 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
   and 0.2.7's own rules (`src/bin/gi-probe/v027.rs`, copied from tag v0.2.7 and held to it token
   for token by `tests/gi_probe.rs`). Every first-party release script runs it on the real zip.
   Its six steps:
-  1. 0.3.1 opens the zip and parses its manifest — once this launcher has found the zip one
-     archive to every reader: a zip it refuses as two (`zip-inconsistent`, below) fails here,
-     and 0.3.1, whose zip 8 cannot tell, never reads it;
+  1. 0.3.1 opens the zip and parses its manifest, and so does this launcher: a zip it refuses
+     as two archives (`zip-inconsistent`, below) fails here, and 0.3.1, whose zip 8 cannot tell,
+     never reads it; a zip this launcher refuses for anything else (a reserved
+     `[[integration.uses]]`, a content kind it does not know, a pack folder it refuses) fails
+     with its refusal (`launcher` = its version), since 0.2.7 would install what the next Astra
+     then refuses to Play; `needs-newer-astra{min_astra}` (a `${astra_pack_inbox}` release) only
+     when this launcher opens the zip;
   2. 0.2.7's `check_manifest` passes for the source (`--source`, an `[integration] id` from
      `src/bin/gi-probe/compat-0.2.7.json`, which canary K4 holds equal to 0.2.7's `pins.rs`):
      its id and repository, a runner's `[target] engine` with no appid or a game's own appid,

@@ -6,12 +6,16 @@
 //! run on the real zip against launcher 0.3.1 (what 0.2.7 ships), plus Astra 0.2.7's own rules for
 //! a source's releases (merged plan R30, canary K4):
 //!
-//! 1. launcher 0.3.1 opens the zip (`GiPackage::open`, which parses the manifest) — once this
-//!    launcher has found it one archive to every reader: a zip it refuses as two
-//!    (`zip-inconsistent`, as `check` does) fails here, and 0.3.1, whose zip 8 cannot tell, never
-//!    reads it. A placeholder this launcher reads and 0.3.1 refuses ([`NEWER_PLACEHOLDERS`]:
-//!    `${astra_pack_inbox}`) is the finding `needs-newer-astra{min_astra}`: the release needs
-//!    that Astra, and must not reach 0.2.7's users;
+//! 1. launcher 0.3.1 opens the zip (`GiPackage::open`, which parses the manifest) — and so does
+//!    this launcher, whose `open` is asked first: a zip it refuses as two (`zip-inconsistent`, as
+//!    `check` does) fails here, and 0.3.1, whose zip 8 cannot tell, never reads it. A zip this
+//!    launcher refuses for anything else that 0.3.1 opens fails here with this launcher's refusal
+//!    (`launcher` = its version): 0.2.7 would install it, and the Astra after it would then
+//!    refuse its Play (it parses the ledger's manifest again) and a reinstall. A placeholder this
+//!    launcher reads and 0.3.1 refuses ([`NEWER_PLACEHOLDERS`]: `${astra_pack_inbox}`) is the
+//!    finding `needs-newer-astra{min_astra}` only when this launcher opens the zip: the release
+//!    needs that Astra, and must not reach 0.2.7's users. When both refuse it otherwise, the
+//!    finding is 0.3.1's;
 //! 2. 0.2.7's `check_manifest` passes for the source's row (its id and repository, a runner's
 //!    `[target] engine` and no appid or a game's own appid, the tag's version), and so does
 //!    `pick`'s rule for the tag and the asset: the row's tag prefix, an optional `v`, semver,
@@ -87,15 +91,33 @@ fn refusal(e: &LauncherError, detail: &str) -> Finding {
 /// uses one cannot reach Astra 0.2.7's users, and a catalogue entry of it needs that `min_astra`.
 pub const NEWER_PLACEHOLDERS: &[(&str, &str)] = &[("astra_pack_inbox", "0.2.8")];
 
-/// Step 1's finding for a zip 0.3.1 refuses: `needs-newer-astra{min_astra, placeholder, refused}`
-/// for one of [`NEWER_PLACEHOLDERS`] (what a release script reads to keep the release from
-/// Astra 0.2.7's users), 0.3.1's own refusal otherwise.
-fn step1_refusal(e: &LauncherError) -> Finding {
-    let newer = (e.code == launcher_031::codes::UNKNOWN_PLACEHOLDER)
+/// The [`NEWER_PLACEHOLDERS`] row 0.3.1's refusal `e` is about, if it is one.
+fn newer_placeholder(e: &LauncherError) -> Option<&'static (&'static str, &'static str)> {
+    (e.code == launcher_031::codes::UNKNOWN_PLACEHOLDER)
         .then(|| e.params.get("name"))
         .flatten()
-        .and_then(|n| NEWER_PLACEHOLDERS.iter().find(|(p, _)| p == n));
-    match newer {
+        .and_then(|n| NEWER_PLACEHOLDERS.iter().find(|(p, _)| p == n))
+}
+
+/// Step 1's finding for a zip THIS launcher refuses (not as two archives): its own refusal, with
+/// `launcher` = its version.
+fn by_this_launcher(e: &astra_game_launcher::LauncherError) -> Finding {
+    let version = env!("CARGO_PKG_VERSION");
+    Finding::from_refusal(
+        e.code,
+        &e.params,
+        &format!(
+            "launcher {version} (the Astra after 0.2.7) refuses this zip: {e}. Launcher 0.3.1 would install it, and the next Astra would then refuse its Play and a reinstall"
+        ),
+    )
+    .with("launcher", version)
+}
+
+/// Step 1's finding for a zip 0.3.1 refuses and this launcher opens: `needs-newer-astra{min_astra,
+/// placeholder, refused}` for one of [`NEWER_PLACEHOLDERS`] (what a release script reads to keep
+/// the release from Astra 0.2.7's users), 0.3.1's own refusal otherwise.
+fn step1_refusal(e: &LauncherError) -> Finding {
+    match newer_placeholder(e) {
         Some((name, min)) => Finding::new(
             astra_game_launcher::codes::NEEDS_NEWER_ASTRA,
             format!(
@@ -172,7 +194,8 @@ pub fn run(a: &CompatArgs) -> Result<(Value, bool), Fatal> {
     // two archives (`check`'s step 1 refusal, `src/zip_consistency.rs`) is judged no further, so
     // compat never passes a release under one reading that a reader of local headers sees as
     // another.
-    if let Err(e) = astra_game_launcher::GiPackage::open(&zip, &zip_sha256)
+    let ours = astra_game_launcher::GiPackage::open(&zip, &zip_sha256).err();
+    if let Some(e) = &ours
         && e.code == astra_game_launcher::codes::ZIP_INCONSISTENT
     {
         p.finding(1, Finding::from_refusal(e.code, &e.params, &e.to_string()));
@@ -185,13 +208,28 @@ pub fn run(a: &CompatArgs) -> Result<(Value, bool), Fatal> {
         }
         return Ok(finish(a, &source, &asset, &zip_sha256, None, p));
     }
-    let pkg = match GiPackage::open(&zip, a.sha256.as_deref().unwrap_or(&zip_sha256)) {
-        Ok(pkg) => {
+    let pkg = match (
+        GiPackage::open(&zip, a.sha256.as_deref().unwrap_or(&zip_sha256)),
+        &ours,
+    ) {
+        (Ok(pkg), None) => {
             p.close(1, 0, 0, Value::Null);
             Some(pkg)
         }
-        Err(e) => {
-            p.finding(1, step1_refusal(&e));
+        // 0.3.1 installs what this launcher refuses (an `[integration.*]` table 0.3.1 reads past,
+        // a destination it never sees): this launcher's refusal, or the release reaches 0.2.7.
+        (Ok(_), Some(ours)) => {
+            p.finding(1, by_this_launcher(ours));
+            p.close(1, 0, 0, Value::Null);
+            None
+        }
+        (Err(e), ours) => {
+            // `needs-newer-astra` says the next Astra reads it: never of a zip this one refuses.
+            let finding = match ours {
+                Some(ours) if newer_placeholder(&e).is_some() => by_this_launcher(ours),
+                _ => step1_refusal(&e),
+            };
+            p.finding(1, finding);
             p.close(1, 0, 0, Value::Null);
             None
         }
