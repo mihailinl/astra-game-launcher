@@ -44,8 +44,9 @@ pub const PROFILE_FILE_NAMES: &[&str] = &[
 /// case (an id is ASCII: letters, digits, `.`, `-`, `_`).
 pub const INTEGRATION_ID_PREFIXES: &[&str] = &["astra.", "minice."];
 
-/// What no community `[integration] name` may hold, compared after [`fold_name`]: case, marks,
-/// look-alike letters and digits, and every character that is not a letter or a digit ignored.
+/// What no community `[integration] name` may hold inside one of its words, compared after
+/// [`name_words`]: case, marks and look-alike letters and digits ignored, a word split only
+/// where the name has a separator, and a run of one- and two-letter pieces read as one word.
 pub const INTEGRATION_NAME_SUBSTRINGS: &[&str] = &["Minice", "Official"];
 
 /// The engine codes no descriptor may declare by name: every built-in engine's, `unknown` last.
@@ -73,31 +74,95 @@ fn reserved_prefix(id: &str) -> Option<&'static str> {
     })
 }
 
-/// Whether `name`, folded ([`fold_name`]), holds one of [`INTEGRATION_NAME_SUBSTRINGS`] folded
-/// alike: `Official`, `OFFICIAL`, `Οfficial` (a Greek omicron), `Off1cial`, `O f f i c i a l`,
-/// `Ｏｆｆｉｃｉａｌ` (full width) and `Offi​cial` (a zero-width space inside) all do.
+/// Whether a word of `name` ([`name_words`]) holds one of [`INTEGRATION_NAME_SUBSTRINGS`] folded
+/// alike: `Official`, `OFFICIAL`, `unofficially`, `Οfficial` (a Greek omicron), `Off1cial`,
+/// `O f f i c i a l`, `Mi-ni-ce`, `Ｏｆｆｉｃｉａｌ` (full width) and `Offi​cial` (a zero-width
+/// space inside) all do; `Admin Ice Tools`, `Gemini Celestial` and `Mini Cell` do not, since no
+/// word of theirs holds one — the spec's fold (NFKC and a confusables fold, substring) keeps
+/// the separators too.
 pub fn integration_name_is_reserved(name: &str) -> bool {
-    let folded = fold_name(name);
-    INTEGRATION_NAME_SUBSTRINGS
-        .iter()
-        .any(|w| folded.contains(&fold_name(w)))
+    let words = name_words(name);
+    INTEGRATION_NAME_SUBSTRINGS.iter().any(|w| {
+        let w = fold_confusables(w);
+        words.iter().any(|x| x.contains(&w))
+    })
 }
 
-/// A name as [`integration_name_is_reserved`] compares it: the full-width forms, the
-/// mathematical letters and digits and the circled letters read as the ASCII they look like,
-/// then [`fold_confusables`] (case, marks, Latin/Cyrillic/Greek look-alikes, `|`/`!`/`$`/`@`),
-/// then only letters and digits kept — so no separator, zero-width character or punctuation
-/// splits a reserved word — and [`fold_confusables`] once more, for the pairs it reads as one
-/// letter (`rn`→`m`, `cl`→`d`) that a dropped character had held apart. An `[integration] name`
-/// may hold any script, unlike a descriptor's display name; a compatibility form not listed here
-/// (a superscript, a parenthesised letter) is the moderator's to see.
-pub fn fold_name(name: &str) -> String {
-    let compat: String = name.chars().map(compatibility_ascii).collect();
-    let kept: String = fold_confusables(&compat)
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .collect();
-    fold_confusables(&kept)
+/// A name's words as [`integration_name_is_reserved`] compares them: the full-width forms, the
+/// mathematical letters and digits, the circled and parenthesised letters, the superscript and
+/// subscript digits and the Latin ligatures read as the ASCII they look like (as NFKC reads them);
+/// split into pieces where the name has a separator (a space, a hyphen, a dot, any punctuation
+/// but an apostrophe), each piece folded by [`fold_confusables`] (case, marks, Latin/Cyrillic/
+/// Greek look-alikes, `|`/`!`/`$`/`@`, the pairs it reads as one letter). A character that
+/// joins without separating — a zero-width or format character, a combining mark, an
+/// apostrophe — is dropped inside its piece, so `Offic'ial` is one word. Every run of two or
+/// more pieces of at most two characters is also read as one word, folded together:
+/// `O f f i c i a l`, `O.f.f.i.c.i.a.l`, `Mi-ni-ce`. Look-alikes are never merged across a
+/// separator otherwise. An `[integration] name` may hold any script, unlike a descriptor's
+/// display name; a compatibility form not listed here (a modifier letter, a superscript letter
+/// other than `ⁱ`/`ⁿ`) is the moderator's to see.
+pub fn name_words(name: &str) -> Vec<String> {
+    let mut pieces: Vec<String> = vec![String::new()];
+    let expanded = name.chars().flat_map(|c| match ligature(c) {
+        Some(s) => s.chars().collect::<Vec<char>>(),
+        None => vec![compatibility_ascii(c)],
+    });
+    for c in expanded {
+        if joins(c) {
+            continue;
+        }
+        if c.is_alphanumeric() || matches!(c, '|' | '!' | '$' | '@') {
+            pieces.last_mut().expect("never empty").push(c);
+        } else if pieces.last().is_some_and(|p| !p.is_empty()) {
+            pieces.push(String::new());
+        }
+    }
+    pieces.retain(|p| !p.is_empty());
+    let mut words: Vec<String> = pieces.iter().map(|p| fold_confusables(p)).collect();
+    let short = |p: &String| p.chars().count() <= 2;
+    let mut i = 0;
+    while i < pieces.len() {
+        let run = pieces[i..].iter().take_while(|p| short(p)).count();
+        if run >= 2 {
+            words.push(fold_confusables(&pieces[i..i + run].concat()));
+        }
+        i += run.max(1);
+    }
+    words
+}
+
+/// A character that joins the letters around it without separating them: a zero-width or
+/// format character, a combining mark, an apostrophe.
+fn joins(c: char) -> bool {
+    matches!(
+        c,
+        '\'' | '\u{2018}' | '\u{2019}' | '\u{02BC}' | '\u{00B4}' | '`'
+            | '\u{00AD}'
+            | '\u{034F}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{FEFF}'
+            | '\u{0300}'..='\u{036F}'
+            | '\u{1AB0}'..='\u{1AFF}'
+            | '\u{1DC0}'..='\u{1DFF}'
+            | '\u{20D0}'..='\u{20FF}'
+            | '\u{FE20}'..='\u{FE2F}'
+    )
+}
+
+/// The letters a Latin ligature (`ﬀ ﬁ ﬂ ﬃ ﬄ ﬅ ﬆ`) stands for, as NFKC reads it.
+fn ligature(c: char) -> Option<&'static str> {
+    Some(match c {
+        '\u{FB00}' => "ff",
+        '\u{FB01}' => "fi",
+        '\u{FB02}' => "fl",
+        '\u{FB03}' => "ffi",
+        '\u{FB04}' => "ffl",
+        '\u{FB05}' | '\u{FB06}' => "st",
+        _ => return None,
+    })
 }
 
 /// The ASCII letter or digit a compatibility form stands for, else `c`.
@@ -114,9 +179,19 @@ fn compatibility_ascii(c: char) -> char {
         // (U+1D6A4-5, read as themselves), Greek (left alone), and five styles of 0-9.
         0x1D400..=0x1D6A3 => letter(n - 0x1D400),
         0x1D7CE..=0x1D7FF => char::from_u32(0x30 + (n - 0x1D7CE) % 10).unwrap_or(c),
-        // Circled Latin letters.
+        // Circled Latin letters, and parenthesised ones.
         0x24B6..=0x24CF => char::from_u32(0x41 + n - 0x24B6).unwrap_or(c),
         0x24D0..=0x24E9 => char::from_u32(0x61 + n - 0x24D0).unwrap_or(c),
+        0x249C..=0x24B5 => char::from_u32(0x61 + n - 0x249C).unwrap_or(c),
+        // Superscript and subscript digits, `ⁱ` and `ⁿ`.
+        0x2070 => '0',
+        0x00B9 => '1',
+        0x00B2 => '2',
+        0x00B3 => '3',
+        0x2074..=0x2079 => char::from_u32(0x30 + n - 0x2070).unwrap_or(c),
+        0x2080..=0x2089 => char::from_u32(0x30 + n - 0x2080).unwrap_or(c),
+        0x2071 => 'i',
+        0x207F => 'n',
         _ => c,
     }
 }
@@ -195,9 +270,16 @@ mod tests {
             "by m1nice",
             "Mi-ni-ce",
             "\u{41c}inice",
+            "Offi\u{301}cial",
+            "Astra: Official",
+            "(Minice)",
+            "O\u{FB03}cial Astra Pack",
+            "M\u{2071}n\u{2071}ce",
+            "\u{24a8}\u{24a4}\u{24a9}\u{24a4}\u{249e}\u{24a0}",
         ] {
             assert!(integration_name_is_reserved(n), "{n:?}");
         }
+        // Words that only run together into one across a separator.
         for n in [
             "Astra in PEAK",
             "Astra for Source 2",
@@ -205,6 +287,13 @@ mod tests {
             "Minicraft",
             "Fiction",
             "Astra",
+            "Admin Ice Tools",
+            "Gemini Celestial",
+            "Dominic Edition",
+            "Mini Cell",
+            "Mini Center",
+            "Benjamin Iceberg",
+            "Gemini-Celestial",
         ] {
             assert!(!integration_name_is_reserved(n), "{n:?}");
         }
