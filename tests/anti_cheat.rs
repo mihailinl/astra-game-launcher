@@ -646,6 +646,119 @@ fn str_consts(src: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// `src` with its comments and the insides of its string and char literals blanked (a `\u{20}`
+/// escape is no number), lifetimes kept.
+fn code_only(src: &str) -> String {
+    let b: Vec<char> = src.chars().collect();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        let next = b.get(i + 1).copied();
+        if c == '/' && next == Some('/') {
+            while i < b.len() && b[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == '/' && next == Some('*') {
+            i += 2;
+            while i < b.len() && !(b[i] == '*' && b.get(i + 1) == Some(&'/')) {
+                i += 1;
+            }
+            i += 2;
+            out.push(' ');
+            continue;
+        }
+        if c == 'r' && (next == Some('"') || next == Some('#')) {
+            let mut j = i + 1;
+            let mut hashes = 0;
+            while b.get(j) == Some(&'#') {
+                hashes += 1;
+                j += 1;
+            }
+            if b.get(j) == Some(&'"') {
+                j += 1;
+                loop {
+                    if j >= b.len() {
+                        break;
+                    }
+                    if b[j] == '"' && (0..hashes).all(|h| b.get(j + 1 + h) == Some(&'#')) {
+                        j += 1 + hashes;
+                        break;
+                    }
+                    j += 1;
+                }
+                out.push_str("\"\"");
+                i = j;
+                continue;
+            }
+        }
+        if c == '"' {
+            let mut j = i + 1;
+            while j < b.len() && b[j] != '"' {
+                j += if b[j] == '\\' { 2 } else { 1 };
+            }
+            out.push_str("\"\"");
+            i = j + 1;
+            continue;
+        }
+        if c == '\'' {
+            // A char literal (`'x'`, `'\n'`, `'\u{20}'`), else a lifetime.
+            let end = if next == Some('\\') {
+                (i + 2..b.len().min(i + 14)).find(|&j| b[j] == '\'')
+            } else if b.get(i + 2) == Some(&'\'') {
+                Some(i + 2)
+            } else {
+                None
+            };
+            if let Some(end) = end {
+                out.push_str("' '");
+                i = end + 1;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// Every `[…]` and `(…)` with no bracket inside it, in `src`'s code ([`code_only`]), as the
+/// integer literals written in it: decimal, `_` allowed, with or without an integer suffix
+/// (`36`, `36u32`, `1_000`); a hex digit run, a float or a number inside a name is not one.
+fn number_lists(src: &str) -> Vec<Vec<u32>> {
+    const SUFFIXES: &[&str] = &[
+        "", "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
+    ];
+    let code = code_only(src);
+    let mut out = Vec::new();
+    let mut open: Option<usize> = None;
+    for (i, c) in code.char_indices() {
+        match c {
+            '[' | '(' => open = Some(i + 1),
+            ']' | ')' => {
+                if let Some(start) = open.take() {
+                    let nums = code[start..i]
+                        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '.'))
+                        .filter_map(|word| {
+                            let word = word.replace('_', "");
+                            let digits: String =
+                                word.chars().take_while(char::is_ascii_digit).collect();
+                            (!digits.is_empty() && SUFFIXES.contains(&&word[digits.len()..]))
+                                .then(|| digits.parse().ok())
+                                .flatten()
+                        })
+                        .collect();
+                    out.push(nums);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// `src` up to its first `#[cfg(test)]`: the code a build compiles.
 fn before_tests(src: &str) -> &str {
     src.split("#[cfg(test)]").next().unwrap_or(src)
@@ -654,7 +767,8 @@ fn before_tests(src: &str) -> &str {
 /// K16, the launcher's half: ONE anti-cheat table and ONE Steam category table.
 ///
 /// - No source outside `src/steam_appinfo.rs` spells a store category (a `category_` literal, a
-///   `*CATEGOR*` constant) or an online-game code.
+///   `*CATEGOR*` constant, a list of numbers holding two of the online categories' ids, under any
+///   name) or an online-game code.
 /// - Every code the signatures, the markers and the services can emit is in `ANTI_CHEAT_CODES`,
 ///   which holds each once.
 /// - Each code is spelled as a literal exactly once in `src/`: in its one table (a signature row
@@ -691,6 +805,17 @@ fn one_category_table_and_one_anti_cheat_table() {
             assert!(
                 !online.contains(&lit.as_str()),
                 "{path}: an online-game code {lit:?}"
+            );
+        }
+        for list in number_lists(before_tests(src)) {
+            let ids: Vec<u32> = ONLINE_CATEGORIES
+                .iter()
+                .map(|(id, _)| *id)
+                .filter(|id| list.contains(id))
+                .collect();
+            assert!(
+                ids.len() < 2,
+                "{path}: a list of Steam's online category ids {ids:?} outside src/steam_appinfo.rs: {list:?}"
             );
         }
         for line in before_tests(src).lines() {

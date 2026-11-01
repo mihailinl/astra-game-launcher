@@ -770,11 +770,141 @@ fn store_categories_are_every_listed_id_and_unknown_is_never_none_listed() {
     }
 }
 
+/// What this desk's real `appinfo.vdf` (v29, 683 apps, read 2026-11-01) holds for six apps:
+/// each one's every `category_<id>`, and what Steam's store pages say of the game — its online
+/// codes and whether VAC protects it — written out here, never derived from `ONLINE_CATEGORIES`
+/// or `VAC_CATEGORY`, so a wrong id in either table turns the tests below red.
+/// One app as this desk's real `appinfo.vdf` holds it, and what its store page says.
+struct Recorded {
+    appid: u32,
+    name: &'static str,
+    categories: &'static [u32],
+    online: &'static [&'static str],
+    vac: bool,
+}
+
+const RECORDED: &[Recorded] = &[
+    Recorded {
+        appid: 578080,
+        name: "PUBG: BATTLEGROUNDS",
+        categories: &[1, 15, 18, 36, 41, 42, 49, 62, 68, 69, 70],
+        online: &["online-pvp", "pvp"],
+        vac: false,
+    },
+    Recorded {
+        appid: 252490,
+        name: "Rust",
+        categories: &[
+            1, 8, 9, 15, 20, 22, 27, 29, 30, 35, 36, 38, 42, 45, 46, 49, 64, 65, 66, 67, 68, 69,
+            70, 78,
+        ],
+        online: &["online-pvp", "pvp", "mmo"],
+        vac: true,
+    },
+    Recorded {
+        appid: 221100,
+        name: "DayZ",
+        categories: &[1, 8, 9, 20, 22, 23, 29, 30, 36, 38, 45, 46, 49],
+        online: &["online-pvp", "pvp", "mmo"],
+        vac: true,
+    },
+    Recorded {
+        appid: 1172470,
+        name: "Apex Legends",
+        categories: &[1, 9, 22, 28, 29, 35, 36, 38, 45, 46, 49, 55, 57, 58, 72, 74],
+        online: &["online-pvp", "pvp"],
+        vac: false,
+    },
+    Recorded {
+        appid: 1407200,
+        name: "World of Tanks",
+        categories: &[1, 20, 22, 29, 35, 36, 45, 46, 49, 62, 66, 68, 69, 70, 74],
+        online: &["online-pvp", "pvp", "mmo"],
+        vac: false,
+    },
+    Recorded {
+        appid: 320,
+        name: "Half-Life 2: Deathmatch",
+        categories: &[1, 8, 16, 45, 46, 62, 68, 69, 70, 74],
+        online: &[],
+        vac: true,
+    },
+];
+
+/// [`RECORDED`] laid in a file of the version it was read from, as Steam writes the flags.
+fn recorded_file() -> Vec<u8> {
+    let apps: Vec<(u32, Vec<(&'static str, V)>)> = RECORDED
+        .iter()
+        .map(|r| {
+            let flags = r
+                .categories
+                .iter()
+                .map(|c| {
+                    let key: &'static str = Box::leak(format!("category_{c}").into_boxed_str());
+                    (key, Str("1"))
+                })
+                .collect();
+            (r.appid, app_with_categories(r.appid, flags))
+        })
+        .collect();
+    file(V29, &apps).0
+}
+
+/// K16 on real data, every run: the six apps' recorded categories read as their store pages say
+/// — the online codes, VAC — and planning on any of them refuses only for VAC, never for being
+/// an online game (that is the daemon's offer rule, and no table outside `src/steam_appinfo.rs`
+/// may make it a refusal).
+#[test]
+fn the_categories_of_real_apps_read_as_their_store_pages_say() {
+    let dir = Tmp::new("recorded-appinfo");
+    let path = dir.join("appinfo.vdf");
+    std::fs::write(&path, recorded_file()).unwrap();
+    let game = Tmp::new("recorded-game");
+    unity_game(game.path(), "Some Game");
+    let profiles = Tmp::new("recorded-profiles");
+    for Recorded {
+        appid,
+        name,
+        categories: cats,
+        online,
+        vac,
+    } in RECORDED
+    {
+        assert_eq!(
+            store_categories(&path, *appid).as_deref(),
+            Some(*cats),
+            "{name}"
+        );
+        assert_eq!(online_game(&path, *appid), Some(online.to_vec()), "{name}");
+        assert_eq!(valve_anti_cheat(&path, *appid), Some(*vac), "{name}");
+        let mut t = target(
+            game.path(),
+            "Some Game.exe",
+            Some(*appid),
+            Platform::Windows,
+        );
+        t.steam_appinfo = Some(path.clone());
+        match plan_install(&runner(), &t, &profiles.join("p")) {
+            Ok(plan) => {
+                assert!(!vac && plan.vac_checked, "{name}: {:?}", plan.warnings);
+            }
+            Err(e) => assert_eq!(
+                (*vac, e.code, e.param("kind")),
+                (true, codes::ANTI_CHEAT, Some(VALVE_ANTI_CHEAT)),
+                "{name}"
+            ),
+        }
+    }
+}
+
 /// The readers against a REAL `appinfo.vdf`, run only when `AGL_REAL_APPINFO` names one (Steam's
 /// own `appcache/appinfo.vdf`); `AGL_REAL_APPIDS` (comma-separated, default `320`, Half-Life 2:
-/// Deathmatch) names the apps. Each must be known, and VAC and `online_game` must be what its
-/// categories say. Run at L3-7 against this desk's file (the commit message has the answer):
-/// `AGL_REAL_APPINFO=~/.local/share/Steam/appcache/appinfo.vdf AGL_REAL_APPIDS=320,252490`.
+/// Deathmatch) names the apps. Each must be known, and what it reads must be what Steam's store
+/// says of the game: [`RECORDED`]'s answers for the apps it holds, and `AGL_REAL_EXPECT`'s for
+/// any (`<appid>=<code>,<code>;…`, an empty list for none: `252490=online-pvp,pvp,mmo;320=`).
+/// An app neither names is printed, never judged by the table under test. Run against this
+/// desk's file: `AGL_REAL_APPINFO=~/.local/share/Steam/appcache/appinfo.vdf
+/// AGL_REAL_APPIDS=578080,252490,221100,1172470,1407200,320` (what [`RECORDED`] holds).
 /// Category 20 (MMO) was confirmed through Steam's store API (`ONLINE_CATEGORIES`' doc), which no
 /// test calls.
 #[test]
@@ -800,6 +930,27 @@ fn a_real_appinfo_reads_as_its_categories_say() {
                 .expect("AGL_REAL_APPIDS: appids, comma-separated")
         })
         .collect();
+    let mut expect: std::collections::BTreeMap<u32, Vec<String>> = RECORDED
+        .iter()
+        .map(|r| (r.appid, r.online.iter().map(|c| (*c).to_owned()).collect()))
+        .collect();
+    for pair in std::env::var("AGL_REAL_EXPECT")
+        .unwrap_or_default()
+        .split(';')
+        .filter(|p| !p.trim().is_empty())
+    {
+        let (id, codes) = pair
+            .split_once('=')
+            .expect("AGL_REAL_EXPECT: <appid>=<code>,<code>;…");
+        let id: u32 = id.trim().parse().expect("AGL_REAL_EXPECT: an appid");
+        let codes = codes
+            .split(',')
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_owned)
+            .collect();
+        expect.insert(id, codes);
+    }
     let many = store_categories_of(&path, &ids);
     for id in &ids {
         let cats = store_categories(&path, *id)
@@ -808,8 +959,14 @@ fn a_real_appinfo_reads_as_its_categories_say() {
         let vac = valve_anti_cheat(&path, *id);
         eprintln!("appid {id}: categories {cats:?}, online {online:?}, vac {vac:?}");
         assert_eq!(many.get(id), Some(&cats), "{id}");
-        assert_eq!(vac, Some(cats.contains(&VAC_CATEGORY)), "{id}");
-        assert_eq!(online, Some(online_codes(&cats)), "{id}");
+        if let Some(want) = expect.get(id) {
+            let got: Option<Vec<String>> =
+                online.map(|o| o.iter().map(|c| (*c).to_owned()).collect());
+            assert_eq!(got.as_ref(), Some(want), "{id}: what Steam's store says");
+        }
+        if let Some(r) = RECORDED.iter().find(|r| r.appid == *id) {
+            assert_eq!(vac, Some(r.vac), "{id}: VAC, as Steam's store says");
+        }
     }
 }
 
