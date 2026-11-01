@@ -117,8 +117,9 @@ pub mod codes {
     /// The manifest's own `[integration.engine]` (`want`, its digest) is not the descriptor
     /// that named the game's engine (`got`: that one's digest, `none` when no descriptor did).
     pub const DESCRIPTOR_MISMATCH: &str = "descriptor-mismatch";
-    /// Not a refusal of the launcher's: the anti-cheat entry a descriptor's claim carries when
-    /// the walk stopped at its cap or a kernel driver (`*.sys`) ships beside the game.
+    /// The anti-cheat entry a descriptor's claim carries when the walk stopped at its cap or a
+    /// kernel driver (`*.sys`) ships beside the game; also an `anti-cheat` refusal's `kind` when
+    /// planning a descriptor's code on such a claim.
     pub const ANTI_CHEAT_UNKNOWN: &str = "anti-cheat-unknown";
     /// The anti-cheat entry (and an `anti-cheat` refusal's `kind`) for a game a marker of the
     /// signed catalogue's `anticheat[]` names ([`crate::EngineSet::with_anti_cheat_markers`]): a

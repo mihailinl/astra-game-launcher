@@ -25,9 +25,10 @@ use std::fs;
 use std::path::Path;
 
 use astra_game_launcher::{
-    ANTI_CHEAT_CODES, ANTI_CHEAT_SIGNATURES, AntiCheatMarker, AntiCheatMarkerKind, Descriptor,
+    ANTI_CHEAT_CODES, ANTI_CHEAT_SIGNATURES, AntiCheatMarker, AntiCheatMarkerKind, Ctx, Descriptor,
     Detection, EngineSet, Moderation, ONLINE_CATEGORIES, Origin, Platform, Provenance,
-    SignatureName, VALVE_ANTI_CHEAT, codes, detect_with, detect_with_engines, plan_install_in,
+    SignatureName, VALVE_ANTI_CHEAT, codes, detect_with, detect_with_engines, install, install_in,
+    installed, plan_install_in, uninstall,
 };
 use common::scrape::{literals, rust_files};
 use common::*;
@@ -252,6 +253,39 @@ fn markers_only_add_and_none_changes_nothing() {
     ]);
     assert_eq!(more.anti_cheat_markers().len(), 3);
     assert_eq!(detect(t.path(), &more).anti_cheat, d.anti_cheat);
+}
+
+/// A marker the catalogue adds between the consent sheet and the install still refuses it:
+/// `install_in` plans again with the markers the daemon's set carries then. `install` (no
+/// markers) and a set whose markers the game does not hold install as planned.
+#[test]
+fn install_plans_again_with_the_markers_the_catalogue_has_now() {
+    use AntiCheatMarkerKind::*;
+    let t = Tmp::new("ac-install");
+    unity_game(t.path(), "Game");
+    lay(&t.join("Game_Data"), "Guard", true);
+    let profiles = Tmp::new("ac-install-profiles");
+    let game = target(t.path(), "Game.exe", None, Platform::Windows);
+    let plan_with = |profile: &Path, set: &EngineSet| {
+        plan_install_in(&runner(), &game, profile, set, Provenance::FirstParty, None).unwrap()
+    };
+    // Planned while the catalogue listed nothing; installed once it lists the folder.
+    let now = markers(&[(FolderMarker, "Guard")]);
+    let p = profiles.join("p");
+    let plan = plan_with(&p, &EngineSet::empty());
+    let e = install_in(&runner(), &plan, &game, ACCEPT, &now, &Ctx::silent()).unwrap_err();
+    assert_eq!(
+        (e.code, e.param("kind")),
+        (codes::ANTI_CHEAT, Some(codes::LISTED_ANTI_CHEAT))
+    );
+    assert_eq!(installed(&p).unwrap(), None, "nothing installed");
+    assert!(!t.join("winhttp.dll").exists());
+    // A marker the game does not hold, and no markers at all, change nothing.
+    let elsewhere = markers(&[(FolderMarker, "NotHere")]);
+    install_in(&runner(), &plan, &game, ACCEPT, &elsewhere, &Ctx::silent()).unwrap();
+    uninstall(&p, &game).unwrap();
+    let plan = plan_with(&p, &EngineSet::empty());
+    install(&runner(), &plan, &game, ACCEPT, &Ctx::silent()).unwrap();
 }
 
 /// A game Pass A recognised (closed to descriptors) still carries a listed marker; so does one

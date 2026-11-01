@@ -216,6 +216,9 @@ struct Counts {
     /// its lower standings.
     planning_pinned: AtomicUsize,
     planning_pinned_lower: AtomicUsize,
+    /// Of those, the plans refused `anti-cheat{kind=anti-cheat-unknown}`: Pass B's claim on a
+    /// walk cut at its cap or a folder shipping a `*.sys`.
+    planning_unknown_anti_cheat: AtomicUsize,
     /// Programs of folders Pass A closed, planned as a descriptor's code and refused by the
     /// engine check with a built-in `got`.
     planning_closed: AtomicUsize,
@@ -1126,15 +1129,34 @@ fn planning_canary(
                     "planning canary: planning pins the descriptor Pass B named the game with ({})",
                     at(exe)
                 );
+                // Every anti-cheat signal the detection carries refuses: none here.
+                assert!(
+                    named.anti_cheat.is_empty(),
+                    "planning canary: the detection says anti-cheat {:?}, yet planning that claim passes ({})",
+                    named.anti_cheat,
+                    at(exe)
+                );
                 bump(pinned);
             }
-            Err(e) => assert_eq!(
-                e.code,
-                codes::ANTI_CHEAT,
-                "planning canary: Pass B named the game {} with this program, so planning it as that is no {e:?} ({})",
-                named.engine,
-                at(exe)
-            ),
+            Err(e) => {
+                assert_eq!(
+                    e.code,
+                    codes::ANTI_CHEAT,
+                    "planning canary: Pass B named the game {} with this program, so planning it as that is no {e:?} ({})",
+                    named.engine,
+                    at(exe)
+                );
+                let kind = e.param("kind").unwrap_or_default();
+                assert!(
+                    named.anti_cheat.iter().any(|c| c == kind),
+                    "planning canary: planning refuses anti-cheat {kind}, which the detection {:?} does not carry ({})",
+                    named.anti_cheat,
+                    at(exe)
+                );
+                if kind == codes::ANTI_CHEAT_UNKNOWN {
+                    bump(&counts.planning_unknown_anti_cheat);
+                }
+            }
         }
     }
 
@@ -2303,6 +2325,11 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
             "Pass B's program pinned (lower standings)",
             get(&c.planning_pinned_lower),
             1_400,
+        ),
+        (
+            "Pass B's claim refused anti-cheat-unknown",
+            get(&c.planning_unknown_anti_cheat),
+            150,
         ),
         (
             "closed folders: programs refused",

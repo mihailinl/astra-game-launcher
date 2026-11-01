@@ -451,7 +451,8 @@ const ANTI_CHEAT_CODE_LIST: [&str; SIGNATURES + 4] = {
 /// then `listed-anti-cheat` (a marker of the signed catalogue's `anticheat[]`, given to
 /// [`EngineSet::with_anti_cheat_markers`]); `kernel-anti-cheat` (a kernel driver installed from
 /// the game's folder: [`crate::anti_cheat_services`], Windows); `anti-cheat-unknown` (a Pass B
-/// answer the walk cannot vouch for, never a refusal); and `valve-anti-cheat` (Steam's VAC flag,
+/// answer the walk cannot vouch for; planning refuses a descriptor's code on such a claim); and
+/// `valve-anti-cheat` (Steam's VAC flag,
 /// a plan's refusal only, never in a [`Detection`]). An `anti-cheat` refusal may also carry the
 /// manifest's own `[target] anti_cheat`, and a Pass B answer the codes its descriptor's own
 /// markers declare: those are the data's words, not the launcher's.

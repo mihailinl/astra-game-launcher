@@ -58,7 +58,8 @@ pub use fetch::{Fetch, MAX_DOWNLOAD_BYTES, fetch_verified};
 pub use former::FormerKind;
 pub use game::{GameTarget, Platform, proton_prefix_for, steam_appid_of_dir, steam_appids_of_dir};
 pub use install::{
-    KEPT_FOLDER_GAINED_FILES, UninstallReport, install, installed, restore_game_files, uninstall,
+    KEPT_FOLDER_GAINED_FILES, UninstallReport, install, install_in, installed, restore_game_files,
+    uninstall,
 };
 pub use launch::{
     MODS_CHOICE_UNREADABLE, MODS_PACK_PATH_REFUSED, ProcessPlan, STEAM_LAUNCH_OPTIONS_DOORSTOP,

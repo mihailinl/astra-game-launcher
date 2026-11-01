@@ -98,12 +98,30 @@ fn backup_rel(rel: &str) -> String {
 /// game and profile right now — planned again here with the plan's own provenance and with the
 /// engine descriptor it pinned alone ([`InstallPlan::engine_descriptor`], parsed again and its
 /// digest checked), so no plan is installed against another descriptor than the one it was
-/// made with. A changed game folder, profile or descriptor gives `plan-stale`.
+/// made with. A changed game folder, profile or descriptor gives `plan-stale`. [`install_in`]
+/// with no anti-cheat markers.
 pub fn install(
     pkg: &GiPackage,
     plan: &InstallPlan,
     game: &GameTarget,
     accept: Accept,
+    ctx: &Ctx,
+) -> Result<Ledger> {
+    install_in(pkg, plan, game, accept, &EngineSet::empty(), ctx)
+}
+
+/// [`install`], planning again also with the anti-cheat markers `current` carries now
+/// ([`EngineSet::anti_cheat_markers`]: the signed catalogue's `anticheat[]`, as the daemon hands
+/// them to [`crate::plan_install_in`]), so a marker the catalogue added between the consent sheet
+/// and the install still refuses it (`anti-cheat{kind=listed-anti-cheat}`). Only the markers are
+/// read from `current`: the engine is checked with the pinned descriptor alone, as [`install`]
+/// checks it.
+pub fn install_in(
+    pkg: &GiPackage,
+    plan: &InstallPlan,
+    game: &GameTarget,
+    accept: Accept,
+    current: &EngineSet,
     ctx: &Ctx,
 ) -> Result<Ledger> {
     ctx.check()?;
@@ -121,7 +139,8 @@ pub fn install(
     let engines = match &plan.engine_descriptor {
         Some(pinned) => pinned.engine_set()?,
         None => EngineSet::empty(),
-    };
+    }
+    .with_anti_cheat_markers(current.anti_cheat_markers().to_vec());
     let pick = plan
         .engine_descriptor
         .as_ref()

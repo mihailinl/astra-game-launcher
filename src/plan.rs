@@ -1123,7 +1123,11 @@ pub fn plan_install(
 ///   ([`crate::ANTI_CHEAT_SIGNATURES`]), `listed-anti-cheat` (a marker `engines` carries,
 ///   [`EngineSet::with_anti_cheat_markers`]) and `kernel-anti-cheat` (a kernel driver whose
 ///   image is in the game's folder, [`crate::anti_cheat_services`]); then VAC
-///   (`valve-anti-cheat`). Every code is in [`crate::ANTI_CHEAT_CODES`].
+///   (`valve-anti-cheat`). Every code is in [`crate::ANTI_CHEAT_CODES`]. And for a descriptor's
+///   code, once the descriptors' claim on the program is known (before a pick is asked for):
+///   what that claim carries, as [`crate::Detection::anti_cheat`] says it — a marker of the
+///   claiming descriptor's own (its code as written), then `anti-cheat-unknown` when the walk
+///   stopped at its cap or a kernel driver (`*.sys`) ships (plan B §3).
 ///
 /// The plan pins the descriptor that named the engine ([`InstallPlan::engine_descriptor`]) and
 /// records `provenance`; [`crate::install`] plans again with both.
@@ -1420,6 +1424,13 @@ fn engine_check(
             planning_hint(game, trusted).as_deref(),
         )
     };
+    // The anti-cheat a descriptor's claim carries (`Detection::anti_cheat` for that claim): its
+    // own markers, and `anti-cheat-unknown` where the walk cannot vouch for the folder. Refused
+    // before a pick is asked for: it is the same whichever code is picked.
+    let claims_want = named.code == want || named.candidates.iter().any(|(c, _)| *c == want);
+    if claims_want && let Some(kind) = named.anti_cheat.first() {
+        return Err(LauncherError::new(codes::ANTI_CHEAT).with("kind", kind.clone()));
+    }
     let digest = if named.code == want {
         named.descriptor_sha256
     } else if let Some((_, d)) = named.candidates.iter().find(|(c, _)| *c == want) {

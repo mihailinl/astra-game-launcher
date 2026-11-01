@@ -480,3 +480,125 @@ fn pass_b_never_names_a_program_no_plan_can_name() {
     let found = detect_with_engines(dir.path(), None, &set).unwrap();
     assert_eq!(found.exe.as_deref(), Some(Path::new("Odd/fine.exe")));
 }
+
+/// Plan B §3, "Anti-cheat the list misses" (the spec's hostile `anticheat-list-misses` shape,
+/// its `{project}` capture fixed): a descriptor that declares no anti-cheat of its own claims a
+/// folder that ships a kernel driver no list names. Detection says `anti-cheat-unknown`; planning
+/// a community foundation on that claim refuses it, as it refuses every other signal — and so
+/// does the install of a plan made before the driver arrived, which plans again.
+#[test]
+fn a_claim_the_walk_cannot_vouch_for_is_refused_as_anti_cheat() {
+    const SNEAKY: &str = "schema = \"astra.engine/1\"\n[engine]\ncodes = { sneaky-engine = \"Sneaky Engine\" }\n[[rule]]\ntier = \"weak\"\nprograms = { ext = [\"exe\"], first = 8 }\nrequire = [ { listed = \"sneaky-engine-core.dll\", kind = \"file\" } ]\ncode = \"sneaky-engine\"\nconfidence = \"low\"\nbinary = \"windows\"\nevidence = \"{program}\"\n";
+    let set = EngineSet::build([(
+        Origin {
+            moderation: Moderation::Unchecked,
+            publisher: "sneaky".to_owned(),
+            first_party: false,
+        },
+        Descriptor::from_toml(SNEAKY),
+    )]);
+    assert_eq!(set.len(), 1, "{:?}", set.skipped());
+    let dir = Tmp::new("ac-unknown");
+    write(&dir.join("Sneaky.exe"), b"MZ\x90\0 a game");
+    write(&dir.join("sneaky-engine-core.dll"), b"MZ core");
+    let g = game(dir.path(), "Sneaky.exe");
+    let pkg = foundation("sneaky-engine");
+    let profiles = Tmp::new("ac-unknown-profiles");
+    let profile = profiles.join("p");
+    let refused =
+        |e: astra_game_launcher::LauncherError| (e.code, e.param("kind").map(str::to_owned));
+    let want = (
+        codes::ANTI_CHEAT,
+        Some(codes::ANTI_CHEAT_UNKNOWN.to_owned()),
+    );
+    let plan = plan_install_in(&pkg, &g, &profile, &set, Provenance::Community, None).unwrap();
+    // The driver arrives between the consent sheet and the install.
+    write(&dir.join("drivers/newguard.sys"), b"MZ a kernel driver");
+    assert_eq!(
+        detect_with_engines(dir.path(), None, &set)
+            .unwrap()
+            .anti_cheat,
+        [codes::ANTI_CHEAT_UNKNOWN]
+    );
+    let again = plan_install_in(&pkg, &g, &profile, &set, Provenance::Community, None);
+    assert_eq!(refused(again.unwrap_err()), want);
+    assert_eq!(
+        refused(install(&pkg, &plan, &g, ACCEPT, &Ctx::silent()).unwrap_err()),
+        want,
+        "install plans again with the pin, and refuses the same"
+    );
+    assert!(!dir.join("runner").exists() && !profile.join("runner").exists());
+}
+
+/// A descriptor's own anti-cheat markers (its `anti_cheat` scoped additions) refuse a plan on
+/// its claim, with the marker's code; where two descriptors stand, refused before any pick is
+/// asked for — every standing descriptor's markers and the driver check count, whichever code
+/// the player would pick.
+#[test]
+fn a_claims_own_markers_refuse_the_plan_before_a_pick() {
+    let guarded = descriptor_text("alpha").replace(
+        "[[rule]]",
+        "anti_cheat = [ { listed = \"Guard\", kind = \"dir\", code = \"alpha-guard\" } ]\n[[rule]]",
+    );
+    let origin = |p: &str| Origin {
+        moderation: Moderation::Unchecked,
+        publisher: p.to_owned(),
+        first_party: false,
+    };
+    let set = EngineSet::build([(origin("a"), Descriptor::from_toml(&guarded))]);
+    assert_eq!(set.len(), 1, "{:?}", set.skipped());
+    let dir = Tmp::new("ac-markers");
+    shaped(dir.path(), "game", "g");
+    let g = game(dir.path(), "game/bin/win64/g.exe");
+    let profiles = Tmp::new("ac-markers-profiles");
+    let pkg = foundation("alpha");
+    plan_install_in(
+        &pkg,
+        &g,
+        &profiles.join("p"),
+        &set,
+        Provenance::Community,
+        None,
+    )
+    .unwrap();
+    write(&dir.join("game/Guard/guard.bin"), b"a guard");
+    let e = plan_install_in(
+        &pkg,
+        &g,
+        &profiles.join("p"),
+        &set,
+        Provenance::Community,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.param("kind")),
+        (codes::ANTI_CHEAT, Some("alpha-guard"))
+    );
+
+    // Ambiguous: refused before the pick, whichever is picked.
+    let both = EngineSet::build([
+        (origin("a"), Descriptor::from_toml(&guarded)),
+        (origin("b"), Descriptor::from_toml(&descriptor_text("beta"))),
+    ]);
+    assert_eq!(both.len(), 2, "{:?}", both.skipped());
+    for pick in [None, Some(code("alpha")), Some(code("beta"))] {
+        for want in ["alpha", "beta"] {
+            let e = plan_install_in(
+                &foundation(want),
+                &g,
+                &profiles.join("q"),
+                &both,
+                Provenance::Community,
+                pick.as_ref(),
+            )
+            .unwrap_err();
+            assert_eq!(
+                (e.code, e.param("kind")),
+                (codes::ANTI_CHEAT, Some("alpha-guard")),
+                "{want}, pick {pick:?}"
+            );
+        }
+    }
+}
+

@@ -359,6 +359,12 @@ pub(crate) struct NamedEngine {
     /// sorted, each with the digest of the descriptor that would name it were that code the one
     /// chosen (the player's pick). Empty otherwise.
     pub(crate) candidates: Vec<(EngineCode, String)>,
+    /// The anti-cheat a descriptor's claim on this program carries beyond Pass A's: the claiming
+    /// descriptors' own markers (every candidate's, when ambiguous), then `anti-cheat-unknown`
+    /// when the walk stopped at its cap or a kernel driver (`*.sys`) ships — what
+    /// [`Detection::anti_cheat`] adds for the same claim ([`Game::anti_cheat`]). Empty for a
+    /// built-in rule's answer and for none.
+    pub(crate) anti_cheat: Vec<String>,
 }
 
 impl NamedEngine {
@@ -367,6 +373,7 @@ impl NamedEngine {
             code,
             descriptor_sha256: None,
             candidates: Vec::new(),
+            anti_cheat: Vec::new(),
         }
     }
 
@@ -576,10 +583,17 @@ impl<'a> Game<'a> {
         match self.resolve(mine) {
             Ok(Resolution::One(c)) => NamedEngine {
                 descriptor_sha256: Some(digest(&c)),
+                anti_cheat: self.anti_cheat(&[], &[&set.entries[c.desc].descriptor.model]),
                 code: c.code,
                 candidates: Vec::new(),
             },
             Ok(Resolution::Ambiguous(mut cands)) => {
+                let descs: BTreeSet<usize> = cands.iter().map(|c| c.desc).collect();
+                let models: Vec<&Model> = descs
+                    .iter()
+                    .map(|d| &set.entries[*d].descriptor.model)
+                    .collect();
+                let anti_cheat = self.anti_cheat(&[], &models);
                 let codes: BTreeSet<EngineCode> = cands.iter().map(|c| c.code.clone()).collect();
                 let mut candidates = Vec::new();
                 for code in codes {
@@ -597,6 +611,7 @@ impl<'a> Game<'a> {
                     code: EngineCode::unknown(),
                     descriptor_sha256: None,
                     candidates,
+                    anti_cheat,
                 }
             }
             Err(_) | Ok(Resolution::Nothing) => NamedEngine::unknown(),
