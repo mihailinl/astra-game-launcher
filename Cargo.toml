@@ -42,7 +42,13 @@ serde_json = "1"
 toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }
 sha2 = "0.10"
 hex = "0.4"
-zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# 9.2, not 8: zip < 9.0.5 is the "zip cloaking" advisory. zip 9 does not refuse a cloaked archive
+# on its own (`by_index` reads the central directory): `zip_consistency` does, before anything is
+# read out of it, with flate2 (where a deflate stream ends) and crc32fast (a stored entry's scan).
+# The same versions as zip's own, so they add nothing to the tree.
+zip = { version = "9.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+crc32fast = "1.5"
 ureq = { version = "3", optional = true, default-features = false, features = ["rustls"] }
 # gi-probe only (the feature above): launcher 0.3.1, the same rev as the dev-dependency below.
 launcher_031 = { package = "astra-game-launcher", git = "https://github.com/mihailinl/astra-game-launcher", rev = "9aa7874b60f6b10bd67411b7aad40fcc968b78bc", default-features = false, optional = true }

@@ -18,6 +18,10 @@ pub mod codes {
     pub const DIGEST_MISMATCH: &str = "digest-mismatch";
     pub const ZIP_UNSAFE_ENTRY: &str = "zip-unsafe-entry";
     pub const ZIP_TOO_MANY_ENTRIES: &str = "zip-too-many-entries";
+    /// Two zip readers would read two archives in the file: a local header, a descriptor or a
+    /// deflate stream that the central directory contradicts ("zip cloaking"), a renaming field, a
+    /// name readers decode differently. `reason` says which (`src/zip_consistency.rs`).
+    pub const ZIP_INCONSISTENT: &str = "zip-inconsistent";
     pub const MANIFEST_MISSING: &str = "manifest-missing";
     pub const MANIFEST_INVALID: &str = "manifest-invalid";
     pub const SCHEMA_TOO_NEW: &str = "schema-too-new";
@@ -178,6 +182,7 @@ pub mod codes {
         DIGEST_MISMATCH,
         ZIP_UNSAFE_ENTRY,
         ZIP_TOO_MANY_ENTRIES,
+        ZIP_INCONSISTENT,
         MANIFEST_MISSING,
         MANIFEST_INVALID,
         SCHEMA_TOO_NEW,
@@ -285,6 +290,9 @@ impl LauncherError {
             codes::DIGEST_MISMATCH => "the file's SHA-256 is not the expected one",
             codes::ZIP_UNSAFE_ENTRY => "the zip holds an unsafe entry",
             codes::ZIP_TOO_MANY_ENTRIES => "the zip holds too many entries",
+            codes::ZIP_INCONSISTENT => {
+                "the zip reads as two different archives, depending on the reader"
+            }
             codes::MANIFEST_MISSING => "the zip has no astra-gi.toml at its root",
             codes::MANIFEST_INVALID => "astra-gi.toml is not valid",
             codes::SCHEMA_TOO_NEW => "this integration needs a newer launcher",

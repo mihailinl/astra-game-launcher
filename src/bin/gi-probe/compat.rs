@@ -6,7 +6,10 @@
 //! run on the real zip against launcher 0.3.1 (what 0.2.7 ships), plus Astra 0.2.7's own rules for
 //! a source's releases (merged plan R30, canary K4):
 //!
-//! 1. launcher 0.3.1 opens the zip (`GiPackage::open`, which parses the manifest);
+//! 1. launcher 0.3.1 opens the zip (`GiPackage::open`, which parses the manifest) — once this
+//!    launcher has found it one archive to every reader: a zip it refuses as two
+//!    (`zip-inconsistent`, as `check` does) fails here, and 0.3.1, whose zip 8 cannot tell, never
+//!    reads it;
 //! 2. 0.2.7's `check_manifest` passes for the source's row (its id and repository, a runner's
 //!    `[target] engine` and no appid or a game's own appid, the tag's version), and so does
 //!    `pick`'s rule for the tag and the asset: the row's tag prefix, an optional `v`, semver,
@@ -136,7 +139,23 @@ pub fn run(a: &CompatArgs) -> Result<(Value, bool), Fatal> {
     let scratch = Scratch::new("compat")?;
     let mut p = Probe::new(&STEPS);
 
-    // 1. Open and parse.
+    // 1. Open and parse. First, the one question 0.3.1's zip 8 cannot ask: a zip that reads as
+    // two archives (`check`'s step 1 refusal, `src/zip_consistency.rs`) is judged no further, so
+    // compat never passes a release under one reading that a reader of local headers sees as
+    // another.
+    if let Err(e) = astra_game_launcher::GiPackage::open(&zip, &zip_sha256)
+        && e.code == astra_game_launcher::codes::ZIP_INCONSISTENT
+    {
+        p.finding(1, Finding::from_refusal(e.code, &e.params, &e.to_string()));
+        p.close(1, 0, 0, Value::Null);
+        for step in 2..=6 {
+            p.skip(
+                step,
+                "the zip reads as two archives (step 1): nothing in it is read",
+            );
+        }
+        return Ok(finish(a, &source, &asset, &zip_sha256, None, p));
+    }
     let pkg = match GiPackage::open(&zip, a.sha256.as_deref().unwrap_or(&zip_sha256)) {
         Ok(pkg) => {
             p.close(1, 0, 0, Value::Null);
@@ -417,7 +436,8 @@ pub fn without_integration_tables(zip: &[u8]) -> Result<(Vec<u8>, Vec<String>), 
             .by_index_raw(i)
             .map_err(|e| e.to_string())?
             .name()
-            .to_owned();
+            .map_err(|e| e.to_string())?
+            .into_owned();
         if name.replace('\\', "/") == MANIFEST_FILE {
             let mut text = String::new();
             ar.by_index(i)
@@ -510,7 +530,7 @@ pub fn swept_files(zip: &[u8]) -> Result<BTreeMap<String, String>, String> {
     let mut manifest = None;
     for i in 0..ar.len() {
         let f = ar.by_index_raw(i).map_err(|e| e.to_string())?;
-        let name = f.name().replace('\\', "/");
+        let name = f.name().map_err(|e| e.to_string())?.replace('\\', "/");
         if f.is_dir() || name.ends_with('/') {
             continue;
         }

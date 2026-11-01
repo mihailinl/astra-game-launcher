@@ -408,7 +408,9 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
   and 0.2.7's own rules (`src/bin/gi-probe/v027.rs`, copied from tag v0.2.7 and held to it token
   for token by `tests/gi_probe.rs`). Every first-party release script runs it on the real zip.
   Its six steps:
-  1. 0.3.1 opens the zip and parses its manifest;
+  1. 0.3.1 opens the zip and parses its manifest — once this launcher has found the zip one
+     archive to every reader: a zip it refuses as two (`zip-inconsistent`, below) fails here,
+     and 0.3.1, whose zip 8 cannot tell, never reads it;
   2. 0.2.7's `check_manifest` passes for the source (`--source`, an `[integration] id` from
      `src/bin/gi-probe/compat-0.2.7.json`, which canary K4 holds equal to 0.2.7's `pins.rs`):
      its id and repository, a runner's `[target] engine` with no appid or a game's own appid,
@@ -431,8 +433,10 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
   `tests/fixtures/first-party/` (each source's manifest as 0.2.7 would install it today) fresh.
 - **`check`** is what a catalogue's ingest asks of a release before it is listed (AstraPlugins
   `spec/games/manifest.md` §4), with this launcher's own parser. Its seven steps:
-  1. the launcher opens the zip (its hygiene, the manifest, every file it names, no reserved
-     profile name placed — `src/reserved.rs`, the one list, canary K13);
+  1. the launcher opens the zip (one archive to every reader, its hygiene, the manifest, every
+     file it names, no reserved profile name placed — `src/reserved.rs`, the one list, canary
+     K13). A zip refused as two archives (`zip-inconsistent`) is read no further: no later step
+     reads anything out of it, and each says so;
   2. `Manifest::lint`: a community release's id and name are not Astra's own (`reserved-id`,
      `reserved-name`) and what it may place and launch (`loader-undeclared`, K18;
      `community-limit`) — `--provenance first-party` skips these —, `${bridge_token}` only with
@@ -506,6 +510,14 @@ report then carries `error: {code, detail}` instead, and nothing was concluded.
 
 - **Verified input.** A zip is used only when its SHA-256 matches the one the caller expects.
   A game file the manifest pins by digest must match it too.
+- **One archive to every reader.** Before anything is read out of a zip, it must read the same
+  through its central directory (zip 9's way) and through its local headers (a streaming
+  reader's, a catalogue ingest's): every local header agrees with its record, nothing overlaps
+  or hides between entries, no Unicode Path field renames an entry, every non-ASCII name is
+  flagged UTF-8, every deflate stream ends exactly where its record does with the declared size
+  and CRC, and a data descriptor sits, signed, exactly at its entry's end. Otherwise
+  `zip-inconsistent` ("zip cloaking"; `src/zip_consistency.rs`, AstraPlugins'
+  `testdata/zip-cloaking/` vectors in `tests/fixtures/zip-cloaking/`).
 - **The zip.** At most 256 MiB compressed, 1 GiB uncompressed, 20 000 entries. Symbolic links,
   absolute paths, `..`, drive letters, encrypted entries and duplicate names are refused
   outright, whether the manifest names them or not. Only the files the manifest names are

@@ -1329,6 +1329,47 @@ fn compat_fails_each_break_at_its_step() {
     }
 }
 
+/// Step 1 asks this launcher first: a zip it refuses as two archives (`zip-inconsistent`, as
+/// `check` does) fails compat there, and launcher 0.3.1, whose zip 8 cannot tell, never reads it.
+/// AstraPlugins' three vectors (`tests/zip_consistency.rs` holds them to its digests).
+#[test]
+fn compat_refuses_a_zip_that_reads_as_two_archives_before_031_reads_it() {
+    let s = src("astra.unity");
+    for (name, reason) in [
+        ("slack.zip", "deflate-end"),
+        ("upath.zip", "unicode-path"),
+        ("stored-dd.zip", "descriptor-missing"),
+    ] {
+        let z = path("tests/fixtures/zip-cloaking").join(name);
+        let (exit, r) = probe(&[
+            "compat",
+            "--zip",
+            z.to_str().unwrap(),
+            "--source",
+            s.id,
+            "--tag",
+            "v1.2.3",
+            "--asset",
+            s.asset,
+        ]);
+        assert_eq!(exit, 1, "{name}: {r:#}");
+        assert_eq!(r["verdict"], "fail", "{name}");
+        let findings = r["findings"].as_array().unwrap();
+        assert_eq!(findings.len(), 1, "{name}: {r:#}");
+        assert_eq!(findings[0]["step"], 1, "{name}");
+        assert_eq!(findings[0]["code"], "zip-inconsistent", "{name}: {r:#}");
+        assert_eq!(findings[0]["params"]["reason"], reason, "{name}");
+        for step in 2..=6 {
+            let st = &r["steps"][step - 1];
+            assert_eq!(st["status"], "skipped", "{name} step {step}: {r:#}");
+            assert_eq!(
+                st["why"], "the zip reads as two archives (step 1): nothing in it is read",
+                "{name} step {step}"
+            );
+        }
+    }
+}
+
 /// Step 5: a file gone from under a `**` fails unless the notes name it; one added likewise.
 /// Step 6: a changed license is the notice that 0.2.7 will ask again, never a finding.
 #[test]
@@ -2440,6 +2481,58 @@ fn check_names_every_fault_of_a_release_that_does_not_open() {
             (2, "descriptor-invalid".to_owned()),
         ]
     );
+}
+
+/// The one exception: a zip that reads as two archives (`src/zip_consistency.rs`) is refused at
+/// step 1 with the launcher's own refusal, and nothing more is read out of it — a lint of its
+/// manifest would judge one of the two. AstraPlugins' three vectors (`tests/zip_consistency.rs`
+/// holds them to its digests).
+#[test]
+fn check_refuses_a_zip_that_reads_as_two_archives_and_reads_no_further() {
+    for (name, entry, reason) in [
+        ("slack.zip", "a.txt", "deflate-end"),
+        ("upath.zip", "notes.txt", "unicode-path"),
+        ("stored-dd.zip", "notes.txt", "descriptor-missing"),
+    ] {
+        let file = path("tests/fixtures/zip-cloaking").join(name);
+        for provenance in ["community", "first-party"] {
+            let (exit, r) = check(file.to_str().unwrap(), &["--provenance", provenance]);
+            assert_eq!(exit, 1, "{name}: {r:#}");
+            let found: Vec<(u64, String, String, String)> = r["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| {
+                    let p = |k: &str| f["params"][k].as_str().unwrap_or_default().to_owned();
+                    (
+                        f["step"].as_u64().unwrap(),
+                        f["code"].as_str().unwrap().to_owned(),
+                        p("entry"),
+                        p("reason"),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                found,
+                [(
+                    1,
+                    "zip-inconsistent".to_owned(),
+                    entry.to_owned(),
+                    reason.to_owned()
+                )],
+                "{name}: {r:#}"
+            );
+            for step in [2, 3, 4, 7] {
+                let s = &r["steps"][step - 1];
+                assert_eq!(s["status"], "skipped", "{name} step {step}: {r:#}");
+                assert_eq!(
+                    s["why"], "the zip reads as two archives (step 1): nothing in it is read",
+                    "{name} step {step}"
+                );
+            }
+            assert_eq!(r["integration"], Value::Null, "{name}");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

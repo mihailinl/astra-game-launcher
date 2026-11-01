@@ -182,6 +182,10 @@ impl GiPackage {
                 .with("entries", ar.len().to_string())
                 .with("limit", limits.max_entries.to_string()));
         }
+        // Before anything is read out of it, or decided from it: the zip is one archive to every
+        // reader (`zip_consistency`), so what is checked below is what a reader of local headers,
+        // the catalogue's ingest among them, would read too. The entry cap above bounds its work.
+        crate::zip_consistency::check(&mut ar, zip, limits.max_uncompressed_bytes)?;
 
         // Every entry is checked, extracted or not.
         let mut files: Vec<(usize, String, u64)> = Vec::new();
@@ -191,7 +195,10 @@ impl GiPackage {
             let f = ar
                 .by_index_raw(i)
                 .map_err(|e| unsafe_entry("", "corrupt").with("detail", e.to_string()))?;
-            let raw_name = f.name().to_owned();
+            let raw_name = f
+                .name()
+                .map_err(|e| unsafe_entry("", "name").with("detail", e.to_string()))?
+                .into_owned();
             if f.name_raw().contains(&0) {
                 return Err(unsafe_entry(&raw_name, "name"));
             }

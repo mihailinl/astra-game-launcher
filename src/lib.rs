@@ -41,6 +41,7 @@ pub mod reserved;
 mod running;
 pub mod steam_appinfo;
 mod steam_userconfig;
+mod zip_consistency;
 
 pub use ctx::{Ctx, Progress};
 pub use detect::{

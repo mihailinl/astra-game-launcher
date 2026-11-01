@@ -7,10 +7,12 @@
 //! `spec/games/manifest.md` §4, at [`crate::descriptor::SPEC_SHA`]), with this launcher's own
 //! parser — there is one, and the launcher installs with it:
 //!
-//! 1. the launcher opens the zip ([`GiPackage::open`]: its hygiene under the default [`Limits`],
-//!    the manifest, every file it names in the zip, no reserved profile name placed, a `**`
-//!    expansion included). Given a bare `astra-gi.toml` instead of a zip, only
-//!    [`Manifest::parse`]; the zip's checks are said not to be made;
+//! 1. the launcher opens the zip ([`GiPackage::open`]: one archive to every reader, its hygiene
+//!    under the default [`Limits`], the manifest, every file it names in the zip, no reserved
+//!    profile name placed, a `**` expansion included). Given a bare `astra-gi.toml` instead of a
+//!    zip, only [`Manifest::parse`]; the zip's checks are said not to be made. A zip refused as
+//!    two archives (`zip-inconsistent`) is read no further: every later step that would read it
+//!    is skipped, and says so;
 //! 2. [`Manifest::lint`]: a community integration's identity (`reserved-id`, `reserved-name`),
 //!    `capability-undeclared`, Astra Link v1's counts, names and lengths (`link-invalid`), the
 //!    foundation claim's keys, `[integration.engine]` and Pass B's admission of it — with
@@ -135,8 +137,9 @@ fn entries(zip: &[u8]) -> BTreeMap<String, u64> {
     for i in 0..ar.len() {
         if let Ok(f) = ar.by_index_raw(i)
             && !f.is_dir()
+            && let Ok(name) = f.name()
         {
-            out.insert(f.name().replace('\\', "/"), f.size());
+            out.insert(name.replace('\\', "/"), f.size());
         }
     }
     out
@@ -185,6 +188,13 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
                 let text = pkg.manifest_text().to_owned();
                 (Some(pkg), Some(text))
             }
+            // A zip two readers read as two archives: nothing in it is read, not even for the
+            // lint, which would judge one of the two.
+            Err(e) if e.code == codes::ZIP_INCONSISTENT => {
+                p.finding(1, refusal(&e));
+                open_error = Some(e);
+                (None, None)
+            }
             Err(e) => {
                 p.finding(1, refusal(&e));
                 open_error = Some(e);
@@ -214,10 +224,16 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
         .as_ref()
         .map(|k| k.manifest().clone())
         .or_else(|| parsed.as_ref().and_then(|(m, _)| m.as_ref().ok().cloned()));
+    // Every later step that would read the zip says why it does not.
+    const TWO_ARCHIVES: &str = "the zip reads as two archives (step 1): nothing in it is read";
+    let two_archives = open_error
+        .as_ref()
+        .is_some_and(|e| e.code == codes::ZIP_INCONSISTENT);
+    let unread = |why: &'static str| if two_archives { TWO_ARCHIVES } else { why };
 
     // 2. Lint.
     match &parsed {
-        None => p.skip(2, "the zip holds no readable astra-gi.toml"),
+        None => p.skip(2, unread("the zip holds no readable astra-gi.toml")),
         Some((_, lint)) => {
             let (f0, n0) = (p.findings.len(), p.notices.len());
             for e in lint {
@@ -243,7 +259,7 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
         });
     }
     match (&manifest, is_zip) {
-        (None, _) => p.skip(3, "the manifest does not parse"),
+        (None, _) => p.skip(3, unread("the manifest does not parse")),
         (Some(_), false) => p.skip(3, "a manifest, not a zip"),
         (Some(_), true) if link_files.is_empty() => p.skip(3, "no [integration.link] files"),
         (Some(_), true) => {
@@ -284,7 +300,7 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
     let mut descriptor = Value::Null;
     let mut folders = Vec::new();
     match manifest.as_ref().and_then(Manifest::engine_descriptor) {
-        None => p.skip(4, "no [integration.engine] the launcher reads"),
+        None => p.skip(4, unread("no [integration.engine] the launcher reads")),
         Some(Err(_)) => p.skip(4, "[integration.engine] is not a descriptor (step 2)"),
         Some(Ok(d)) => {
             descriptor = summary(d);
@@ -310,7 +326,7 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
     );
     match (&a.foundation, &pkg) {
         (None, _) => p.skip(5, "no --foundation"),
-        (Some(_), None) => p.skip(5, "the release does not open (step 1)"),
+        (Some(_), None) => p.skip(5, unread("the release does not open (step 1)")),
         (Some(path), Some(pkg)) => {
             let (f0, n0) = (p.findings.len(), p.notices.len());
             match open_other(path)? {
@@ -371,7 +387,7 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
     let mut code_changed = Value::Null;
     match (&a.previous, &pkg) {
         (None, _) => p.skip(6, "no --previous"),
-        (Some(_), None) => p.skip(6, "the release does not open (step 1)"),
+        (Some(_), None) => p.skip(6, unread("the release does not open (step 1)")),
         (Some(path), Some(pkg)) => {
             let (f0, n0) = (p.findings.len(), p.notices.len());
             match open_other(path)? {
@@ -410,7 +426,7 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
     let allowlist = a.loaders.as_deref().map(read_loaders).transpose()?;
     let mut loaders = Value::Null;
     match &manifest {
-        None => p.skip(7, "the manifest does not parse"),
+        None => p.skip(7, unread("the manifest does not parse")),
         Some(m) => {
             let (f0, n0) = (p.findings.len(), p.notices.len());
             // Each game file and the digest it is known by: the zip's, else the manifest's pin.
