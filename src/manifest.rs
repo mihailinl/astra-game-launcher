@@ -1463,6 +1463,37 @@ evidence = "{core}"
                 "too-many".into()
             )]
         );
+        // Each list at its own limit (Link v1: 16 tools, 16 triggers, 32 events), and one past it.
+        let trigger = |i: usize| {
+            format!(
+                "[[integration.link.triggers]]\nname = \"g{i}\"\nlabel = \"G\"\ndata = \"astra/g.json\"\n"
+            )
+        };
+        let event = |i: usize| {
+            format!("[[integration.link.events]]\nname = \"e{i}\"\ndata = \"astra/e.json\"\n")
+        };
+        for (list, item, most) in [
+            (
+                "tools",
+                &(|i: usize| tool(&format!("t{i}"), "x")) as &dyn Fn(usize) -> String,
+                16,
+            ),
+            ("triggers", &trigger, 16),
+            ("events", &event, 32),
+        ] {
+            let at: String = (0..most).map(item).collect();
+            assert!(lint(&at).is_empty(), "{list} at {most}: {:?}", lint(&at));
+            let past: String = (0..=most).map(item).collect();
+            assert_eq!(
+                lint(&past),
+                [(
+                    codes::LINK_INVALID,
+                    format!("integration.link.{list}"),
+                    "too-many".into()
+                )],
+                "{list} past {most}"
+            );
+        }
         let field = |f: &str| format!("integration.link.tools[0].{f}");
         assert_eq!(
             lint(&tool("Drop", "x")),

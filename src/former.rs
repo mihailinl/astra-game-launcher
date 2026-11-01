@@ -665,6 +665,67 @@ mod tests {
         assert_eq!(w.names(), ["Game.exe"]);
     }
 
+    /// A community release over the profile of an Astra integration whose ledger holds the
+    /// player's working UE4SS in its backup (step 10a's `replace`, which only Astra's own keep):
+    /// it never takes that `replace` over. The loader stays the player's, so it is refused as
+    /// one (`foreign-loader`), and nothing in the game folder or the backup changes.
+    #[test]
+    fn a_community_release_never_keeps_a_replace_of_the_players_loader() {
+        use crate::engines::EngineSet;
+        use crate::plan::{Provenance, plan_install_in};
+
+        no_stand_ins();
+        let w = World::new("community-over-10a");
+        w.put("ue4ss/UE4SS.dll", b"MZ UE4SS");
+        replaced_by_an_older_launcher(&w, UE4SS_PROXY);
+        stand_ins();
+        // Astra's own update keeps it, and says so.
+        let ours = plan_install(&unreal(), &w.target(), &w.profile()).unwrap();
+        assert_eq!(ours.game_files[0].action, GameAction::Replace);
+        assert!(
+            ours.warnings
+                .contains(&codes::FOREIGN_LOADER_IN_BACKUP.to_owned())
+        );
+
+        let mut manifest = String::from(
+            "schema = 1\n[integration]\nid = \"someone.example\"\nname = \"Someone's bridge\"\n\
+             version = \"1.0.0\"\n[integration.loader]\nproxies = [\"dwmapi.dll\"]\n\
+             [target]\nexe = \"*\"\nplatforms = [\"windows-x64\"]\nanti_cheat = \"none\"\n\
+             [[files]]\nfrom = \"p/x.txt\"\nto = \"${profile}/p/x.txt\"\n",
+        );
+        manifest.push_str(&format!(
+            "[[game_files]]\nfrom = \"dwmapi.dll\"\nto = \"${{game}}/dwmapi.dll\"\nsha256 = \"{}\"\n",
+            sha256_hex(LOADER)
+        ));
+        let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default();
+        for (name, bytes) in [
+            ("astra-gi.toml", manifest.as_bytes()),
+            ("p/x.txt", b"x".as_slice()),
+            ("dwmapi.dll", LOADER),
+        ] {
+            z.start_file(name, opts).unwrap();
+            z.write_all(bytes).unwrap();
+        }
+        let bytes = z.finish().unwrap().into_inner();
+        let community = GiPackage::open(&bytes, &sha256_hex(&bytes)).unwrap();
+        let before = snapshot(&w.0);
+        let e = plan_install_in(
+            &community,
+            &w.target(),
+            &w.profile(),
+            &EngineSet::empty(),
+            Provenance::Community,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.param("file")),
+            (codes::FOREIGN_LOADER, Some("dwmapi.dll"))
+        );
+        assert_eq!(snapshot(&w.0), before, "planning changes nothing");
+    }
+
     /// Our own UE4SS proxy, placed with UE4SS in the profile (the Unreal runner's shape): its
     /// folder gaining a library (a game update's) keeps it only while a UE4SS is beside it, which
     /// may run through it. With none, nothing does, and kept it fails every plain start of the

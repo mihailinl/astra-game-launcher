@@ -602,3 +602,47 @@ fn a_claims_own_markers_refuse_the_plan_before_a_pick() {
     }
 }
 
+/// One descriptor declaring two codes whose rules both match the program: Pass B cannot choose
+/// between them, and the pinned descriptor alone cannot either. The plan made with the player's
+/// pick of the manifest's code installs, since install plans again with the pin alone AND that
+/// code as the pick; with no pick it would be `engine-ambiguous` after the person consented.
+#[test]
+fn a_two_code_descriptors_plan_installs_with_the_pick_it_was_made_with() {
+    let alpha = descriptor_text("alpha");
+    let beta = descriptor_text("beta");
+    let both = alpha.replace(
+        "codes = { alpha = \"Engine alpha\" }",
+        "codes = { alpha = \"Engine alpha\", beta = \"Engine beta\" }",
+    ) + &beta[beta.find("[[rule]]").unwrap()..];
+    let set = EngineSet::build([(
+        Origin {
+            moderation: Moderation::Unchecked,
+            publisher: "two".to_owned(),
+            first_party: false,
+        },
+        Descriptor::from_toml(&both),
+    )]);
+    assert_eq!(set.len(), 1, "{:?}", set.skipped());
+    let dir = Tmp::new("two-codes");
+    shaped(dir.path(), "game", "g");
+    assert_eq!(
+        detect_with_engines(dir.path(), None, &set)
+            .unwrap()
+            .engine_candidates,
+        [code("alpha"), code("beta")]
+    );
+    let g = game(dir.path(), "game/bin/win64/g.exe");
+    let profiles = Tmp::new("two-codes-profiles");
+    let profile = profiles.join("p");
+    let pkg = foundation("beta");
+    let e = plan_install_in(&pkg, &g, &profile, &set, Provenance::Community, None).unwrap_err();
+    assert_eq!(e.code, codes::ENGINE_AMBIGUOUS);
+    let pick = code("beta");
+    let plan =
+        plan_install_in(&pkg, &g, &profile, &set, Provenance::Community, Some(&pick)).unwrap();
+    assert_eq!(
+        plan.engine_descriptor.as_ref().map(|d| d.sha256.as_str()),
+        Some(Descriptor::from_toml(&both).unwrap().digest())
+    );
+    install(&pkg, &plan, &g, ACCEPT, &Ctx::silent()).unwrap();
+}
