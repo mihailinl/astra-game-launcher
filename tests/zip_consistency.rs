@@ -15,10 +15,11 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{Cursor, Read as _, Write as _};
+use std::io::{Cursor, Read as _};
 use std::path::{Path, PathBuf};
 
 use astra_game_launcher::{GiPackage, LauncherError, codes};
+use common::rawzip::*;
 use common::sha;
 
 fn dir(rel: &str) -> PathBuf {
@@ -214,139 +215,11 @@ from = "payload/**"
 to = "${profile}/payload/"
 "#;
 
-const DESCRIPTOR_SIGNATURE: [u8; 4] = 0x0807_4b50u32.to_le_bytes();
-
-/// One entry as it is written: `data` is what follows the local header (stored or deflated
-/// bytes), `after` what follows `data` (a descriptor, or nothing).
-struct Raw {
-    name: Vec<u8>,
-    method: u16,
-    flags: u16,
-    crc: u32,
-    compressed: u32,
-    size: u32,
-    data: Vec<u8>,
-    after: Vec<u8>,
-    local_extra: Vec<u8>,
-    central_extra: Vec<u8>,
-    /// The flags of the local header, when they differ from the central record's.
-    local_flags: Option<u16>,
-}
-
-impl Raw {
-    fn stored(name: &str, data: &[u8]) -> Raw {
-        Raw {
-            name: name.as_bytes().to_vec(),
-            method: 0,
-            flags: 0,
-            crc: crc32fast::hash(data),
-            compressed: data.len() as u32,
-            size: data.len() as u32,
-            data: data.to_vec(),
-            after: Vec::new(),
-            local_extra: Vec::new(),
-            central_extra: Vec::new(),
-            local_flags: None,
-        }
-    }
-
-    /// `deflated` (which may carry bytes past its stream's end) recording `data`'s CRC and size.
-    fn deflated(name: &str, deflated: &[u8], data: &[u8]) -> Raw {
-        Raw {
-            method: 8,
-            compressed: deflated.len() as u32,
-            size: data.len() as u32,
-            data: deflated.to_vec(),
-            ..Raw::stored(name, data)
-        }
-    }
-
-    /// Stored with bit 3: zeros in the local header, `descriptor` after the data.
-    fn stored_with_descriptor(name: &str, data: &[u8], descriptor: Vec<u8>) -> Raw {
-        Raw {
-            flags: 1 << 3,
-            after: descriptor,
-            ..Raw::stored(name, data)
-        }
-    }
-}
-
-/// A signed descriptor with 32-bit sizes.
-fn descriptor(crc: u32, compressed: u32, size: u32) -> Vec<u8> {
-    let mut d = DESCRIPTOR_SIGNATURE.to_vec();
-    for v in [crc, compressed, size] {
-        d.extend_from_slice(&v.to_le_bytes());
-    }
-    d
-}
-
-fn le(out: &mut Vec<u8>, v16: &[u16], v32: &[u32]) {
-    for v in v16 {
-        out.extend_from_slice(&v.to_le_bytes());
-    }
-    for v in v32 {
-        out.extend_from_slice(&v.to_le_bytes());
-    }
-}
-
 /// The zip of `entries`, after a stored `astra-gi.toml` holding [`MANIFEST`].
 fn package(entries: Vec<Raw>) -> Vec<u8> {
     let mut all = vec![Raw::stored("astra-gi.toml", MANIFEST.as_bytes())];
     all.extend(entries);
-    let mut zip = Vec::new();
-    let mut offsets = Vec::new();
-    for e in &all {
-        offsets.push(zip.len() as u32);
-        let local_flags = e.local_flags.unwrap_or(e.flags);
-        let (crc, compressed, size) = if e.flags & (1 << 3) != 0 {
-            (0, 0, 0)
-        } else {
-            (e.crc, e.compressed, e.size)
-        };
-        le(&mut zip, &[], &[0x0403_4b50]);
-        le(
-            &mut zip,
-            &[20, local_flags, e.method, 0, 0x5021],
-            &[crc, compressed, size],
-        );
-        le(
-            &mut zip,
-            &[e.name.len() as u16, e.local_extra.len() as u16],
-            &[],
-        );
-        zip.extend_from_slice(&e.name);
-        zip.extend_from_slice(&e.local_extra);
-        zip.extend_from_slice(&e.data);
-        zip.extend_from_slice(&e.after);
-    }
-    let cd_start = zip.len() as u32;
-    for (e, offset) in all.iter().zip(&offsets) {
-        le(&mut zip, &[], &[0x0201_4b50]);
-        le(
-            &mut zip,
-            &[20, 20, e.flags, e.method, 0, 0x5021],
-            &[e.crc, e.compressed, e.size],
-        );
-        le(
-            &mut zip,
-            &[e.name.len() as u16, e.central_extra.len() as u16, 0, 0, 0],
-            &[0, *offset],
-        );
-        zip.extend_from_slice(&e.name);
-        zip.extend_from_slice(&e.central_extra);
-    }
-    let cd_len = zip.len() as u32 - cd_start;
-    let n = all.len() as u16;
-    le(&mut zip, &[], &[0x0605_4b50]);
-    le(&mut zip, &[0, 0, n, n], &[cd_len, cd_start]);
-    le(&mut zip, &[0], &[]);
-    zip
-}
-
-fn deflate(data: &[u8], level: u32) -> Vec<u8> {
-    let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(level));
-    e.write_all(data).unwrap();
-    e.finish().unwrap()
+    archive(&all)
 }
 
 /// zip 9 alone reads the hand-built package as an ordinary one: its consistency check passes and
@@ -450,39 +323,102 @@ fn a_deflate_stream_with_another_size_or_crc_is_refused() {
     assert_eq!(e.code, codes::ZIP_INCONSISTENT, "{e}");
 }
 
-/// Check (5): a stored entry with bit 3 ends, for a scanning reader, at the first descriptor
-/// signature followed by the CRC of the bytes before it. One inside the data cuts the entry short
-/// for that reader, and what follows is free to look like the next local header. The signature
-/// alone, with any other CRC, is data.
+/// Check (5): a stored entry with bit 3 ends, for a scanning reader, at a descriptor signature
+/// inside its data. libarchive's read path ends it at the first signature followed by the CRC of
+/// the bytes before it (`stored-dd.zip`); its skip path — `tar -t`, and every entry a selective
+/// extract passes over — at the first signature whatever follows it. So a signature anywhere in
+/// the data is refused, with the CRC of what precedes it or any other.
 #[test]
-fn a_stored_entry_hiding_a_descriptor_is_refused_and_a_bare_signature_is_not() {
+fn a_stored_entry_holding_a_descriptor_signature_is_refused_whatever_follows_it() {
     let prefix = b"#!/bin/sh\n";
-    let content = |crc: u32| {
+    let content = |crc: u32, compressed: u32, size: u32| {
         let mut c = prefix.to_vec();
-        c.extend_from_slice(&descriptor(crc, prefix.len() as u32, prefix.len() as u32));
+        c.extend_from_slice(&descriptor(crc, compressed, size));
         c.extend_from_slice(b"PK\x03\x04 whatever comes next");
         c
     };
-    let entry = |data: Vec<u8>| {
-        let d = descriptor(crc32fast::hash(&data), data.len() as u32, data.len() as u32);
-        Raw::stored_with_descriptor("payload/a.txt", &data, d)
-    };
+    let n = prefix.len() as u32;
+    let crc = crc32fast::hash(prefix);
+    for (why, data) in [
+        ("the CRC of the bytes before it", content(crc, n, n)),
+        ("another CRC, other sizes", content(crc ^ 1, n + 1, n + 1)),
+        ("another CRC, the sizes", content(crc ^ 1, n, n)),
+        ("the CRC, other sizes", content(crc, n + 1, n + 1)),
+    ] {
+        let hiding = package(vec![Raw::streamed("payload/a.txt", &data)]);
+        zip_9_reads(&hiding);
+        let e = refusal(&hiding);
+        assert_eq!(
+            said(&e),
+            (
+                codes::ZIP_INCONSISTENT,
+                Some("payload/a.txt"),
+                Some("descriptor-inside")
+            ),
+            "{why}: {e}"
+        );
+        assert_eq!(e.param("at"), Some("10"), "{why}");
+    }
+    // A signature at the data's very start, and one straddling its last bytes and the real
+    // descriptor (which cannot match: the descriptor begins with the signature itself).
+    let e = refusal(&package(vec![Raw::streamed(
+        "payload/a.txt",
+        b"PK\x07\x08rest",
+    )]));
+    assert_eq!(e.param("reason"), Some("descriptor-inside"), "{e}");
+    assert_eq!(e.param("at"), Some("0"));
+    for tail in [&b"x PK"[..], b"x PK\x07", b"x P"] {
+        open(&package(vec![Raw::streamed("payload/a.txt", tail)]))
+            .unwrap_or_else(|e| panic!("{tail:?}: {e}"));
+    }
+    // Three of the signature's four bytes are data.
+    open(&package(vec![Raw::streamed(
+        "payload/a.txt",
+        b"PK\x07\x09 PK\x06\x08 PL\x07\x08 QK\x07\x08",
+    )]))
+    .expect("no signature, no descriptor");
+}
 
-    let hiding = package(vec![entry(content(crc32fast::hash(prefix)))]);
-    zip_9_reads(&hiding);
-    let e = refusal(&hiding);
+/// The reviewer's vector, as libarchive 3.8.10's streaming reader reads it: a stored entry with
+/// bit 3 whose data holds a bare signature (another CRC behind it), then a local header for
+/// `payload/hidden.txt` whose size swallows the entry's real descriptor and the next entry,
+/// `payload/evil.dll`. That reader lists `astra-gi.toml`, `payload/x.bin`, `payload/hidden.txt`,
+/// `payload/readme.txt` — and the DLL that every reader of the directory installs is not there.
+#[test]
+fn a_bare_signature_that_hides_an_installed_dll_from_a_streaming_reader_is_refused() {
+    let hidden_name = b"payload/hidden.txt";
+    let evil = Raw::stored("payload/evil.dll", b"MZ evil");
+    // What the hidden entry swallows: the real descriptor (16 bytes), then evil.dll whole.
+    let swallowed = (16 + local_header(&evil).len() + evil.data.len()) as u32;
+    let fake = Raw {
+        compressed: swallowed,
+        size: swallowed,
+        crc: 0,
+        ..Raw::stored("payload/hidden.txt", b"")
+    };
+    let mut data = b"AAAA".to_vec();
+    data.extend_from_slice(&DESCRIPTOR_SIGNATURE);
+    data.extend_from_slice(&0xdead_beefu32.to_le_bytes());
+    data.extend_from_slice(b"junk");
+    data.extend_from_slice(&local_header(&fake));
+    assert!(local_header(&fake).ends_with(hidden_name));
+    let zip = package(vec![
+        Raw::streamed("payload/x.bin", &data),
+        evil,
+        Raw::stored("payload/readme.txt", b"read me\n"),
+    ]);
+    zip_9_reads(&zip);
+    let e = refusal(&zip);
     assert_eq!(
         said(&e),
         (
             codes::ZIP_INCONSISTENT,
-            Some("payload/a.txt"),
+            Some("payload/x.bin"),
             Some("descriptor-inside")
-        )
+        ),
+        "{e}"
     );
-    assert_eq!(e.param("at"), Some("10"));
-
-    open(&package(vec![entry(content(crc32fast::hash(prefix) ^ 1))]))
-        .expect("a signature without its CRC is data");
+    assert_eq!(e.param("at"), Some("4"));
 }
 
 /// Check (5)'s descriptor: exactly at the data's end, signed, with the record's CRC and sizes. An
@@ -560,24 +496,23 @@ fn a_deflated_entry_with_bit_3_needs_its_signed_descriptor_at_its_end() {
     }
 }
 
-/// Check (5) is one pass: 4 MiB of nothing but descriptor signatures, each a candidate, is read
-/// once (re-hashing the prefix at every signature grows with its square).
+/// Check (5) is one pass: 4 MiB of near-signatures (three of the four bytes, over and over) is
+/// read once and opens, and the same with one real signature at its very end is refused there.
 #[test]
-fn a_stored_entry_of_signatures_is_scanned_in_one_pass() {
-    let data: Vec<u8> = DESCRIPTOR_SIGNATURE
+fn a_stored_entry_of_near_signatures_is_scanned_in_one_pass() {
+    let mut data: Vec<u8> = b"PK\x07\x09"
         .iter()
         .copied()
         .cycle()
         .take(4 << 20)
         .collect();
-    let d = descriptor(crc32fast::hash(&data), data.len() as u32, data.len() as u32);
-    let zip = package(vec![Raw::stored_with_descriptor(
-        "payload/sig.bin",
-        &data,
-        d,
-    )]);
     let started = std::time::Instant::now();
-    open(&zip).unwrap();
+    open(&package(vec![Raw::streamed("payload/sig.bin", &data)])).unwrap();
+    let at = data.len();
+    data.extend_from_slice(&DESCRIPTOR_SIGNATURE);
+    let e = refusal(&package(vec![Raw::streamed("payload/sig.bin", &data)]));
+    assert_eq!(e.param("reason"), Some("descriptor-inside"), "{e}");
+    assert_eq!(e.param("at"), Some(at.to_string().as_str()));
     let took = started.elapsed();
     assert!(took < std::time::Duration::from_secs(20), "took {took:?}");
 }
@@ -670,6 +605,97 @@ fn two_records_of_one_name_are_two_archives() {
         said(&e),
         (codes::ZIP_INCONSISTENT, Some(""), Some("headers")),
         "{e}"
+    );
+}
+
+/// Check (7): bytes before the first entry, between two entries or before the central directory.
+/// A reader of local headers takes them for the next header: libarchive 3.8.10's streaming reader
+/// ends the archive at a `PK\x01\x02` (between `readme.txt` and `evil.dll` it lists the manifest
+/// and `readme.txt` only; as a prefix, nothing at all), and Java's `ZipInputStream` at one zero
+/// byte — while every reader of the directory installs `evil.dll`. zip 9's own scan of those bytes
+/// looks for a valid local header and finds none.
+#[test]
+fn bytes_outside_every_entry_are_refused() {
+    let entries = || {
+        vec![
+            Raw::stored("astra-gi.toml", MANIFEST.as_bytes()),
+            Raw::stored("payload/readme.txt", b"read me\n"),
+            Raw::stored("payload/evil.dll", b"MZ evil"),
+        ]
+    };
+    let tight = archive(&entries());
+    zip_9_reads(&tight);
+    open(&tight).expect("the same entries, nothing between them");
+
+    let central = b"PK\x01\x02".to_vec();
+    for (why, at, gap, entry) in [
+        (
+            "a directory signature between entries",
+            2,
+            central.clone(),
+            "payload/evil.dll",
+        ),
+        (
+            "a directory signature as a prefix",
+            0,
+            central.clone(),
+            "astra-gi.toml",
+        ),
+        (
+            "a zero byte between entries",
+            2,
+            vec![0u8],
+            "payload/evil.dll",
+        ),
+        ("a zero byte as a prefix", 0, vec![0u8], "astra-gi.toml"),
+    ] {
+        let mut e = entries();
+        e[at].before = gap.clone();
+        let zip = archive(&e);
+        zip_9_reads(&zip);
+        let err = refusal(&zip);
+        assert_eq!(
+            said(&err),
+            (codes::ZIP_INCONSISTENT, Some(entry), Some("gap")),
+            "{why}: {err}"
+        );
+        // Where the next header was wanted, and where it is.
+        let want: usize = e[..at]
+            .iter()
+            .map(|r| local_header(r).len() + r.data.len())
+            .sum();
+        assert_eq!(err.param("at"), Some(want.to_string().as_str()), "{why}");
+        assert_eq!(
+            err.param("header"),
+            Some((want + gap.len()).to_string().as_str()),
+            "{why}"
+        );
+    }
+    for (why, gap) in [
+        ("a directory signature", central.clone()),
+        ("a zero byte", vec![0u8]),
+    ] {
+        let zip = archive_with(&entries(), &gap);
+        zip_9_reads(&zip);
+        let err = refusal(&zip);
+        assert_eq!(
+            said(&err),
+            (codes::ZIP_INCONSISTENT, Some(""), Some("gap")),
+            "{why} before the directory: {err}"
+        );
+    }
+    // A descriptor where bit 3 says none: bytes a reader of local headers takes for a header.
+    let mut e = entries();
+    e[1].after = descriptor(e[1].crc, e[1].compressed, e[1].size);
+    let err = refusal(&archive(&e));
+    assert_eq!(
+        said(&err),
+        (
+            codes::ZIP_INCONSISTENT,
+            Some("payload/evil.dll"),
+            Some("gap")
+        ),
+        "{err}"
     );
 }
 

@@ -37,11 +37,20 @@
 //!    descriptor WITH its signature whose CRC and sizes are the record's (64-bit sizes when its
 //!    local header carries a ZIP64 field): a reader of local headers reads the descriptor where the
 //!    entry ends for it, and one that is not there makes it read the next header out of step. A
-//!    Stored entry's data also holds no signature followed by the CRC of the bytes before it: a
-//!    scanning reader ends such an entry at the first signature whose CRC matches what it has read
-//!    (`stored-dd.zip`). The signature is required, where AstraPlugins' README calls it optional:
-//!    a scanning reader cannot find a descriptor without one (debt row 34).
+//!    Stored entry's data holds no descriptor signature at all, whatever follows it: a scanning
+//!    reader ends such an entry at a signature, and libarchive's skip path (`tar -t`, and every
+//!    entry a selective extract passes over) at the FIRST one, whatever CRC and sizes follow it,
+//!    where its read path asks for the CRC of the bytes before it (`stored-dd.zip`). The signature
+//!    is required, where AstraPlugins' README calls it optional: a scanning reader cannot find a
+//!    descriptor without one (debt row 34).
 //! 6. A recorded range inside the file: data that runs past its end is refused, never read short.
+//! 7. A tight layout (`gap`): the first local header at offset 0, each next one exactly where the
+//!    previous entry ends (its data, then its descriptor for bit 3), and the central directory
+//!    exactly after the last. A reader of local headers takes any other bytes there for the next
+//!    header: libarchive's streaming reader ends the archive at a `PK\x01\x02` (as a prefix, it
+//!    lists no entry at all), Java's `ZipInputStream` at a single zero byte, and every entry
+//!    behind it is installed while that reader never sees it. zip 9's own scan of those bytes
+//!    looks only for a valid local header.
 //!
 //! An encrypted entry, or one of another method, is not inflated here: the hygiene loop that
 //! follows in `open` refuses it (`zip-unsafe-entry`) before anything is read either. Bit 3 is
@@ -75,6 +84,7 @@ struct Entry {
     encrypted: bool,
     descriptor: bool,
     local_zip64: bool,
+    header_start: usize,
     data_start: usize,
     compressed: u64,
     size: u64,
@@ -163,9 +173,10 @@ fn entry(ar: &mut ZipArchive<Cursor<&[u8]>>, zip: &[u8], i: usize) -> Result<Ent
         return Err(refusal(&name, "name-encoding"));
     }
     // Where the local header puts the data: zip reads it from there too.
-    let data_start = usize::try_from(f.header_start())
-        .ok()
-        .and_then(|h| h.checked_add(30 + local_name.len() + local_extra.len()))
+    let header_start =
+        usize::try_from(f.header_start()).map_err(|_| refusal(&name, "truncated"))?;
+    let data_start = header_start
+        .checked_add(30 + local_name.len() + local_extra.len())
         .ok_or_else(|| refusal(&name, "truncated"))?;
     if f.data_start().is_some_and(|d| d != data_start as u64) {
         return Err(refusal(&name, "headers").with("detail", "data-start"));
@@ -181,6 +192,7 @@ fn entry(ar: &mut ZipArchive<Cursor<&[u8]>>, zip: &[u8], i: usize) -> Result<Ent
         encrypted: f.encrypted(),
         descriptor: central_flags & FLAG_DESCRIPTOR != 0,
         local_zip64: local_ids.contains(&ZIP64_FIELD),
+        header_start,
         data_start,
         compressed: f.compressed_size(),
         size: f.size(),
@@ -201,24 +213,60 @@ pub(crate) fn check(
         left: max_inflated,
         limit: max_inflated,
     };
+    // (where its local header starts, where the entry ends, its name), for check (7).
+    let mut layout = Vec::with_capacity(ar.len());
     for i in 0..ar.len() {
         let e = entry(ar, zip, i)?;
-        if e.encrypted {
-            continue;
-        }
-        match (e.method, e.descriptor) {
-            (CompressionMethod::Deflated, descriptor) => {
-                deflate_ends_on_its_record(zip, &e, &mut budget)?;
-                if descriptor {
-                    descriptor_at_its_end(zip, &e)?;
+        if !e.encrypted {
+            match (e.method, e.descriptor) {
+                (CompressionMethod::Deflated, descriptor) => {
+                    deflate_ends_on_its_record(zip, &e, &mut budget)?;
+                    if descriptor {
+                        descriptor_at_its_end(zip, &e)?;
+                    }
                 }
+                (CompressionMethod::Stored, true) => {
+                    descriptor_at_its_end(zip, &e)?;
+                    stored_holds_no_descriptor(zip, &e, &mut budget)?;
+                }
+                _ => {}
             }
-            (CompressionMethod::Stored, true) => {
-                descriptor_at_its_end(zip, &e)?;
-                stored_holds_no_descriptor(zip, &e, &mut budget)?;
-            }
-            _ => {}
         }
+        layout.push((e.header_start, end_of(zip, &e), e.name));
+    }
+    tight(layout, ar.central_directory_start())
+}
+
+/// Where entry `e` ends for a reader of local headers: its data, then its descriptor for bit 3 —
+/// signed, as check (5) holds a Stored or Deflated entry to, or as found for one the hygiene that
+/// follows refuses (encrypted, another method).
+fn end_of(zip: &[u8], e: &Entry) -> usize {
+    let end = e.data_start + e.compressed as usize;
+    if !e.descriptor {
+        return end;
+    }
+    let sizes = if e.local_zip64 { 16 } else { 8 };
+    let signed = zip.get(end..end + 4) == Some(&DESCRIPTOR_SIGNATURE[..]);
+    end + if signed { 8 } else { 4 } + sizes
+}
+
+/// Check (7): the entries, in the order their local headers come, from offset 0 with no byte
+/// between them, and the central directory right after the last.
+fn tight(mut layout: Vec<(usize, usize, String)>, directory: u64) -> Result<()> {
+    layout.sort_by_key(|(start, ..)| *start);
+    let mut at = 0usize;
+    for (start, end, name) in layout {
+        if start != at {
+            return Err(refusal(&name, "gap")
+                .with("at", at.to_string())
+                .with("header", start.to_string()));
+        }
+        at = end;
+    }
+    if directory != at as u64 {
+        return Err(refusal("", "gap")
+            .with("at", at.to_string())
+            .with("directory", directory.to_string()));
     }
     Ok(())
 }
@@ -312,41 +360,21 @@ fn descriptor_at_its_end(zip: &[u8], e: &Entry) -> Result<()> {
     Ok(())
 }
 
-/// Check (5), second half, for a Stored entry: no descriptor a scanning reader would stop at
-/// first inside the data, and the data's own CRC the record's. Runs after
-/// [`descriptor_at_its_end`], so the descriptor's 16 bytes follow the data. One pass: the running
-/// CRC moves forward to each signature, never back.
+/// Check (5), second half, for a Stored entry: no descriptor signature anywhere inside the data,
+/// whatever follows it (libarchive's skip path stops at the first, CRC or none), and the data's
+/// own CRC the record's. Runs after [`descriptor_at_its_end`], so the real descriptor follows the
+/// data: a signature that starts in the data's last three bytes and runs on into it cannot match
+/// (it begins `PK\x07\x08` itself), so the data alone is scanned.
 fn stored_holds_no_descriptor(zip: &[u8], e: &Entry, budget: &mut Budget) -> Result<()> {
     if e.compressed != e.size {
         return Err(refusal(&e.name, "stored-size"));
     }
-    let end = e.data_start + e.compressed as usize;
     budget.spend(e.size, &e.name)?;
-    // Every position inside the data whose 8 bytes (signature, CRC) are in the file: the last
-    // ones run on into the real descriptor, as a scanning reader reads them.
-    let mut running = crc32fast::Hasher::new();
-    let mut hashed_to = e.data_start;
-    let mut p = e.data_start;
-    while p < end {
-        let Some(off) = zip[p..end]
-            .iter()
-            .position(|&b| b == DESCRIPTOR_SIGNATURE[0])
-        else {
-            break;
-        };
-        p += off;
-        if zip[p..p + 4] == DESCRIPTOR_SIGNATURE {
-            running.update(&zip[hashed_to..p]);
-            hashed_to = p;
-            if Some(running.clone().finalize()) == u32_at(zip, p + 4) {
-                return Err(refusal(&e.name, "descriptor-inside")
-                    .with("at", (p - e.data_start).to_string()));
-            }
-        }
-        p += 1;
+    let bytes = data(zip, e);
+    if let Some(at) = bytes.windows(4).position(|w| w == DESCRIPTOR_SIGNATURE) {
+        return Err(refusal(&e.name, "descriptor-inside").with("at", at.to_string()));
     }
-    running.update(&zip[hashed_to..end]);
-    if running.finalize() != e.crc {
+    if crc32fast::hash(bytes) != e.crc {
         return Err(refusal(&e.name, "crc"));
     }
     Ok(())

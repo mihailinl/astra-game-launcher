@@ -578,10 +578,12 @@ to = "${astra_pack_inbox}/"
   A game file the manifest pins by digest must match it too.
 - **One archive to every reader.** Before anything is read out of a zip, it must read the same
   through its central directory (zip 9's way) and through its local headers (a streaming
-  reader's, a catalogue ingest's): every local header agrees with its record, nothing overlaps
-  or hides between entries, no Unicode Path field renames an entry, every non-ASCII name is
-  flagged UTF-8, every deflate stream ends exactly where its record does with the declared size
-  and CRC, and a data descriptor sits, signed, exactly at its entry's end. Otherwise
+  reader's, a catalogue ingest's): every local header agrees with its record, the entries run
+  from offset 0 to the central directory with not one byte before, between or after them, no
+  Unicode Path field renames an entry, every non-ASCII name is flagged UTF-8, every deflate
+  stream ends exactly where its record does with the declared size and CRC, a data descriptor
+  sits, signed, exactly at its entry's end, and a stored entry with one holds no descriptor
+  signature in its data. Otherwise
   `zip-inconsistent` ("zip cloaking"; `src/zip_consistency.rs`, AstraPlugins'
   `testdata/zip-cloaking/` vectors in `tests/fixtures/zip-cloaking/`).
 - **The zip.** At most 256 MiB compressed, 1 GiB uncompressed, 20 000 entries. Symbolic links,
