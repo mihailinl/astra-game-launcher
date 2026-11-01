@@ -333,21 +333,40 @@ impl Serialize for Ordered<'_> {
     }
 }
 
-/// A folder below the temporary directory (`TMPDIR`), removed when dropped.
+/// A folder below the temporary directory (`TMPDIR`), removed when dropped. Its name holds a
+/// random part, and it is made new (`create_dir`, which fails on anything already there, a link
+/// included; on Unix mode `0700`): in a temporary directory other users share, nothing laid in
+/// advance under a name this picks is ever followed, filled or removed.
 pub struct Scratch(PathBuf);
 
 impl Scratch {
     pub fn new(what: &str) -> Result<Scratch, Fatal> {
+        use std::hash::{BuildHasher, Hasher};
         static N: AtomicU64 = AtomicU64::new(0);
-        let p = std::env::temp_dir().join(format!(
-            "gi-probe-{}-{}-{what}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).map_err(|e| Fatal::io(&p, e))?;
-        let p = std::fs::canonicalize(&p).map_err(|e| Fatal::io(&p, e))?;
-        Ok(Scratch(p))
+        let mut last = None;
+        for _ in 0..16 {
+            // The standard library seeds each `RandomState` from the OS.
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_u64(N.fetch_add(1, Ordering::Relaxed));
+            let p = std::env::temp_dir().join(format!(
+                "gi-probe-{}-{:016x}-{what}",
+                std::process::id(),
+                h.finish()
+            ));
+            let mut dir = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
+            match dir.create(&p) {
+                Ok(()) => {
+                    let p = std::fs::canonicalize(&p).map_err(|e| Fatal::io(&p, e))?;
+                    return Ok(Scratch(p));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some((p, e)),
+                Err(e) => return Err(Fatal::io(&p, e)),
+            }
+        }
+        let (p, e) = last.expect("the loop ran");
+        Err(Fatal::io(&p, e))
     }
 
     pub fn path(&self) -> &Path {

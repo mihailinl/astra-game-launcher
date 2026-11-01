@@ -336,7 +336,10 @@ pub(crate) fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
 
 /// [`write_atomic`] for a file that holds a secret: on Unix the file is mode `0600` — the
 /// temporary file is created so and set so before the rename, and an existing file's looser mode
-/// is not carried over (the new file replaces it). Elsewhere it is exactly [`write_atomic`].
+/// is not carried over (the new file replaces it). Elsewhere it is exactly [`write_atomic`],
+/// attributes carried over and all: on Windows the file's privacy rests on the ACL its folder
+/// inherits (a profile is below the user's own data folder), which the launcher neither sets nor
+/// checks.
 ///
 /// Used for every `[[config_writes]]` entry that sets a caller's variable (anything but
 /// `${profile}` and `${game}`; `link-v1.md` §2's "Mode 0600 on Unix" for the same kind of file).
@@ -389,7 +392,9 @@ fn write_atomic_as(target: &Path, bytes: &[u8], private: bool) -> Result<()> {
         f.write_all(bytes)?;
         f.sync_all()?;
         drop(f);
-        if !private
+        // A private file never takes over a looser mode on Unix; elsewhere `private` changes
+        // nothing.
+        if (!private || cfg!(not(unix)))
             && let Ok(m) = fs::symlink_metadata(target)
             && m.is_file()
         {
