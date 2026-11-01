@@ -308,6 +308,30 @@ pub fn astrachar(json: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
     zip_of(&all)
 }
 
+/// An `.astrachar` bundle written byte by byte: `astrachar.json` and an allowed VRM 1.0 body, and
+/// `notes.bin`, a stored entry with bit 3 whose data hides a descriptor (the stored-dd trick) —
+/// with `flags` (encrypted: 1) and `method` (another: 12) as given, a plain one otherwise.
+pub fn raw_bundle(flags: Option<u16>, method: Option<u16>) -> Vec<u8> {
+    use crate::common::rawzip::{Raw, archive, descriptor};
+    let mut hidden = b"x".to_vec();
+    hidden.extend_from_slice(&descriptor(crc32fast::hash(b"x"), 1, 1));
+    hidden.extend_from_slice(b"PK\x03\x04 a header for a reader of local headers");
+    let mut notes = Raw::streamed("notes.bin", b"plain notes");
+    if flags.is_some() || method.is_some() {
+        notes = Raw::streamed("notes.bin", &hidden);
+        notes.flags |= flags.unwrap_or(0);
+        notes.method = method.unwrap_or(0);
+    }
+    archive(&[
+        Raw::stored(
+            "astrachar.json",
+            astrachar_json(r#"{"file":"models/Mira.vrm"}"#).as_bytes(),
+        ),
+        Raw::stored("models/Mira.vrm", &vrm1(VRM1_ALLOWED)),
+        notes,
+    ])
+}
+
 pub fn astrachar_json(body: &str) -> String {
     format!(
         r#"{{"format":"astra.character","format_version":1,"needs":[],"schema":5,"kind":"vrm","character":{{"id":"mira","name":"Mira","dir":"characters/mira"}},"body":{body}}}"#
@@ -680,6 +704,30 @@ pub fn hostile() -> Vec<Fixture> {
             ),
             vec![(CONTENT_FORMAT, "zip-inconsistent")],
             None,
+        ),
+        fx(
+            "a character bundle holding an encrypted entry",
+            rel(
+                &part("characters/mira.astrachar", "character", cc),
+                &[("characters/mira.astrachar", raw_bundle(Some(1), None))],
+            ),
+            vec![(CONTENT_FORMAT, "zip-unsafe-entry")],
+            Some(rel(
+                &part("characters/mira.astrachar", "character", cc),
+                &[("characters/mira.astrachar", raw_bundle(None, None))],
+            )),
+        ),
+        fx(
+            "a character bundle holding an entry of another method",
+            rel(
+                &part("characters/mira.astrachar", "character", cc),
+                &[("characters/mira.astrachar", raw_bundle(None, Some(12)))],
+            ),
+            vec![(CONTENT_FORMAT, "zip-unsafe-entry")],
+            Some(rel(
+                &part("characters/mira.astrachar", "character", cc),
+                &[("characters/mira.astrachar", raw_bundle(None, None))],
+            )),
         ),
         fx(
             "a character bundle naming its body twice",

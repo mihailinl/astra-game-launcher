@@ -854,6 +854,67 @@ fn bytes_outside_every_entry_are_refused() {
     );
 }
 
+/// The check reads the whole archive past an entry it does not inflate (encrypted, or of another
+/// method; the hygiene that follows refuses those): a cloak behind one is still the refusal.
+#[test]
+fn an_entry_the_check_cannot_read_does_not_end_it() {
+    let field = {
+        let mut body = vec![1u8];
+        body.extend_from_slice(&crc32fast::hash(b"payload/notes.txt").to_le_bytes());
+        body.extend_from_slice(b"payload/launch.sh");
+        let mut f = 0x7075u16.to_le_bytes().to_vec();
+        f.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        f.extend_from_slice(&body);
+        f
+    };
+    for (why, unread) in [
+        (
+            "encrypted",
+            Raw {
+                flags: 1,
+                ..Raw::stored("payload/secret.bin", b"secret")
+            },
+        ),
+        (
+            "compression",
+            Raw {
+                method: 12,
+                ..Raw::stored("payload/packed.bin", b"packed")
+            },
+        ),
+    ] {
+        let cloaked = Raw {
+            local_extra: field.clone(),
+            central_extra: field.clone(),
+            ..Raw::stored("payload/notes.txt", b"notes")
+        };
+        let e = refusal(&package(vec![unread, cloaked]));
+        assert_eq!(
+            said(&e),
+            (
+                codes::ZIP_INCONSISTENT,
+                Some("payload/notes.txt"),
+                Some("unicode-path")
+            ),
+            "behind an entry refused for {why}: {e}"
+        );
+        // Behind nothing wrong, the unreadable entry is the hygiene's.
+        let e = refusal(&package(vec![
+            Raw {
+                flags: if why == "encrypted" { 1 } else { 0 },
+                method: if why == "compression" { 12 } else { 0 },
+                ..Raw::stored("payload/x.bin", b"x")
+            },
+            Raw::stored("payload/notes.txt", b"notes"),
+        ]));
+        assert_eq!(
+            (e.code, e.param("reason")),
+            (codes::ZIP_UNSAFE_ENTRY, Some(why)),
+            "{e}"
+        );
+    }
+}
+
 /// The work is bounded: what the checks inflate counts against `max_uncompressed_bytes`, so a
 /// bomb is refused for its size before anything else is asked of it.
 #[test]

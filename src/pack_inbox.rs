@@ -19,7 +19,9 @@
 //!   files), each one a zip whose `animpack.toml` (at its root, or in its one top-level folder, as
 //!   the engine looks) says `[animpack] uid = "<integration id>/<tail>"` — the one claim the
 //!   engine holds an inbox archive to that names it, and the one the tombstone needs
-//!   (`pack-inbox-invalid{file, reason}` otherwise, when the package is opened). The integration
+//!   (`pack-inbox-invalid{file, reason}` otherwise, when the package is opened). Before that, the
+//!   archive is held to what the release around it is (`zip-inconsistent`, `zip-unsafe-entry`,
+//!   with `pack` naming it), within the release's one budget (`too-large`). The integration
 //!   id itself must be one the engine reads as an inbox folder: `[a-z0-9._-]{1,64}`, not dot-led
 //!   (`pack-inbox-invalid{key=integration.id}` at parse). The archive's other claims (`owner`,
 //!   `games`, `version`, no `patches`) are the engine's to judge at import: one that breaks them
@@ -246,18 +248,19 @@ pub(crate) fn check_placed(f: &PackFile) -> Result<()> {
 /// The pack's uid and its tombstone, from the archive's own bytes (`entry` names it in the
 /// release zip): its `animpack.toml`, at the archive's root or in its one top-level folder, as
 /// the engine's importer finds it, says `[animpack] uid = "<id>/<tail>"` with a tail the engine
-/// reads. The archive is one archive to every reader first ([`crate::zip_consistency`], within
-/// `max_inflated`), as the release zip around it is.
+/// reads. The archive is first held to what the release zip around it is
+/// ([`crate::zip_consistency::check_nested`]: one archive to every reader, no entry no reader may
+/// read), within the release's one `budget`.
 pub(crate) fn read_uid(
     entry: &str,
     bytes: &[u8],
     id: &str,
-    max_inflated: u64,
+    budget: &mut crate::zip_consistency::Budget,
 ) -> Result<(String, String)> {
     let bad = |reason: &str| invalid(reason).with("file", entry);
     let mut ar = ZipArchive::new(Cursor::new(bytes))
         .map_err(|e| bad("not-a-zip").with("detail", e.to_string()))?;
-    crate::zip_consistency::check(&mut ar, bytes, max_inflated)
+    crate::zip_consistency::check_nested(&mut ar, bytes, budget)
         .map_err(|e| e.with("pack", entry))?;
 
     let mut names: Vec<(usize, String, u64)> = Vec::new();

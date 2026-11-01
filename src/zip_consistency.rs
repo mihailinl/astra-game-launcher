@@ -52,11 +52,13 @@
 //!    behind it is installed while that reader never sees it. zip 9's own scan of those bytes
 //!    looks only for a valid local header.
 //!
-//! An encrypted entry, or one of another method, is not inflated here: the hygiene loop that
-//! follows in `open` refuses it (`zip-unsafe-entry`) before anything is read either. Bit 3 is
-//! accepted because ordinary tools write it (Info-ZIP and Python writing to a pipe:
-//! `tests/fixtures/zip-writers/`), and the work is bounded by `max_inflated` over all entries
-//! together, so the check is not the bomb it looks for.
+//! An encrypted entry, or one of another method, is not inflated here ([`unreadable`]): the
+//! hygiene loop that follows in `open` refuses it in the release (`zip-unsafe-entry`), and
+//! [`check_nested`] in an archive inside it, before anything is read either. Bit 3 is accepted
+//! because ordinary tools write it (Info-ZIP and Python writing to a pipe:
+//! `tests/fixtures/zip-writers/`). The work is bounded by ONE [`Budget`] over every entry of a
+//! release and of every archive inside it that is read (its packs at `open`, its `.astrachar`
+//! bundles at `content()`), so the check is not the bomb it looks for, nested or not.
 //!
 //! This is the list of differentials known here, not a proof that every ZIP reader agrees with
 //! this one about every archive (debt row 35).
@@ -202,17 +204,15 @@ fn entry(ar: &mut ZipArchive<Cursor<&[u8]>>, zip: &[u8], i: usize) -> Result<Ent
 }
 
 /// Refuses `zip` (open as `ar`) unless every reader reads one archive in it: the module's checks.
+/// What the checks inflate or scan is charged to `budget`, which the caller shares with every
+/// other archive of one release it reads.
 pub(crate) fn check(
     ar: &mut ZipArchive<Cursor<&[u8]>>,
     zip: &[u8],
-    max_inflated: u64,
+    budget: &mut Budget,
 ) -> Result<()> {
     ar.validate_header_consistency()
         .map_err(|e| refusal("", "headers").with("detail", e.to_string()))?;
-    let mut budget = Budget {
-        left: max_inflated,
-        limit: max_inflated,
-    };
     // (where its local header starts, where the entry ends, its name), for check (7).
     let mut layout = Vec::with_capacity(ar.len());
     for i in 0..ar.len() {
@@ -220,14 +220,14 @@ pub(crate) fn check(
         if !e.encrypted {
             match (e.method, e.descriptor) {
                 (CompressionMethod::Deflated, descriptor) => {
-                    deflate_ends_on_its_record(zip, &e, &mut budget)?;
+                    deflate_ends_on_its_record(zip, &e, budget)?;
                     if descriptor {
                         descriptor_at_its_end(zip, &e)?;
                     }
                 }
                 (CompressionMethod::Stored, true) => {
                     descriptor_at_its_end(zip, &e)?;
-                    stored_holds_no_descriptor(zip, &e, &mut budget)?;
+                    stored_holds_no_descriptor(zip, &e, budget)?;
                 }
                 _ => {}
             }
@@ -271,16 +271,61 @@ fn tight(mut layout: Vec<(usize, usize, String)>, directory: u64) -> Result<()> 
     Ok(())
 }
 
-/// What the checks may still inflate or scan, over all entries.
-struct Budget {
+/// Why no reader may read entry bytes it was handed, before anything is: encrypted, or a method
+/// other than Stored and Deflated (`zip-unsafe-entry`'s `reason`). The release's own hygiene loop
+/// (`GiPackage::open`) and [`check_nested`] ask the same.
+pub(crate) fn unreadable(encrypted: bool, method: CompressionMethod) -> Option<&'static str> {
+    if encrypted {
+        Some("encrypted")
+    } else if !matches!(
+        method,
+        CompressionMethod::Stored | CompressionMethod::Deflated
+    ) {
+        Some("compression")
+    } else {
+        None
+    }
+}
+
+/// An archive INSIDE a release (a pack for `${astra_pack_inbox}`, an `.astrachar` bundle) held to
+/// what the release itself is: [`check`], then no entry [`unreadable`] (`zip-unsafe-entry{entry,
+/// reason}`), which `check` passes over unread and the release's own hygiene loop refuses in it.
+pub(crate) fn check_nested(
+    ar: &mut ZipArchive<Cursor<&[u8]>>,
+    zip: &[u8],
+    budget: &mut Budget,
+) -> Result<()> {
+    check(ar, zip, budget)?;
+    for i in 0..ar.len() {
+        let f = ar.by_index_raw(i).map_err(|e| {
+            refusal("", "headers")
+                .with("index", i.to_string())
+                .with("detail", e.to_string())
+        })?;
+        if let Some(reason) = unreadable(f.encrypted(), f.compression()) {
+            return Err(LauncherError::new(codes::ZIP_UNSAFE_ENTRY)
+                .with("entry", String::from_utf8_lossy(f.name_raw()))
+                .with("reason", reason));
+        }
+    }
+    Ok(())
+}
+
+/// What the checks may still inflate or scan, and read: ONE for a release and every archive inside
+/// it that is read, so N archives cost what one may (`max_uncompressed_bytes`), never N times it.
+pub(crate) struct Budget {
     left: u64,
     limit: u64,
 }
 
 impl Budget {
+    pub(crate) fn new(limit: u64) -> Budget {
+        Budget { left: limit, limit }
+    }
+
     /// `too-large`, as `open`'s own count of declared sizes says it, with the entry the checks
     /// were reading when the budget ran out.
-    fn spend(&mut self, n: u64, entry: &str) -> Result<()> {
+    pub(crate) fn spend(&mut self, n: u64, entry: &str) -> Result<()> {
         self.left = self.left.checked_sub(n).ok_or_else(|| {
             LauncherError::new(codes::TOO_LARGE)
                 .with("uncompressed", "true")

@@ -586,7 +586,9 @@ to = "${astra_pack_inbox}/"
   signature in its data. Otherwise
   `zip-inconsistent` ("zip cloaking"; `src/zip_consistency.rs`, AstraPlugins'
   `testdata/zip-cloaking/` vectors in `tests/fixtures/zip-cloaking/`).
-- **The zip.** At most 256 MiB compressed, 1 GiB uncompressed, 20 000 entries. Symbolic links,
+- **The zip.** At most 256 MiB compressed, 1 GiB uncompressed (counting what the checks unpack
+  of every archive inside it too: its packs, its `.astrachar` bundles, each held to the same
+  rules), 20 000 entries. Symbolic links,
   absolute paths, `..`, drive letters, encrypted entries and duplicate names are refused
   outright, whether the manifest names them or not. Only the files the manifest names are
   extracted, and an entry is never read past the size it declares.

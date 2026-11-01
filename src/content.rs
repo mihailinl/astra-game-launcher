@@ -30,7 +30,8 @@
 //!   3. **the VRM licence gate** ([`vrm_gate`]), on what is judged by its glTF JSON's extensions
 //!      and never by its name ([`class_of`]): an avatar (`VRM`, `VRMC_vrm`) in any part, a plain
 //!      glTF in a `character` part, and the `.vrm` body of a readable `.astrachar` (its
-//!      `astrachar.json` names `body.file`, a `.vrm` it holds). An animation
+//!      `astrachar.json` names `body.file`, a `.vrm` it holds; the bundle itself held to what
+//!      the release is, every bundle of it within one budget). An animation
 //!      (`VRMC_vrm_animation` alone) gets no avatar verdict. Every VRM meta the file carries is
 //!      read, each by its own spec's defaults ([`meta_verdict`]; an unrecognised token is
 //!      unknown, never allowed; a non-bool `allowRedistribution` is prohibited): prohibited is
@@ -945,21 +946,29 @@ fn read_inner(ar: &mut ZipArchive<Cursor<&[u8]>>, name: &str, most: u64) -> Opti
 }
 
 /// The body of the `.astrachar` `raw` (astra-companion `docs/character-files-and-2d-editor.md`
-/// §1.3: `astrachar.json`'s `body` is `{"file": "models/<name>.vrm", …}`).
-fn astrachar_body(raw: &[u8]) -> Body {
-    let limits = Limits::default();
+/// §1.3: `astrachar.json`'s `body` is `{"file": "models/<name>.vrm", …}`), read within `budget`,
+/// which every bundle of one release shares. The bundle is first held to what the release zip
+/// around it is ([`crate::zip_consistency::check_nested`]): one that two readers read as two, that
+/// holds an entry no reader may read, or that would take more than the budget left is never
+/// believed (`zip-inconsistent`, `zip-unsafe-entry`, `too-large`).
+fn astrachar_body(raw: &[u8], budget: &mut crate::zip_consistency::Budget) -> Body {
     let Ok(mut ar) = ZipArchive::new(Cursor::new(raw)) else {
         return Body::Unreadable("not-a-zip");
     };
-    if ar.len() > limits.max_entries {
+    if ar.len() > Limits::default().max_entries {
         return Body::Unreadable("too-many-entries");
     }
-    if let Err(e) = crate::zip_consistency::check(&mut ar, raw, limits.max_uncompressed_bytes) {
+    if let Err(e) = crate::zip_consistency::check_nested(&mut ar, raw, budget) {
+        let (reason, what) = match e.code {
+            codes::ZIP_UNSAFE_ENTRY => ("zip-unsafe-entry", "holds an entry no reader may read"),
+            codes::TOO_LARGE => ("too-large", "unpacks to more than the release may"),
+            _ => ("zip-inconsistent", "reads as two archives"),
+        };
         return Body::Format(problem(
-            "zip-inconsistent",
+            reason,
             format!(
-                "the bundle reads as two archives ({})",
-                e.param("reason").unwrap_or("headers")
+                "the bundle {what} ({})",
+                e.param("reason").or(e.param("entry")).unwrap_or("headers")
             ),
         ));
     }
@@ -987,7 +996,16 @@ fn astrachar_body(raw: &[u8]) -> Body {
     if extension(file) != ".vrm" {
         return Body::Unreadable("body-not-vrm");
     }
-    let Some(bytes) = read_inner(&mut ar, file, limits.max_uncompressed_bytes) else {
+    let Some(size) = ar.by_name(file).ok().map(|f| f.size()) else {
+        return Body::Unreadable("body-missing");
+    };
+    if budget.spend(size, file).is_err() {
+        return Body::Format(problem(
+            "too-large",
+            format!("the bundle's body {file} unpacks to more than the release may"),
+        ));
+    }
+    let Some(bytes) = read_inner(&mut ar, file, size) else {
         return Body::Unreadable("body-missing");
     };
     if !starts(&bytes, b"glTF") {
@@ -1068,14 +1086,17 @@ fn refusal(code: &'static str, params: &BTreeMap<String, String>) -> LauncherErr
 
 /// Holds a release's files to its `[[integration.content]]` (the module's four steps).
 /// `found` is every content-typed file of the release ([`is_content_typed`]); `present` every file
-/// it holds (what a `.gltf`'s relative URI may name); `read` gives a file's bytes, asked once for
-/// each covered part.
+/// it holds (what a `.gltf`'s relative URI may name); `max_inflated` what every `.astrachar`
+/// bundle of it together may unpack to (`Limits::max_uncompressed_bytes`); `read` gives a file's
+/// bytes, asked once for each covered part.
 pub fn judge(
     parts: &[ContentPart],
     found: &BTreeSet<String>,
     present: &BTreeSet<String>,
+    max_inflated: u64,
     mut read: impl FnMut(&str) -> Result<Vec<u8>>,
 ) -> Result<Report> {
+    let mut budget = crate::zip_consistency::Budget::new(max_inflated);
     let table = format!("integration.{TABLE}");
     let mut r = Report {
         content_files: found.iter().cloned().collect(),
@@ -1112,7 +1133,7 @@ pub fn judge(
         let mut gltf = None;
         let mut gate: Option<(Gate, Option<String>)> = None;
         if extension(&part.path) == ".astrachar" {
-            match astrachar_body(&raw) {
+            match astrachar_body(&raw, &mut budget) {
                 Body::Readable(name, body) => {
                     if let Some(Ok(doc)) = gltf_document(&body, Some(&name), None) {
                         gltf = Some(class_of(&doc));

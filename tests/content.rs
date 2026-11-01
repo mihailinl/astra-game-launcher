@@ -307,3 +307,64 @@ fn a_glb_is_judged_by_what_its_extensions_make_it() {
         assert_eq!(gate_said, judged, "{kind}: {p:?} {flags:?}");
     }
 }
+
+/// Every `.astrachar` bundle of one release is read within ONE budget, the limits the release was
+/// opened with: two bundles that each fit, together do not, and the second is refused
+/// (`content-format{reason=too-large}`) where a fresh budget per bundle let N of them cost N times
+/// what one may.
+#[test]
+fn every_character_bundle_of_a_release_shares_its_one_budget() {
+    let padding = vec![0u8; 150 << 10];
+    let bundle = content_fixtures::astrachar(
+        &content_fixtures::astrachar_json(r#"{"file":"models/Mira.vrm"}"#),
+        &[
+            ("models/Mira.vrm", &vrm1(VRM1_ALLOWED)),
+            ("textures/pad.bin", &padding),
+        ],
+    );
+    let release = |names: &[&str]| {
+        let parts: String = names
+            .iter()
+            .map(|n| part(n, "character", Some("CC-BY-4.0")))
+            .collect();
+        let mut files = vec![("astra-gi.toml".to_owned(), manifest(&parts).into_bytes())];
+        files.extend(names.iter().map(|n| ((*n).to_owned(), bundle.clone())));
+        zip_of(&files)
+    };
+    let limits = astra_game_launcher::Limits {
+        max_uncompressed_bytes: 256 << 10,
+        ..Default::default()
+    };
+    let content = |zip: &[u8]| {
+        astra_game_launcher::GiPackage::open_with_limits(zip, &common::sha(zip), &limits)
+            .unwrap()
+            .content()
+            .unwrap()
+    };
+    let one = content(&release(&["characters/a.astrachar"]));
+    assert!(one.refusals.is_empty(), "{:?}", one.refusals);
+    let two = content(&release(&[
+        "characters/a.astrachar",
+        "characters/b.astrachar",
+    ]));
+    let refused: Vec<_> = two
+        .refusals
+        .iter()
+        .map(|e| (e.code, e.param("path"), e.param("reason")))
+        .collect();
+    assert_eq!(
+        refused,
+        [(
+            codes::CONTENT_FORMAT,
+            Some("characters/b.astrachar"),
+            Some("too-large")
+        )]
+    );
+    // With the default limits, both fit.
+    let both = release(&["characters/a.astrachar", "characters/b.astrachar"]);
+    let r = astra_game_launcher::GiPackage::open(&both, &common::sha(&both))
+        .unwrap()
+        .content()
+        .unwrap();
+    assert!(r.refusals.is_empty(), "{:?}", r.refusals);
+}

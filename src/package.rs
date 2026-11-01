@@ -9,7 +9,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::io::{Cursor, Read};
 
 use serde::Serialize;
-use zip::{CompressionMethod, ZipArchive};
+use zip::ZipArchive;
 
 use crate::digest::{normalize_hex, sha256_hex};
 use crate::error::{LauncherError, Result, codes};
@@ -78,6 +78,8 @@ pub struct GiPackage {
     pub(crate) inbox_files: Vec<crate::pack_inbox::InboxPack>,
     /// Every file of the zip, folders left out: (index, name, size), in the zip's order.
     entries: Vec<(usize, String, u64)>,
+    /// What it was opened with: [`GiPackage::content`] reads the bundles inside it within them.
+    limits: Limits,
 }
 
 impl std::fmt::Debug for GiPackage {
@@ -202,7 +204,9 @@ impl GiPackage {
         // Before anything is read out of it, or decided from it: the zip is one archive to every
         // reader (`zip_consistency`), so what is checked below is what a reader of local headers,
         // the catalogue's ingest among them, would read too. The entry cap above bounds its work.
-        crate::zip_consistency::check(&mut ar, zip, limits.max_uncompressed_bytes)?;
+        // One budget for this zip and every pack inside it that is read below.
+        let mut budget = crate::zip_consistency::Budget::new(limits.max_uncompressed_bytes);
+        crate::zip_consistency::check(&mut ar, zip, &mut budget)?;
 
         // Every entry is checked, extracted or not.
         let mut files: Vec<(usize, String, u64)> = Vec::new();
@@ -231,14 +235,9 @@ impl GiPackage {
             if f.is_symlink() {
                 return Err(unsafe_entry(&raw_name, "symlink"));
             }
-            if f.encrypted() {
-                return Err(unsafe_entry(&raw_name, "encrypted"));
-            }
-            if !matches!(
-                f.compression(),
-                CompressionMethod::Stored | CompressionMethod::Deflated
-            ) {
-                return Err(unsafe_entry(&raw_name, "compression"));
+            if let Some(reason) = crate::zip_consistency::unreadable(f.encrypted(), f.compression())
+            {
+                return Err(unsafe_entry(&raw_name, reason));
             }
             if !seen.insert(name.to_lowercase()) {
                 return Err(unsafe_entry(&raw_name, "duplicate"));
@@ -385,7 +384,7 @@ impl GiPackage {
                 &f.entry,
                 &bytes,
                 &manifest.integration.id,
-                limits.max_uncompressed_bytes,
+                &mut budget,
             )?;
             if inbox_files.iter().any(|p| p.uid == uid) {
                 return Err(LauncherError::new(codes::PACK_INBOX_INVALID)
@@ -419,6 +418,7 @@ impl GiPackage {
             game_files,
             inbox_files,
             entries: files,
+            limits: limits.clone(),
         })
     }
 
@@ -504,7 +504,8 @@ impl GiPackage {
 
     /// `[[integration.content]]` against this release's files ([`crate::content::judge`]): every
     /// file of the zip is one it may name, each with a content-typed extension has its first bytes
-    /// read ([`crate::content::is_content_typed`]), and each declared part is read whole. Never
+    /// read ([`crate::content::is_content_typed`]), and each declared part is read whole; the
+    /// `.astrachar` bundles inside it within one budget of the limits it was opened with. Never
     /// asked by an install: what a catalogue's ingest and `gi-probe check` ask before a release is
     /// listed.
     pub fn content(&self) -> Result<crate::content::Report> {
@@ -526,7 +527,8 @@ impl GiPackage {
                 found.insert(name.clone());
             }
         }
-        crate::content::judge(self.manifest.content(), &found, &present, |path| {
+        let budget = self.limits.max_uncompressed_bytes;
+        crate::content::judge(self.manifest.content(), &found, &present, budget, |path| {
             let &(index, ref name, size) = self
                 .entries
                 .iter()

@@ -688,6 +688,123 @@ fn the_pack_says_a_uid_of_this_integration() {
     );
 }
 
+/// A pack is held to what the release around it is (`zip_consistency::check_nested`) before its
+/// uid is believed: one archive to every reader — a field that renames an entry for some readers,
+/// a byte before its first entry — and no entry no reader may read (encrypted: here over the
+/// stored-dd trick its check passes over; another method), each refused with `pack` naming it.
+/// The same pack without the one thing opens.
+#[test]
+fn a_pack_is_held_to_what_the_release_is() {
+    use common::rawzip::{Raw, archive, descriptor};
+    let toml = format!("[animpack]\nuid = \"{UID}\"\n");
+    let pack = |clip: Raw| archive(&[Raw::stored("animpack.toml", toml.as_bytes()), clip]);
+    let one = |p: Vec<u8>| with_packs(INTO_INBOX, "1.0.0", &[(PACK_ENTRY, p)]);
+    let clip = || Raw::stored("clips/climb.vrma", b"glTF fake vrma");
+    open(&one(pack(clip()))).expect("the near miss: the same pack, nothing wrong with it");
+
+    let upath = {
+        let mut body = vec![1u8];
+        body.extend_from_slice(&crc32fast::hash(b"clips/climb.vrma").to_le_bytes());
+        body.extend_from_slice(b"clips/run.exe");
+        let mut f = 0x7075u16.to_le_bytes().to_vec();
+        f.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        f.extend_from_slice(&body);
+        f
+    };
+    let mut hidden = b"x".to_vec();
+    hidden.extend_from_slice(&descriptor(crc32fast::hash(b"x"), 1, 1));
+    hidden.extend_from_slice(b"PK\x03\x04 the next header, for a reader of local headers");
+    for (why, clip, code, reason) in [
+        (
+            "a Unicode Path field",
+            Raw {
+                local_extra: upath.clone(),
+                central_extra: upath.clone(),
+                ..clip()
+            },
+            codes::ZIP_INCONSISTENT,
+            "unicode-path",
+        ),
+        (
+            "a byte before the clip",
+            Raw {
+                before: vec![0],
+                ..clip()
+            },
+            codes::ZIP_INCONSISTENT,
+            "gap",
+        ),
+        (
+            "an encrypted entry hiding a descriptor",
+            Raw {
+                flags: (1 << 3) | 1,
+                ..Raw::streamed("clips/climb.vrma", &hidden)
+            },
+            codes::ZIP_UNSAFE_ENTRY,
+            "encrypted",
+        ),
+        (
+            "an entry of another method",
+            Raw {
+                method: 12,
+                ..clip()
+            },
+            codes::ZIP_UNSAFE_ENTRY,
+            "compression",
+        ),
+    ] {
+        let e = refusal(&one(pack(clip)));
+        assert_eq!(
+            (e.code, e.param("reason"), e.param("pack")),
+            (code, Some(reason), Some(PACK_ENTRY)),
+            "{why}: {e}"
+        );
+    }
+}
+
+/// Every pack of a release is read within the ONE budget of the limits it is opened with: two
+/// packs that each fit, together do not, and the second is refused `too-large` where a fresh
+/// budget per pack let N packs of a bomb cost N times what one may.
+#[test]
+fn every_pack_of_a_release_shares_its_one_budget() {
+    let zeros = vec![0u8; 150 << 10];
+    let pack = |uid: &str| {
+        zip(&[
+            E::File(
+                "animpack.toml",
+                format!("[animpack]\nuid = \"{uid}\"\n").as_bytes(),
+            ),
+            E::File("clips/zeros.bin", &zeros),
+        ])
+    };
+    let limits = astra_game_launcher::Limits {
+        max_uncompressed_bytes: 256 << 10,
+        ..Default::default()
+    };
+    let open_with = |z: &[u8]| GiPackage::open_with_limits(z, &sha(z), &limits);
+    open_with(&with_packs(
+        INTO_INBOX,
+        "1.0.0",
+        &[("packs/a.astrapack", pack("test.unity/a"))],
+    ))
+    .expect("one pack fits");
+    let two = with_packs(
+        INTO_INBOX,
+        "1.0.0",
+        &[
+            ("packs/a.astrapack", pack("test.unity/a")),
+            ("packs/b.astrapack", pack("test.unity/b")),
+        ],
+    );
+    let e = open_with(&two).unwrap_err();
+    assert_eq!(
+        (e.code, e.param("uncompressed"), e.param("pack")),
+        (codes::TOO_LARGE, Some("true"), Some("packs/b.astrapack")),
+        "{e}"
+    );
+    open(&two).expect("both fit the default limits");
+}
+
 /// Launcher 0.3.1 (Astra 0.2.7) and 0.4.1 refuse the placeholder as they parse the manifest, and
 /// the ledger of an install that handed the companion a pack is schema 5, which both refuse as
 /// too new — never an uninstall that would leave the pack in the companion.
