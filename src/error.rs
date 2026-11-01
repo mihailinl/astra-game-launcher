@@ -120,6 +120,14 @@ pub mod codes {
     /// Not a refusal of the launcher's: the anti-cheat entry a descriptor's claim carries when
     /// the walk stopped at its cap or a kernel driver (`*.sys`) ships beside the game.
     pub const ANTI_CHEAT_UNKNOWN: &str = "anti-cheat-unknown";
+    /// The anti-cheat entry (and an `anti-cheat` refusal's `kind`) for a game a marker of the
+    /// signed catalogue's `anticheat[]` names ([`crate::EngineSet::with_anti_cheat_markers`]): a
+    /// folder or a file of that name in its folder, or a service of that name whose image is
+    /// there.
+    pub const LISTED_ANTI_CHEAT: &str = "listed-anti-cheat";
+    /// The anti-cheat entry (and an `anti-cheat` refusal's `kind`) for a game whose folder a
+    /// kernel-mode driver service is installed from ([`crate::anti_cheat_services`], Windows).
+    pub const KERNEL_ANTI_CHEAT: &str = "kernel-anti-cheat";
     // `[integration.*]` (`crate::Manifest`) and what is checked before publishing
     // (`crate::Manifest::lint`, `crate::reserved`).
     /// `[integration.engine]` declares engine codes (`codes`) and `[target] engine` (`engine`,
@@ -211,6 +219,8 @@ pub mod codes {
         ENGINE_AMBIGUOUS,
         DESCRIPTOR_MISMATCH,
         ANTI_CHEAT_UNKNOWN,
+        LISTED_ANTI_CHEAT,
+        KERNEL_ANTI_CHEAT,
         ENGINE_UNDECLARED,
         NEEDS_NEWER_ASTRA,
         LOADER_POLICY_CONFLICT,
@@ -347,6 +357,12 @@ impl LauncherError {
             }
             codes::ANTI_CHEAT_UNKNOWN => {
                 "whether the game uses anti-cheat cannot be told from its folder"
+            }
+            codes::LISTED_ANTI_CHEAT => {
+                "the game carries an anti-cheat the games catalogue lists; mods there can get the account banned"
+            }
+            codes::KERNEL_ANTI_CHEAT => {
+                "the game installed a kernel-mode anti-cheat driver; mods there can get the account banned"
             }
             codes::ENGINE_UNDECLARED => {
                 "astra-gi.toml declares an engine but [target] engine does not name it"

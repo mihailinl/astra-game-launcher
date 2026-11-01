@@ -555,10 +555,19 @@ report then carries `error: {code, detail}` instead, and nothing was concluded.
   buffered, skipping to the one app by its size fields, with every length and the nesting depth
   bounded; anything corrupt answers `None`, never a panic. What it names is only a hint, which
   detection checks against the folder (relative, no `..`, no link on the way).
-- **Anti-cheat.** A game folder carrying EasyAntiCheat, BattlEye, GameGuard, XIGNCODE or HoYoverse protection is
-  refused, and so is a manifest whose `anti_cheat` is not `"none"`. A Steam app is also refused
-  (`anti-cheat`, kind `valve-anti-cheat`) when Steam's `appinfo.vdf` lists `category_8` ("Valve
-  Anti-Cheat enabled") in its `common/category`, at plan time and again at every launch. EVERY
+- **Anti-cheat.** A game folder carrying EasyAntiCheat, BattlEye, GameGuard, XIGNCODE, HoYoverse
+  protection, EA Javelin, ACE (Anti-Cheat Expert), EQU8 or Denuvo Anti-Cheat (one table of names,
+  `ANTI_CHEAT_SIGNATURES`) is refused, and so is a manifest whose `anti_cheat` is not `"none"`.
+  So is a game a marker of the signed catalogue's `anticheat[]` names
+  (`EngineSet::with_anti_cheat_markers`: a folder, a file, or a service whose image is in the
+  game's folder; `listed-anti-cheat`), and, on Windows, one whose folder a kernel-mode driver
+  service is installed from (`kernel-anti-cheat`; a system-wide driver elsewhere ties to no
+  game). These apply to every game, whatever engine detection found, and are checked before the
+  engine; every code is `ANTI_CHEAT_CODES`. A Steam app is also refused
+  (`anti-cheat`, kind `valve-anti-cheat`) when Steam's `appinfo.vdf` lists store category 8 ("Valve
+  Anti-Cheat enabled") in its `common/category`, at plan time and again at every launch. Steam's
+  other store categories are read too (`store_categories`, `online_game`: Online PvP 36, PvP 49,
+  MMO 20), but never refuse here: an online game is the frontend's offer rule. EVERY
   appinfo that answers is read (`GameTarget::steam_appinfo`, then every Steam install), and any
   one flagging VAC refuses. The game counts as checked only for a TRUSTED appid: the caller's, or
   the one the game folder proves through its library's `steamapps/appmanifest_*.acf` whose

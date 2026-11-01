@@ -17,6 +17,7 @@
 //! manifest names beside the exe, each one pinned by its digest and backed up when it replaces
 //! a game file.
 
+pub mod anti_cheat_services;
 mod ctx;
 mod detect;
 mod digest;
@@ -43,12 +44,12 @@ mod steam_userconfig;
 
 pub use ctx::{Ctx, Progress};
 pub use detect::{
-    Binary, Confidence, Detection, Engine, ExePick, detect, detect_with, detect_with_engines,
-    unity_version_parts,
+    ANTI_CHEAT_CODES, ANTI_CHEAT_SIGNATURES, AntiCheatSignature, Binary, Confidence, Detection,
+    Engine, ExePick, SignatureName, detect, detect_with, detect_with_engines, unity_version_parts,
 };
 pub use engines::{
-    Descriptor, EngineCode, EngineSet, Moderation, Origin, Skipped, is_reserved_code,
-    is_valid_engine_code,
+    AntiCheatMarker, AntiCheatMarkerKind, Descriptor, EngineCode, EngineSet, Moderation, Origin,
+    Skipped, is_reserved_code, is_valid_engine_code,
 };
 pub use error::{LauncherError, Result, codes};
 #[cfg(feature = "cli")]
@@ -88,7 +89,9 @@ pub use plan::{
 };
 pub use running::is_running;
 pub use steam_appinfo::{
-    launch_executable, launch_executables, steam_roots, valve_anti_cheat, valve_anti_cheat_of,
+    ONLINE_CATEGORIES, VAC_CATEGORY, launch_executable, launch_executables, online_codes,
+    online_game, steam_roots, store_categories, store_categories_of, valve_anti_cheat,
+    valve_anti_cheat_of,
 };
 pub use steam_userconfig::{launch_options_pass_doorstop, steam_user_launch_options};
 

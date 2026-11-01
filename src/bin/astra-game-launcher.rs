@@ -48,7 +48,7 @@ NOTES
   On Linux a game whose exe ends in .exe runs under Proton; its prefix defaults to
   <library>/steamapps/compatdata/<appid>/pfx.
   `plan`/`install` with `--appid N` refuse a game Steam flags as Valve Anti-Cheat protected
-  (appinfo's `common/category` holds `category_8`), read from --steam-root or Steam's usual
+  (appinfo's `common/category` lists store category 8), read from --steam-root or Steam's usual
   places (both: a wrong --steam-root does not switch Steam's usual places off). The appid is
   --appid, else the manifest's. When nothing answers, the plan says `vac-unchecked` and
   `install` needs --accept-vac-unchecked besides --yes. `launch` checks VAC again.

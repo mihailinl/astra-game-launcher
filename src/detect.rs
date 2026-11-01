@@ -46,11 +46,17 @@
 //! are data — the built-in engine descriptors `src/engines/builtin/{unity,godot,unreal}.toml`
 //! (`astra.engine/1`), evaluated by the one evaluator every descriptor goes through — and canary
 //! C1 holds them to launcher 0.4.1's code byte for byte. What stays code is here: the walk, the
-//! anti-cheat markers, the wrapper names, the one-program fallback; and `best()`'s order, in the
-//! evaluator. [`detect_with_engines`] adds **Pass B**: engine descriptors ([`crate::EngineSet`])
-//! asked only when Pass A answers `unknown` with no evidence and no hint used, so a descriptor
-//! can name a game nothing here recognised and can never change one it did (see
-//! [`crate::engines`]).
+//! anti-cheat signatures ([`ANTI_CHEAT_SIGNATURES`], one table), the wrapper names, the
+//! one-program fallback; and `best()`'s order, in the evaluator. [`detect_with_engines`] adds
+//! **Pass B**: engine descriptors ([`crate::EngineSet`]) asked only when Pass A answers
+//! `unknown` with no evidence and no hint used, so a descriptor can name a game nothing here
+//! recognised and can never change one it did (see [`crate::engines`]).
+//!
+//! **Anti-cheat** is asked of every game, after both passes, whatever named it (merged plan
+//! §2.4): the folder signatures, the signed catalogue's markers an [`crate::EngineSet`] carries,
+//! and a kernel driver installed from the game's folder ([`crate::anti_cheat_services`]). Every
+//! code the launcher emits is [`ANTI_CHEAT_CODES`]; planning refuses on each
+//! ([`crate::plan_install_in`]).
 //!
 //! Neither pass follows a link or waits on a FIFO; 0.4.1 did both in a few reads, a declared
 //! divergence (`tests/corpus/divergence.txt`).
@@ -62,7 +68,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::engines::{self, EngineCode, EngineSet, NamedEngine};
-use crate::error::{LauncherError, Result};
+use crate::error::{LauncherError, Result, codes};
 
 const MAX_DEPTH: usize = 4;
 pub(crate) const MAX_ENTRIES: usize = 5000;
@@ -161,7 +167,12 @@ pub struct Detection {
     /// The game's program, relative to the folder detected.
     pub exe: Option<PathBuf>,
     pub binary: Binary,
-    /// Codes: "easy-anti-cheat", "battleye", "gameguard", "xigncode", "hoyo-protect".
+    /// The anti-cheat seen, each code once: [`ANTI_CHEAT_CODES`] but `valve-anti-cheat` (a
+    /// plan's refusal only). First the folder signatures' ([`ANTI_CHEAT_SIGNATURES`], in walk
+    /// order); on a Pass B answer, then its descriptor's own markers' codes and
+    /// `anti-cheat-unknown`; then, for every game, `listed-anti-cheat` (a catalogue marker,
+    /// [`EngineSet::with_anti_cheat_markers`]) and `kernel-anti-cheat` (a kernel driver whose
+    /// image is in this folder, [`crate::anti_cheat_services`]).
     pub anti_cheat: Vec<String>,
     /// What made the call, relative to the folder detected: the `<stem>_Data` folder (Unity),
     /// the `<Project>` folder (Unreal), the `.pck` (Godot; the program itself when the pck is
@@ -302,28 +313,159 @@ fn builtin_walk(root: &Path) -> Result<Walk> {
     walk(root, &engines::builtin().list_at_limit())
 }
 
+/// What one anti-cheat signature matches: a name in the walk, compared ignoring ASCII case. Every
+/// name here is spelled in lower case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureName {
+    /// A folder of exactly this name.
+    Folder(&'static str),
+    /// A file of exactly this name.
+    File(&'static str),
+    /// A file whose name starts with the first and ends with the second.
+    FileAround(&'static str, &'static str),
+}
+
+impl SignatureName {
+    /// Whether the walk's entry `lower` (its name, lower-cased) is a folder (`is_dir`) this
+    /// names.
+    fn matches(self, lower: &str, is_dir: bool) -> bool {
+        match self {
+            SignatureName::Folder(f) => is_dir && lower == f,
+            SignatureName::File(f) => !is_dir && lower == f,
+            SignatureName::FileAround(start, end) => {
+                !is_dir && lower.starts_with(start) && lower.ends_with(end)
+            }
+        }
+    }
+}
+
+/// One anti-cheat the walk can see in a game folder, by the names it ships under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AntiCheatSignature {
+    /// The code [`Detection::anti_cheat`] carries, and an `anti-cheat` refusal's `kind`.
+    pub code: &'static str,
+    /// The names it is seen by; any one is enough.
+    pub names: &'static [SignatureName],
+}
+
+/// The anti-cheat signatures (merged plan §2.4): the ONE table of the anti-cheat this launcher
+/// sees in a game folder by name, never by which game it is. The first five are launcher 0.4.1's
+/// markers (main 73bf11e, `detect.rs` :303-332), unchanged: canary C1 holds them to 0.4.1's.
+/// The other four are marketplace plan A§4.5's extended ones, each name beside its public source;
+/// no real install of them was on hand (docs/ENGINE-DESCRIPTORS-DEBT.md row 23), and each is a
+/// declared divergence from 0.4.1 (`tests/corpus/divergence.txt`, `extended-anti-cheat-<code>`).
+///
+/// Sources cited: SteamDB's file detection rules, built from Steam depot file lists
+/// (github.com/SteamDatabase/FileDetectionRuleSets, `rules.ini` `[AntiCheat]`, commit 243cf74);
+/// BinaryObjectScanner's Denuvo checks (github.com/SabreTools/BinaryObjectScanner,
+/// `BinaryObjectScanner/Protection/Denuvo.cs`, commit 0c23b23), taken from Doom Eternal's Steam
+/// depot 782332, and the DRML entry built on it (github.com/TheRogueArchivist/DRML,
+/// `Entries/Denuvo_Anti-Cheat/Denuvo_Anti-Cheat.md`, commit 4498cc6).
+pub const ANTI_CHEAT_SIGNATURES: &[AntiCheatSignature] = &[
+    AntiCheatSignature {
+        code: "easy-anti-cheat",
+        names: &[
+            SignatureName::Folder("easyanticheat"),
+            SignatureName::File("easyanticheat_eos_setup.exe"),
+            SignatureName::File("start_protected_game.exe"),
+        ],
+    },
+    AntiCheatSignature {
+        code: "battleye",
+        names: &[
+            SignatureName::Folder("battleye"),
+            SignatureName::FileAround("beservice", ".exe"),
+        ],
+    },
+    AntiCheatSignature {
+        code: "gameguard",
+        names: &[SignatureName::Folder("gameguard")],
+    },
+    AntiCheatSignature {
+        code: "xigncode",
+        names: &[SignatureName::Folder("xigncode")],
+    },
+    // HoYoverse's protection.
+    AntiCheatSignature {
+        code: "hoyo-protect",
+        names: &[
+            SignatureName::File("mhypbase.dll"),
+            SignatureName::File("hoyokprotect.sys"),
+        ],
+    },
+    // EA Javelin (EA AntiCheat). SteamDB `EA_AntiCheat = EAAntiCheat\.Installer\.exe$`; and
+    // Steam's own launch entries on a real appinfo.vdf (this desk's, 2026-10-31) start
+    // `EAAntiCheat.GameServiceLauncher.exe` from the game's folder. Both: `EAAntiCheat.*.exe`.
+    AntiCheatSignature {
+        code: "ea-javelin",
+        names: &[SignatureName::FileAround("eaanticheat.", ".exe")],
+    },
+    // ACE, Tencent's Anti-Cheat Expert. SteamDB `AntiCheatExpert[] = AntiCheatExpert/` and
+    // `AntiCheatExpert[] = AceAntibotClient/`: two folders.
+    AntiCheatSignature {
+        code: "anti-cheat-expert",
+        names: &[
+            SignatureName::Folder("anticheatexpert"),
+            SignatureName::Folder("aceantibotclient"),
+        ],
+    },
+    // EQU8. SteamDB `EQU8 = equ8_conf\.json$`.
+    AntiCheatSignature {
+        code: "equ8",
+        names: &[SignatureName::File("equ8_conf.json")],
+    },
+    // Denuvo Anti-Cheat (Irdeto). BinaryObjectScanner's path checks, from Doom Eternal's depot:
+    // `denuvo-anti-cheat.sys`, `denuvo-anti-cheat-update-service.exe`,
+    // `denuvo-anti-cheat-runtime.dll`, `denuvo-anti-cheat-update-service-launcher.dll`,
+    // `denuvo-anti-cheat-crash-report.exe`, `denuvo-anti-cheat-installer.zip` (all
+    // `denuvo-anti-cheat*`), and `Denuvo Anti-Cheat Installer.exe`, "seen in the folder of the
+    // main game executable".
+    AntiCheatSignature {
+        code: "denuvo-anti-cheat",
+        names: &[
+            SignatureName::FileAround("denuvo-anti-cheat", ""),
+            SignatureName::File("denuvo anti-cheat installer.exe"),
+        ],
+    },
+];
+
+const SIGNATURES: usize = ANTI_CHEAT_SIGNATURES.len();
+
+/// [`ANTI_CHEAT_CODES`], built from the tables that spell each code once.
+const ANTI_CHEAT_CODE_LIST: [&str; SIGNATURES + 4] = {
+    let mut out = [""; SIGNATURES + 4];
+    let mut i = 0;
+    while i < SIGNATURES {
+        out[i] = ANTI_CHEAT_SIGNATURES[i].code;
+        i += 1;
+    }
+    out[SIGNATURES] = codes::LISTED_ANTI_CHEAT;
+    out[SIGNATURES + 1] = codes::KERNEL_ANTI_CHEAT;
+    out[SIGNATURES + 2] = codes::ANTI_CHEAT_UNKNOWN;
+    out[SIGNATURES + 3] = crate::plan::VALVE_ANTI_CHEAT;
+    out
+};
+
+/// Every anti-cheat code the launcher itself emits (K16): in [`Detection::anti_cheat`] and as an
+/// `anti-cheat` refusal's `kind`. The signatures' ([`ANTI_CHEAT_SIGNATURES`]), in their order;
+/// then `listed-anti-cheat` (a marker of the signed catalogue's `anticheat[]`, given to
+/// [`EngineSet::with_anti_cheat_markers`]); `kernel-anti-cheat` (a kernel driver installed from
+/// the game's folder: [`crate::anti_cheat_services`], Windows); `anti-cheat-unknown` (a Pass B
+/// answer the walk cannot vouch for, never a refusal); and `valve-anti-cheat` (Steam's VAC flag,
+/// a plan's refusal only, never in a [`Detection`]). An `anti-cheat` refusal may also carry the
+/// manifest's own `[target] anti_cheat`, and a Pass B answer the codes its descriptor's own
+/// markers declare: those are the data's words, not the launcher's.
+pub const ANTI_CHEAT_CODES: &[&str] = &ANTI_CHEAT_CODE_LIST;
+
+/// The signatures' codes in the walk's entries, each once, in walk order: Pass A's anti-cheat.
 pub(crate) fn anti_cheat_of(entries: &[Entry]) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     for e in entries {
         let n = e.name().to_ascii_lowercase();
-        let kind = if e.is_dir {
-            match n.as_str() {
-                "easyanticheat" => Some("easy-anti-cheat"),
-                "battleye" => Some("battleye"),
-                "gameguard" => Some("gameguard"),
-                "xigncode" => Some("xigncode"),
-                _ => None,
-            }
-        } else if n == "easyanticheat_eos_setup.exe" || n == "start_protected_game.exe" {
-            Some("easy-anti-cheat")
-        } else if n.starts_with("beservice") && n.ends_with(".exe") {
-            Some("battleye")
-        } else if n == "mhypbase.dll" || n == "hoyokprotect.sys" {
-            // HoYoverse's protection (Genshin Impact, Honkai: Star Rail, Zenless Zone Zero).
-            Some("hoyo-protect")
-        } else {
-            None
-        };
+        let kind = ANTI_CHEAT_SIGNATURES
+            .iter()
+            .find(|s| s.names.iter().any(|name| name.matches(&n, e.is_dir)))
+            .map(|s| s.code);
         if let Some(k) = kind
             && !found.iter().any(|f| f == k)
         {
@@ -333,9 +475,51 @@ pub(crate) fn anti_cheat_of(entries: &[Entry]) -> Vec<String> {
     found
 }
 
-/// The anti-cheat a game folder carries.
-pub(crate) fn anti_cheat_scan(game_dir: &Path) -> Result<Vec<String>> {
-    Ok(anti_cheat_of(&builtin_walk(game_dir)?.entries))
+/// The anti-cheat signals every detection and every plan adds after Pass A (and Pass B), for
+/// EVERY game, whatever named it: the catalogue's markers in `engines` over the walk
+/// (`listed-anti-cheat`), and the machine's services tied to `game_dir` (`kernel-anti-cheat`,
+/// and `listed-anti-cheat` for a service a marker names; Windows only). Nothing when `engines`
+/// holds no marker and no service is tied to the folder.
+fn anti_cheat_beyond_the_walk(
+    game_dir: &Path,
+    entries: &[Entry],
+    engines: &EngineSet,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if engines.markers().listed_in(entries) {
+        out.push(codes::LISTED_ANTI_CHEAT.to_owned());
+    }
+    for code in crate::anti_cheat_services::of_game(
+        game_dir,
+        crate::anti_cheat_services::ServiceTree::System,
+        engines,
+    ) {
+        if !out.contains(&code) {
+            out.push(code);
+        }
+    }
+    out
+}
+
+/// `more` added to `to`, each once, after what it holds.
+fn add_codes(to: &mut Vec<String>, more: Vec<String>) {
+    for c in more {
+        if !to.contains(&c) {
+            to.push(c);
+        }
+    }
+}
+
+/// The anti-cheat a game folder carries, as planning asks: the signatures over the built-in walk,
+/// then what [`anti_cheat_beyond_the_walk`] adds with `engines`.
+pub(crate) fn anti_cheat_scan(game_dir: &Path, engines: &EngineSet) -> Result<Vec<String>> {
+    let walked = builtin_walk(game_dir)?;
+    let mut found = anti_cheat_of(&walked.entries);
+    add_codes(
+        &mut found,
+        anti_cheat_beyond_the_walk(game_dir, &walked.entries, engines),
+    );
+    Ok(found)
 }
 
 /// Whether `exe` (components below `game_dir`) is a program the built-in walk lists, or Steam's
@@ -510,7 +694,8 @@ pub fn detect(game_dir: &Path) -> Result<Detection> {
 /// [`Detection::hint_used`] says so. Any other hint (missing, outside the folder, a launcher)
 /// is ignored, and `hint_used` is `false`.
 ///
-/// This is Pass A alone: exactly [`detect_with_engines`] with an empty [`EngineSet`].
+/// This is Pass A alone: exactly [`detect_with_engines`] with an empty [`EngineSet`] (so a kernel
+/// anti-cheat driver installed from this folder still shows, [`crate::anti_cheat_services`]).
 pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detection> {
     detect_with_engines(game_dir, launch_hint, &EngineSet::empty())
 }
@@ -524,22 +709,28 @@ pub fn detect_with(game_dir: &Path, launch_hint: Option<&str>) -> Result<Detecti
 /// [`Detection::descriptor_sha256`], perhaps [`Detection::version`]), or find that descriptors of
 /// one standing disagree ([`Detection::engine_candidates`], `engine-ambiguous`), or say nothing,
 /// in which case this is exactly [`detect_with`]'s answer.
+///
+/// Then, whichever pass answered and whatever it said, the anti-cheat signals beyond the folder
+/// signatures join [`Detection::anti_cheat`]: `engines`' catalogue markers
+/// ([`EngineSet::with_anti_cheat_markers`], `listed-anti-cheat`) over the same walk, and a kernel
+/// driver installed from this folder ([`crate::anti_cheat_services`], `kernel-anti-cheat`). They
+/// only add: with no marker and no such service this is exactly the passes' answer.
 pub fn detect_with_engines(
     game_dir: &Path,
     launch_hint: Option<&str>,
     engines: &EngineSet,
 ) -> Result<Detection> {
     let (walked, found) = pass_a_of(game_dir, launch_hint)?;
-    if engines.is_empty() || !found.open_to_descriptors() {
-        return Ok(found);
-    }
-    Ok(engines::pass_b(
-        game_dir,
-        launch_hint,
-        &walked,
-        engines,
-        found,
-    ))
+    let mut found = if engines.is_empty() || !found.open_to_descriptors() {
+        found
+    } else {
+        engines::pass_b(game_dir, launch_hint, &walked, engines, found)
+    };
+    add_codes(
+        &mut found.anti_cheat,
+        anti_cheat_beyond_the_walk(game_dir, &walked.entries, engines),
+    );
+    Ok(found)
 }
 
 /// Pass A, as [`detect_with_engines`] makes it: the built-ins' walk of `game_dir`, and their

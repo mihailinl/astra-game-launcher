@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 pub mod identity;
+pub mod scrape;
 
 use std::collections::BTreeMap;
 use std::fs;

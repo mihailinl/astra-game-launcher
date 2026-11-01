@@ -1073,6 +1073,12 @@ pub fn plan_install(
 /// - **`[integration.engine]`**: the manifest's own descriptor must be the very one that named
 ///   the engine, `descriptor-mismatch{want, got}` otherwise (`got` = `none` when no descriptor
 ///   did) — and its own refusal when it is no descriptor at all.
+/// - **Anti-cheat**, before the engine is checked and for every game, whatever engine it has:
+///   `anti-cheat{kind}`, `kind` the first of a folder signature's code
+///   ([`crate::ANTI_CHEAT_SIGNATURES`]), `listed-anti-cheat` (a marker `engines` carries,
+///   [`EngineSet::with_anti_cheat_markers`]) and `kernel-anti-cheat` (a kernel driver whose
+///   image is in the game's folder, [`crate::anti_cheat_services`]); then VAC
+///   (`valve-anti-cheat`). Every code is in [`crate::ANTI_CHEAT_CODES`].
 ///
 /// The plan pins the descriptor that named the engine ([`InstallPlan::engine_descriptor`]) and
 /// records `provenance`; [`crate::install`] plans again with both.
@@ -1138,7 +1144,11 @@ pub(crate) fn plan_install_with(
             .with("platform", platform)
             .with("supported", m.target.platforms.join(",")));
     }
-    if let Some(kind) = anti_cheat_scan(&game_dir)?.into_iter().next() {
+    // Every anti-cheat signal the launcher reads (merged plan §2.4), before the engine check: the
+    // folder signatures, the catalogue's markers `how.engines` carries, and a kernel driver
+    // installed from the game's folder. Steam's store categories (an online game) never refuse
+    // here; that is the daemon's offer rule.
+    if let Some(kind) = anti_cheat_scan(&game_dir, how.engines)?.into_iter().next() {
         return Err(LauncherError::new(codes::ANTI_CHEAT).with("kind", kind));
     }
     // Cleared only for an appid the caller gave or the folder proves; the manifest's appid can

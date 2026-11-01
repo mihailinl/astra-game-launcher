@@ -305,6 +305,84 @@ fn fixtures() -> BTreeSet<&'static str> {
         restore_partial();
         pinned.insert("restore-partial");
     }
+
+    // extended-anti-cheat-* (merged plan §2.4, A§4.5)
+    pinned.extend(extended_anti_cheat());
+    pinned
+}
+
+/// Rows `extended-anti-cheat-<code>`: each name its public source gives (src/detect.rs cites
+/// them), beside a Unity game. 0.4.1 sees no anti-cheat and plans; 0.5.0 reports the code and
+/// refuses `anti-cheat` with it as `kind`. Nothing else in the detection differs. Spelled here,
+/// not read from the table, so a name the table loses turns its row red.
+fn extended_anti_cheat() -> Vec<&'static str> {
+    /// The row's id, the code, and the names (`true`: a folder).
+    type Row = (&'static str, &'static str, &'static [(&'static str, bool)]);
+    const ROWS: &[Row] = &[
+        (
+            "extended-anti-cheat-ea-javelin",
+            "ea-javelin",
+            &[
+                ("EAAntiCheat.Installer.exe", false),
+                ("EAAntiCheat.GameServiceLauncher.exe", false),
+            ],
+        ),
+        (
+            "extended-anti-cheat-anti-cheat-expert",
+            "anti-cheat-expert",
+            &[("AntiCheatExpert", true), ("AceAntibotClient", true)],
+        ),
+        (
+            "extended-anti-cheat-equ8",
+            "equ8",
+            &[("equ8_conf.json", false)],
+        ),
+        (
+            "extended-anti-cheat-denuvo-anti-cheat",
+            "denuvo-anti-cheat",
+            &[
+                ("denuvo-anti-cheat.sys", false),
+                ("denuvo-anti-cheat-update-service.exe", false),
+                ("denuvo-anti-cheat-runtime.dll", false),
+                ("Denuvo Anti-Cheat Installer.exe", false),
+            ],
+        ),
+    ];
+    let z = placing("astra-probe.txt", b"probe");
+    let mut pinned = Vec::new();
+    for (row, code, names) in ROWS {
+        for (name, is_dir) in *names {
+            let t = Tmp::new("div-extended-ac");
+            mono_game(t.path());
+            if *is_dir {
+                write(&t.join(&format!("{name}/readme.txt")), b"x");
+            } else {
+                write(&t.join(name), b"MZ");
+            }
+            let old = answered(legacy(t.path(), None));
+            assert!(
+                old.anti_cheat.is_empty(),
+                "{name}: 0.4.1 sees no anti-cheat"
+            );
+            let new = detect_with(t.path(), None).unwrap();
+            assert_eq!(new.anti_cheat, [*code], "{name}: 0.5.0 sees {code}");
+            let mut same = new.clone();
+            same.anti_cheat.clear();
+            assert_eq!(json(&same), json(&old), "{name}: nothing else differs");
+
+            let profile = Tmp::new("div-extended-ac-profile");
+            assert!(
+                legacy::plan(t.path(), &profile.join("p"), &z).is_ok(),
+                "{name}: 0.4.1 plans"
+            );
+            assert_eq!(
+                ours::plan(t.path(), &profile.join("p"), &z).unwrap_err(),
+                format!("anti-cheat {{\"kind\": \"{code}\"}}"),
+                "{name}: 0.5.0 refuses"
+            );
+        }
+        pinned.push(*row);
+    }
     pinned
 }
 

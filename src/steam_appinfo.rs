@@ -2,8 +2,17 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Which program Steam launches for an app, read from Steam's own `appcache/appinfo.vdf`, and
-//! where Steam lives on this machine.
+//! Which program Steam launches for an app and which store categories Steam lists for it, read
+//! from Steam's own `appcache/appinfo.vdf`, and where Steam lives on this machine.
+//!
+//! **The one Steam category table (K16)** is here: [`VAC_CATEGORY`] and [`ONLINE_CATEGORIES`].
+//! Nothing else in the launcher (nor, on the daemon's side, in Astra) spells a category: the
+//! daemon's online-game offer rule asks [`online_game`].
+//!
+//! Steam's own anti-cheat disclosure (the store's "kernel-level anti-cheat" section, 2024) is NOT
+//! in `appinfo.vdf`: it is the store web API's (`IStoreBrowseService/GetItems`,
+//! `extra_details.anticheat`), and a real file lacks it for a game that discloses one, so the
+//! launcher cannot read it offline (docs/ENGINE-DESCRIPTORS-DEBT.md row 25).
 //!
 //! The file is binary, large (100+ MB on a big account) and written by someone else, so it is
 //! read as untrusted: buffered, skipping every other app by its size field, every length and
@@ -43,12 +52,29 @@ const MAX_TABLE_STRINGS: u32 = 1 << 20;
 /// The only part of an app that is kept; the rest is walked over without being stored, so a
 /// large or hostile app costs no memory beyond its bytes.
 const LAUNCH_PATH: &[&str] = &["appinfo", "config", "launch"];
-/// Where Steam lists an app's store categories (`category_8` is "Valve Anti-Cheat enabled").
+/// Where Steam lists an app's store categories: one key `category_<id>` per category, valued
+/// non-zero (`category_8` is "Valve Anti-Cheat enabled").
 const CATEGORY_PATH: &[&str] = &["appinfo", "common", "category"];
+/// A category's key below [`CATEGORY_PATH`], before its id.
+const CATEGORY_KEY: &str = "category_";
 /// The subtrees of an app that are kept; everything else is walked over.
 const KEPT: &[&[&str]] = &[LAUNCH_PATH, CATEGORY_PATH];
-/// Steam's store category "Valve Anti-Cheat enabled".
-const VAC_CATEGORY: &str = "category_8";
+/// Steam's store category "Valve Anti-Cheat enabled": the launcher's VAC refusal
+/// ([`valve_anti_cheat`]). Its store name, from Steam's store API
+/// (`store.steampowered.com/api/appdetails?appids=320`, Half-Life 2: Deathmatch, 2026-10-31):
+/// `{"id":8,"description":"Valve Anti-Cheat enabled"}`.
+pub const VAC_CATEGORY: u32 = 8;
+/// The store categories that make an app an ONLINE game (marketplace plan A§4.5 "Online games
+/// (H6)", merged plan §2.4), each with the code [`online_game`] answers. Never a refusal of the
+/// launcher's: the daemon's offer rule (no engine-wide foundation for an online game without a
+/// moderator's `games[]` row). Each id as Steam's store API names it
+/// (`store.steampowered.com/api/appdetails`, 2026-10-31), and as a real `appinfo.vdf` (this
+/// desk's, 683 apps) carries it under `common/category`:
+/// - 36 `{"id":36,"description":"Online PvP"}` — PUBG: BATTLEGROUNDS (578080), Rust (252490);
+/// - 49 `{"id":49,"description":"PvP"}` — the same two;
+/// - 20 `{"id":20,"description":"MMO"}` — The Elder Scrolls Online (306130) and Rust (252490)
+///   in the store API; Rust, DayZ (221100) and World of Tanks (1407200) in the real file.
+pub const ONLINE_CATEGORIES: &[(u32, &str)] = &[(36, "online-pvp"), (49, "pvp"), (20, "mmo")];
 /// Nesting of KeyValues objects. Real apps nest about 8 deep.
 const MAX_DEPTH: usize = 64;
 
@@ -97,7 +123,7 @@ pub fn launch_executables(
 }
 
 /// Whether Steam marks `appid` as protected by Valve Anti-Cheat: its `appinfo/common/category`
-/// holds `category_8` ("Valve Anti-Cheat enabled") with a value other than `0`.
+/// lists [`VAC_CATEGORY`] ("Valve Anti-Cheat enabled") with a value other than `0`.
 ///
 /// `None` means NOT KNOWN, never "no": the file is missing, unreadable or corrupt, the app is not
 /// in it, or its entry has no `common/category` object (Steam keeps sparse entries for apps it
@@ -120,20 +146,93 @@ pub fn valve_anti_cheat_of(
         .collect()
 }
 
+/// The store categories Steam lists for `appid` (`appinfo/common/category`'s `category_<id>`
+/// keys valued other than `0`), ascending, each once. Read under the same bounds as
+/// [`valve_anti_cheat`], and `None` exactly when it is: NOT KNOWN (no file, no app, a sparse entry
+/// with no `common/category` object). `Some` of an empty list is an app Steam lists no category
+/// for. A key spelled otherwise than `category_<id>` (`category_08`, `category_x`) is no
+/// category, and of two keys for one id the first counts, as for VAC.
+pub fn store_categories(appinfo_path: &Path, appid: u32) -> Option<Vec<u32>> {
+    store_categories_of(appinfo_path, &[appid]).remove(&appid)
+}
+
+/// [`store_categories`] for many apps in ONE pass over the file. An app whose categories are not
+/// known is absent from the map; a missing or corrupt file gives an empty map.
+pub fn store_categories_of(
+    appinfo_path: &Path,
+    appids: &[u32],
+) -> std::collections::BTreeMap<u32, Vec<u32>> {
+    let wanted: std::collections::BTreeSet<u32> = appids.iter().copied().collect();
+    read_apps(appinfo_path, &wanted)
+        .into_iter()
+        .filter_map(|(id, app)| categories_of(&app).map(|c| (id, c)))
+        .collect()
+}
+
+/// Which of [`ONLINE_CATEGORIES`] `appid` is listed in: their codes (`online-pvp`, `pvp`,
+/// `mmo`), in that table's order. `Some` of an empty list is KNOWN and none applies; `None` is not
+/// known ([`store_categories`]), never "not online".
+pub fn online_game(appinfo_path: &Path, appid: u32) -> Option<Vec<&'static str>> {
+    store_categories(appinfo_path, appid).map(|c| online_codes(&c))
+}
+
+/// The codes of the [`ONLINE_CATEGORIES`] among `categories` (as [`store_categories`] gives
+/// them), in that table's order: what [`online_game`] answers, for categories already read.
+pub fn online_codes(categories: &[u32]) -> Vec<&'static str> {
+    ONLINE_CATEGORIES
+        .iter()
+        .filter(|(id, _)| categories.contains(id))
+        .map(|(_, code)| *code)
+        .collect()
+}
+
 /// One app's VAC flag from its parsed KeyValues; `None` when its categories are not there.
 fn vac_of(app: &Kv) -> Option<bool> {
+    categories_of(app).map(|c| c.contains(&VAC_CATEGORY))
+}
+
+/// One app's store categories from its parsed KeyValues ([`store_categories`]); `None` when its
+/// `common/category` object is not there.
+fn categories_of(app: &Kv) -> Option<Vec<u32>> {
     let common = ["appinfo", "common"]
         .iter()
         .try_fold(app, |kv, key| kv.get(key))?;
     // No `category` object at all is NOT KNOWN: every real game lists some category, so its
     // absence says the entry is incomplete, not that VAC is off.
     let category = common.get("category")?;
-    category.object()?;
-    Some(category.get(VAC_CATEGORY).is_some_and(|v| match v {
-        Kv::String(s) => s.trim() != "0",
-        Kv::Int(n) => *n != 0,
-        Kv::Object(_) => true,
-    }))
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for (key, value) in category.object()? {
+        let Some(id) = category_id(key) else {
+            continue;
+        };
+        // The first key for an id is the one that counts (`Kv::get`'s, which VAC always read).
+        if !seen.insert(id) {
+            continue;
+        }
+        let listed = match value {
+            Kv::String(s) => s.trim() != "0",
+            Kv::Int(n) => *n != 0,
+            Kv::Object(_) => true,
+        };
+        if listed {
+            out.push(id);
+        }
+    }
+    out.sort_unstable();
+    Some(out)
+}
+
+/// The id of a key spelled `category_<id>` (ignoring ASCII case), the id in its plain decimal
+/// spelling only: `category_8` is 8, `category_08` is no category.
+fn category_id(key: &str) -> Option<u32> {
+    let head = key.get(..CATEGORY_KEY.len())?;
+    if !head.eq_ignore_ascii_case(CATEGORY_KEY) {
+        return None;
+    }
+    let digits = &key[CATEGORY_KEY.len()..];
+    let id: u32 = digits.parse().ok()?;
+    (id.to_string() == digits).then_some(id)
 }
 
 /// The launch entry [`launch_executable`] picks, from one app's parsed KeyValues.

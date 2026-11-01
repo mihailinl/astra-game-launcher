@@ -10,8 +10,10 @@ mod common;
 use std::path::Path;
 
 use astra_game_launcher::{
-    Accept, Ctx, Platform, VALVE_ANTI_CHEAT, codes, install, installed, launch_executable,
-    plan_install, prepare_launch, uninstall, vac_verdict, valve_anti_cheat, valve_anti_cheat_of,
+    Accept, Ctx, ONLINE_CATEGORIES, Platform, VAC_CATEGORY, VALVE_ANTI_CHEAT, codes, install,
+    installed, launch_executable, online_codes, online_game, plan_install, prepare_launch,
+    store_categories, store_categories_of, uninstall, vac_verdict, valve_anti_cheat,
+    valve_anti_cheat_of,
 };
 use common::*;
 
@@ -666,6 +668,149 @@ fn valve_anti_cheat_is_category_8_and_unknown_is_never_no() {
         valve_anti_cheat(Path::new("/nonexistent/appinfo.vdf"), VAC),
         None
     );
+}
+
+/// An online game's categories, as a hostile file may spell them: out of order, an int, a
+/// non-zero string, an object; keys that are no category (`category_08`, `category_+5`,
+/// `category_x`, past `u32`); a zero flag; and a second key for one id after the first.
+const ONLINE: u32 = 4_000_020;
+
+fn online_file(magic: u32) -> Vec<u8> {
+    file(
+        magic,
+        &[(
+            ONLINE,
+            app_with_categories(
+                ONLINE,
+                vec![
+                    ("category_20", Str("1")),
+                    ("CATEGORY_49", I32(1)),
+                    ("category_36", Obj(vec![])),
+                    ("category_08", Str("1")),
+                    ("category_+5", Str("1")),
+                    ("category_x", Str("1")),
+                    ("category_4294967296", Str("1")),
+                    ("category_4294967295", Str(" 2 ")),
+                    ("category_7", Str(" 0 ")),
+                    ("category_1", Str("0")),
+                    ("category_1", Str("1")),
+                    ("category_2", Str("1")),
+                    ("category_2", Str("0")),
+                ],
+            ),
+        )],
+    )
+    .0
+}
+
+/// `store_categories`: every `category_<id>` Steam lists, ascending, under VAC's bounds and with
+/// VAC's "not known"; `online_game` the online ones by `ONLINE_CATEGORIES`, in its order. VAC is
+/// exactly `VAC_CATEGORY` among them, on every app of both files.
+#[test]
+fn store_categories_are_every_listed_id_and_unknown_is_never_none_listed() {
+    assert_eq!(VAC_CATEGORY, 8);
+    assert_eq!(
+        ONLINE_CATEGORIES,
+        [(36, "online-pvp"), (49, "pvp"), (20, "mmo")],
+        "the ids Steam's store API names Online PvP, PvP and MMO (src/steam_appinfo.rs)"
+    );
+    for magic in [V28, V29] {
+        let dir = Tmp::new("categories");
+        let vac = dir.join("vac.vdf");
+        std::fs::write(&vac, vac_file(magic)).unwrap();
+        let online = dir.join("online.vdf");
+        std::fs::write(&online, online_file(magic)).unwrap();
+
+        assert_eq!(store_categories(&vac, VAC), Some(vec![1, 8, 22]));
+        assert_eq!(store_categories(&vac, VAC_INT), Some(vec![8]));
+        assert_eq!(store_categories(&vac, CLEAR), Some(vec![1, 29]));
+        assert_eq!(
+            store_categories(&vac, ZERO),
+            Some(vec![]),
+            "a zero flag lists nothing"
+        );
+        for unknown in [NO_CATEGORY, SPARSE, ABSENT] {
+            assert_eq!(store_categories(&vac, unknown), None, "{unknown}");
+            assert_eq!(online_game(&vac, unknown), None, "{unknown}");
+        }
+        assert_eq!(
+            online_game(&vac, CLEAR),
+            Some(vec![]),
+            "known, and none applies"
+        );
+        assert_eq!(
+            store_categories(&online, ONLINE),
+            Some(vec![2, 20, 36, 49, 4_294_967_295]),
+            "the first key for an id counts: category_1 is off, category_2 on"
+        );
+        assert_eq!(
+            online_game(&online, ONLINE),
+            Some(vec!["online-pvp", "pvp", "mmo"])
+        );
+        assert_eq!(valve_anti_cheat(&online, ONLINE), Some(false));
+        assert_eq!(online_codes(&[20, 1]), ["mmo"]);
+        assert_eq!(online_codes(&[37, 50, 21]), Vec::<&str>::new());
+
+        // One pass agrees with one at a time; VAC is category 8 among them, everywhere.
+        let all = [NO_CATEGORY, VAC, VAC_INT, CLEAR, ZERO, SPARSE, ABSENT];
+        let many = store_categories_of(&vac, &all);
+        assert_eq!(many.len(), 4);
+        for id in all {
+            assert_eq!(many.get(&id).cloned(), store_categories(&vac, id), "{id}");
+            assert_eq!(
+                valve_anti_cheat(&vac, id),
+                store_categories(&vac, id).map(|c| c.contains(&VAC_CATEGORY)),
+                "{id}"
+            );
+        }
+        assert_eq!(
+            store_categories(Path::new("/nonexistent/appinfo.vdf"), VAC),
+            None
+        );
+    }
+}
+
+/// The readers against a REAL `appinfo.vdf`, run only when `AGL_REAL_APPINFO` names one (Steam's
+/// own `appcache/appinfo.vdf`); `AGL_REAL_APPIDS` (comma-separated, default `320`, Half-Life 2:
+/// Deathmatch) names the apps. Each must be known, and VAC and `online_game` must be what its
+/// categories say. Run at L3-7 against this desk's file (the commit message has the answer):
+/// `AGL_REAL_APPINFO=~/.local/share/Steam/appcache/appinfo.vdf AGL_REAL_APPIDS=320,252490`.
+/// Category 20 (MMO) was confirmed through Steam's store API (`ONLINE_CATEGORIES`' doc), which no
+/// test calls.
+#[test]
+fn a_real_appinfo_reads_as_its_categories_say() {
+    let Some(path) = std::env::var_os("AGL_REAL_APPINFO") else {
+        eprintln!(
+            "skipped a_real_appinfo_reads_as_its_categories_say: AGL_REAL_APPINFO is not set"
+        );
+        return;
+    };
+    let path = std::path::PathBuf::from(path);
+    assert!(
+        path.is_file(),
+        "AGL_REAL_APPINFO names no file: {}",
+        path.display()
+    );
+    let ids: Vec<u32> = std::env::var("AGL_REAL_APPIDS")
+        .unwrap_or_else(|_| "320".to_owned())
+        .split(',')
+        .map(|s| {
+            s.trim()
+                .parse()
+                .expect("AGL_REAL_APPIDS: appids, comma-separated")
+        })
+        .collect();
+    let many = store_categories_of(&path, &ids);
+    for id in &ids {
+        let cats = store_categories(&path, *id)
+            .unwrap_or_else(|| panic!("appid {id}: no categories in {}", path.display()));
+        let online = online_game(&path, *id);
+        let vac = valve_anti_cheat(&path, *id);
+        eprintln!("appid {id}: categories {cats:?}, online {online:?}, vac {vac:?}");
+        assert_eq!(many.get(id), Some(&cats), "{id}");
+        assert_eq!(vac, Some(cats.contains(&VAC_CATEGORY)), "{id}");
+        assert_eq!(online, Some(online_codes(&cats)), "{id}");
+    }
 }
 
 #[test]

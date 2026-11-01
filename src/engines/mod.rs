@@ -31,7 +31,7 @@ pub mod descriptor;
 mod eval;
 mod reads;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::LazyLock;
 
@@ -68,6 +68,7 @@ pub(crate) fn builtin() -> &'static EngineSet {
         EngineSet {
             entries,
             skipped: Vec::new(),
+            markers: Markers::default(),
         }
     });
     &SET
@@ -233,14 +234,70 @@ pub(crate) struct Admitted {
     pub(crate) origin: Origin,
 }
 
+/// What an [`AntiCheatMarker`] names (`anticheatMarker.kind`, games-index-v1 §2.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AntiCheatMarkerKind {
+    /// A folder of this name in the game's walk.
+    FolderMarker,
+    /// A FILE of this name in the game's walk (a program, a driver, a library); never a folder.
+    ProcessName,
+    /// A Windows service of this name whose image is in the game's folder
+    /// ([`crate::anti_cheat_services`]); nothing elsewhere.
+    ServiceName,
+}
+
+/// One row of the signed games catalogue's `anticheat[]` (games-index-v1 §2.3): additive only. A
+/// game it matches carries `listed-anti-cheat` in [`crate::Detection::anti_cheat`], and planning
+/// refuses it. `value` is compared with a name exactly, ignoring ASCII case. Deserialises from the
+/// catalogue's row as it is (its display `name` is not read here).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct AntiCheatMarker {
+    pub kind: AntiCheatMarkerKind,
+    pub value: String,
+}
+
+/// The markers an [`EngineSet`] carries, folded for lookup: each kind's values, ASCII lower-case.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Markers {
+    given: Vec<AntiCheatMarker>,
+    folders: BTreeSet<String>,
+    files: BTreeSet<String>,
+    services: BTreeSet<String>,
+}
+
+impl Markers {
+    /// Whether a folder- or process-name marker names an entry of the walk: a folder marker a
+    /// folder, a process name a file. One lookup per entry, however many markers.
+    pub(crate) fn listed_in(&self, entries: &[crate::detect::Entry]) -> bool {
+        if self.folders.is_empty() && self.files.is_empty() {
+            return false;
+        }
+        entries.iter().any(|e| {
+            let set = if e.is_dir { &self.folders } else { &self.files };
+            !set.is_empty() && set.contains(&e.name().to_ascii_lowercase())
+        })
+    }
+
+    /// Whether a service-name marker names the service `name`.
+    pub(crate) fn names_service(&self, name: &str) -> bool {
+        !self.services.is_empty() && self.services.contains(&name.to_ascii_lowercase())
+    }
+}
+
 /// The engine descriptors Pass B asks, in the order it asks them: moderated, then unchecked,
 /// then local, each in the order given. At most [`descriptor::limits::PASS_B_DESCRIPTORS`], at
 /// most [`descriptor::limits::PER_PUBLISHER`] from one publisher. Empty by default, and an empty
 /// set is Pass A alone.
+///
+/// It also carries the signed catalogue's anti-cheat markers
+/// ([`EngineSet::with_anti_cheat_markers`]), which every detection and every plan asks, for every
+/// game, whichever pass named it.
 #[derive(Debug, Clone, Default)]
 pub struct EngineSet {
     pub(crate) entries: Vec<Admitted>,
     skipped: Vec<Skipped>,
+    markers: Markers,
 }
 
 impl EngineSet {
@@ -354,11 +411,38 @@ impl EngineSet {
         set
     }
 
+    /// The same set, also carrying `markers`: the signed catalogue's `anticheat[]`
+    /// (games-index-v1 §2.3). They only ever add — `listed-anti-cheat` in a detection, an
+    /// `anti-cheat` refusal in a plan — and they apply after Pass A for EVERY game, open to
+    /// descriptors or not (merged plan §2.4). Called again, it adds to what the set has.
+    pub fn with_anti_cheat_markers(mut self, markers: Vec<AntiCheatMarker>) -> EngineSet {
+        for m in markers {
+            let folded = m.value.to_ascii_lowercase();
+            match m.kind {
+                AntiCheatMarkerKind::FolderMarker => self.markers.folders.insert(folded),
+                AntiCheatMarkerKind::ProcessName => self.markers.files.insert(folded),
+                AntiCheatMarkerKind::ServiceName => self.markers.services.insert(folded),
+            };
+            self.markers.given.push(m);
+        }
+        self
+    }
+
+    /// The anti-cheat markers this set carries, in the order given.
+    pub fn anti_cheat_markers(&self) -> &[AntiCheatMarker] {
+        &self.markers.given
+    }
+
+    pub(crate) fn markers(&self) -> &Markers {
+        &self.markers
+    }
+
     /// How many descriptors Pass B asks.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// No descriptors (Pass B asks nothing). It may still carry anti-cheat markers.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
