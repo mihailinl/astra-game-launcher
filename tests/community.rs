@@ -472,6 +472,24 @@ fn a_community_integration_cannot_abuse_launch() {
             "[launch]\nargs = [\"${game}\"]\n",
             limit("launch-arg-path", "field", "launch.args[0]"),
         ),
+        // A path by itself in a word: the game's working folder's parent, or a drive's current
+        // folder (on Windows and under Wine alike).
+        (
+            "[launch]\nargs = [\"-windowed\", \"..\"]\n",
+            limit("launch-arg-path", "field", "launch.args[1]"),
+        ),
+        (
+            "[launch]\nargs = [\"C:..\"]\n",
+            limit("launch-arg-path", "field", "launch.args[0]"),
+        ),
+        (
+            "[launch]\nargs = [\"-x=..\"]\n",
+            limit("launch-arg-path", "field", "launch.args[0]"),
+        ),
+        (
+            "[launch]\nargs = [\"-plugin=C:evil.dll\"]\n",
+            limit("launch-arg-path", "field", "launch.args[0]"),
+        ),
     ];
     for (launch, want) in &refused {
         let pkg = release(ID, files, &format!("{loader}{launch}"));
@@ -492,6 +510,51 @@ fn a_community_integration_cannot_abuse_launch() {
         w.plan(&pkg, Provenance::Community)
             .unwrap_or_else(|e| panic!("{launch}: {e}"));
     }
+}
+
+/// An override applies to the whole Proton prefix by the module's name, and Windows and Wine look
+/// in the program's own folder first: a community integration's `winhttp.dll` below its own
+/// folder is never what a `winhttp` override loads — a dormant loader of the player's beside the
+/// program is. So the override is refused unless the DLL it names is placed directly beside the
+/// program.
+#[test]
+fn a_community_override_names_only_a_dll_it_places_beside_the_program() {
+    let w = World::new("override-depth");
+    let loader = "[integration.loader]\nproxies = [\"winhttp.dll\"]\n";
+    let deep = release(
+        ID,
+        &[("someone.example/winhttp.dll", b"MZ ours, below our folder")],
+        &format!("{loader}[launch]\nproton_dll_overrides = {{ winhttp = \"n,b\" }}\n"),
+    );
+    assert_eq!(
+        refusal(w.plan(&deep, Provenance::Community)),
+        limit(
+            "launch-override",
+            "field",
+            "launch.proton_dll_overrides.winhttp"
+        )
+    );
+    // The player's dormant BepInEx beside the program changes nothing: refused all the same.
+    write(
+        &w.game.join("winhttp.dll"),
+        b"MZ their BepInEx, switched off",
+    );
+    assert_eq!(
+        refusal(w.plan(&deep, Provenance::Community)),
+        limit(
+            "launch-override",
+            "field",
+            "launch.proton_dll_overrides.winhttp"
+        )
+    );
+    fs::remove_file(w.game.join("winhttp.dll")).unwrap();
+    // Beside the program it is what the override loads.
+    let beside = release(
+        ID,
+        &[("winhttp.dll", b"MZ ours, beside the program")],
+        &format!("{loader}[launch]\nproton_dll_overrides = {{ winhttp = \"n,b\" }}\n"),
+    );
+    w.plan(&beside, Provenance::Community).unwrap();
 }
 
 // ---------------------------------------------------------------------------------------------

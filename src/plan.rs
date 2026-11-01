@@ -352,8 +352,8 @@ mod limit {
     pub(super) const EXE_NOT_A_PROGRAM: &str = "exe-not-a-program";
     /// `[launch] env`: refused.
     pub(super) const LAUNCH_ENV: &str = "launch-env";
-    /// A Proton DLL override for a DLL the integration does not place, or with a value other than
-    /// `native,builtin` / `n,b`.
+    /// A Proton DLL override for a DLL the integration does not place directly beside the
+    /// program, or with a value other than `native,builtin` / `n,b`.
     pub(super) const LAUNCH_OVERRIDE: &str = "launch-override";
     /// A launch argument that is (or holds) a path not under `${profile}/` or `${game}/`.
     pub(super) const LAUNCH_ARG_PATH: &str = "launch-arg-path";
@@ -369,10 +369,16 @@ const COMMUNITY_OVERRIDE_VALUES: &[&str] = &["native,builtin", "n,b"];
 /// Whether a launch argument of a community integration stays under the profile or the game:
 /// one holding `/`, `\` or a placeholder starts with `${profile}/` or `${game}/`, and what
 /// follows is a relative path — no `..`, no other placeholder. Any other argument is a word, and
-/// passes.
+/// passes, unless it — or what follows any `=` in it — is a path by itself: `.`, `..` or any
+/// other name of dots (the game's working folder, or the one above it), or a drive-relative
+/// `C:x`, `C:..` (relative to that drive's current folder, on Windows and under Wine alike).
 fn arg_stays_inside(arg: &str) -> bool {
     if !arg.contains(['/', '\\']) && !arg.contains("${") {
-        return true;
+        // Windows reads a name of dots and spaces alone (`...`) as the folder it is in.
+        return arg.split('=').all(|w| {
+            (w.is_empty() || !w.trim_end_matches(['.', ' ']).is_empty())
+                && crate::paths::windows_text_verdict(w) == Ok(crate::paths::WindowsText::Relative)
+        });
     }
     let Some(rest) = ["${profile}/", "${game}/"]
         .iter()
@@ -395,7 +401,11 @@ fn arg_stays_inside(arg: &str) -> bool {
 ///    way;
 /// 2. `community-limit{rule=launch-env}` for any `[launch] env`;
 /// 3. `community-limit{rule=launch-override, field}` for a Proton override of a DLL its own
-///    `[[game_files]]` do not place, or with a value other than `native,builtin` / `n,b`;
+///    `[[game_files]]` do not place directly beside the program (`${game}/<name>`: an override
+///    applies to the whole prefix by the module's name, and Windows and Wine look in the
+///    program's own folder first, so one placed deeper is never what it loads — a dormant loader
+///    of the player's beside the program is), or with a value other than `native,builtin` /
+///    `n,b`;
 /// 4. `community-limit{rule=launch-arg-path, field}` for an argument holding a path that is not
 ///    under `${profile}/` or `${game}/` ([`arg_stays_inside`]).
 ///
@@ -429,10 +439,10 @@ pub(crate) fn community_limits(m: &Manifest) -> Vec<LauncherError> {
         // Wine names a DLL by its stem (`dwmapi`) or its file name (`dwmapi.dll`).
         let dll_lower = dll.to_ascii_lowercase();
         let placed = dests.iter().any(|rel| {
-            let name = rel
-                .last()
-                .map(|n| n.to_ascii_lowercase())
-                .unwrap_or_default();
+            let [name] = rel.as_slice() else {
+                return false;
+            };
+            let name = name.to_ascii_lowercase();
             name == dll_lower || name == format!("{dll_lower}.dll")
         });
         if !placed || !COMMUNITY_OVERRIDE_VALUES.contains(&value.as_str()) {
@@ -1487,6 +1497,11 @@ mod tests {
             "${game}/someone.example/",
             "${game}/",
             "${profile}/a b/c.ini",
+            "-x=1",
+            "a=b=c",
+            "--level=..x",
+            "-name:value",
+            "-x=",
         ] {
             assert!(arg_stays_inside(ok), "{ok}");
         }
@@ -1502,6 +1517,17 @@ mod tests {
             "-x=${profile}/a",
             "${game}//x",
             "https://example.com/x",
+            ".",
+            "..",
+            "-x=..",
+            "-x=.",
+            "--path=a=..",
+            "C:..",
+            "c:evil.dll",
+            "C:",
+            "-path=C:x",
+            "...",
+            ". .",
         ] {
             assert!(!arg_stays_inside(refused), "{refused}");
         }
