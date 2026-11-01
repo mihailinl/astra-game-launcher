@@ -665,6 +665,35 @@ mod tests {
         assert_eq!(w.names(), ["Game.exe"]);
     }
 
+    /// Our own UE4SS proxy, placed with UE4SS in the profile (the Unreal runner's shape): its
+    /// folder gaining a library (a game update's) keeps it only while a UE4SS is beside it, which
+    /// may run through it. With none, nothing does, and kept it fails every plain start of the
+    /// game ("Failed to load UE4SS.dll").
+    #[test]
+    fn our_ue4ss_proxy_is_kept_for_its_folder_only_with_a_ue4ss_beside_it() {
+        stand_ins();
+        for theirs in [false, true] {
+            let w = World::new(&format!("ue4ss-gained-{theirs}"));
+            w.install(&package(&[("dwmapi.dll", UE4SS_PROXY)]));
+            w.put("GameUpdate.dll", b"MZ a game update's library");
+            if theirs {
+                w.put("ue4ss/UE4SS.dll", b"MZ the player's UE4SS");
+            }
+            let r = w.uninstall();
+            if theirs {
+                assert_eq!(r.kept, ["dwmapi.dll"], "{r:?}");
+                assert_eq!(
+                    r.kept_reasons.get("dwmapi.dll").map(String::as_str),
+                    Some(crate::KEPT_FOLDER_GAINED_FILES)
+                );
+            } else {
+                assert_eq!(r.removed, ["dwmapi.dll"], "{r:?}");
+                assert!(r.kept.is_empty() && r.warnings.is_empty(), "{r:?}");
+                assert!(!w.game().join("dwmapi.dll").exists());
+            }
+        }
+    }
+
     // ---- rule 2: ReShade, the add-on, the shaders ----
 
     #[test]

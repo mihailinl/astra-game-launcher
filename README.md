@@ -366,9 +366,12 @@ restore_game_files(&profile_dir, &game)?;                // a withdrawn integrat
 - **A loader's identical bytes survive the uninstall.** The install records the listing of the
   folder of each hijack-named file it adds (`Ledger::proxy_folders`, at most 5,000 names);
   the uninstall leaves such a file of ours when its folder gained a name since that the ledger
-  does not place (a UE4SS installed by hand after us ships the very same `dwmapi.dll`), with its
-  Proton override, and says why: `UninstallReport::kept_reasons` = `folder-gained-files`. A game
-  update that adds a file there keeps it too.
+  does not place and that can carry a loader — a folder, a link, a program, a library, an ASI
+  plugin, a ReShade add-on (a UE4SS installed by hand after us ships the very same `dwmapi.dll`)
+  — with its Proton override, and says why: `UninstallReport::kept_reasons` =
+  `folder-gained-files`. What our own loaders write beside their proxies (ReShade's
+  `ReShade.ini`, its log, a screenshot) never counts, and UE4SS's proxy with no UE4SS beside it
+  is never kept. A game update that adds a library or a folder there keeps it too.
 - **Restores never touch the player's files** (marketplace plan A§4.4, M2). `uninstall` and
   `restore_game_files` undo the game half through one function: a game file is removed or
   restored only while it still has our digest, and a backup goes back only over our file and

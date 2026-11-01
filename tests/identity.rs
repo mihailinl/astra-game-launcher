@@ -29,7 +29,8 @@
 //! 0.4.1's answer and counted: `foreign-dwmapi` (step 10a: a foreign `dwmapi.dll` where Astra's
 //! own manifest places one is `foreign-loader`, never replaced; neither launcher then installs
 //! the update), `proxy-folder-gained-files` (merged plan R42: an added hijack-named file whose
-//! folder gained a name since is left by the uninstall, `kept_reasons`, and the ledger keeps the
+//! folder gained a folder or a library since is left by the uninstall, `kept_reasons`; what our
+//! own loaders write there while the game runs never counts, `Change::Played`; and the ledger keeps the
 //! folder's listing the test took before the install) and `restore-partial` (marketplace plan
 //! A§4.4, M2: an uninstall that leaves a game file as it is warns `restore-partial`). For a share of those, a third copy is installed by launcher 0.3.1 — what
 //! Astra 0.2.7 ships, so what wrote every 0.2.7 user's ledger — whose ledger must be 0.4.1's on
@@ -434,6 +435,29 @@ fn names_in(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(dir)
         .map(|r| {
             r.flatten()
+                .map(|e| e.file_name().to_string_lossy().to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// The names in `dir` (lower case, sorted) that can carry another mod loader, as
+/// `src/plan.rs` `can_carry_a_loader` reads them (stated again here, not imported): a folder, a
+/// link, or a file whose extension is a program's, a library's, an ASI plugin's or a ReShade
+/// add-on's. Never a config, a log or a screenshot.
+fn loader_names_in(dir: &Path) -> Vec<String> {
+    const CODE: &[&str] = &["dll", "asi", "exe", "addon", "addon32", "addon64"];
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .map(|r| {
+            r.flatten()
+                .filter(|e| {
+                    let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+                    let ext = name.rsplit_once('.').map_or("", |(_, x)| x).to_owned();
+                    e.file_type()
+                        .is_ok_and(|t| t.is_dir() || t.is_symlink() || CODE.contains(&ext.as_str()))
+                })
                 .map(|e| e.file_name().to_string_lossy().to_ascii_lowercase())
                 .collect()
         })
@@ -1279,8 +1303,15 @@ fn c1b_plan(
         // A share of what plans, by the turn: installed, changed, planned again and uninstalled.
         let h = mix(turn);
         if h.is_multiple_of(INSTALL_SHARE) {
+            // The first five changes are drawn as they were before `Played` existed (so every
+            // floor counts what it counted), and half the turns that draw `Nothing` play.
+            let drawn = CHANGES[(h >> 3) % (CHANGES.len() - 1)];
             let past = Past {
-                change: CHANGES[(h >> 3) % CHANGES.len()],
+                change: if drawn == Change::Nothing && (h >> 20).is_multiple_of(2) {
+                    Change::Played
+                } else {
+                    drawn
+                },
                 cross: (h >> 6).is_multiple_of(CROSS_SHARE),
                 update: (h >> 9).is_multiple_of(2),
                 pick: h >> 12,
@@ -1344,14 +1375,28 @@ enum Change {
     /// Files named as the Unreal runner 0.2.x left them, laid beside the program where nothing
     /// is: look-alikes, since the shipped bytes are not committed.
     OlderAstra,
+    /// The game played once with ours: what our own loaders write beside their proxies while it
+    /// runs ([`PLAYED_NAMES`]: ReShade's settings, log and preset, a screenshot), where nothing
+    /// of that name is. Never a reason to keep a proxy we added: the uninstall is 0.4.1's.
+    Played,
 }
 
-const CHANGES: [Change; 5] = [
+/// Every change; [`Change::Played`] last (the corpus draws the others by index, as before it).
+const CHANGES: [Change; 6] = [
     Change::Nothing,
     Change::TheirDoorstop,
     Change::Rewritten,
     Change::OursChanged,
     Change::OlderAstra,
+    Change::Played,
+];
+
+/// What ReShade writes beside its proxy while the game runs, as [`Change::Played`] lays it.
+const PLAYED_NAMES: &[&str] = &[
+    "ReShade.ini",
+    "ReShade.log",
+    "ReShadePreset.ini",
+    "Game 2026-11-01 12-00-00.png",
 ];
 
 /// The turn's choices for one [`c1b_install`].
@@ -1514,6 +1559,17 @@ fn make(
                 )
             })
             .collect(),
+        Change::Played => PLAYED_NAMES
+            .iter()
+            .filter(|n| {
+                !ledger
+                    .game_files
+                    .iter()
+                    .any(|g| g.rel.eq_ignore_ascii_case(n))
+                    && fs::symlink_metadata(root.join(n)).is_err()
+            })
+            .map(|n| ((*n).to_owned(), b"written while the game ran\n".to_vec()))
+            .collect(),
     };
     for (rel, bytes) in &laid {
         write(&root.join(rel), bytes);
@@ -1574,9 +1630,11 @@ fn proxy_folders_are(done: &str, before: &(Vec<String>, bool), at: &str) {
 
 /// Row `proxy-folder-gained-files` of `tests/corpus/divergence.txt` applied to 0.4.1's uninstall
 /// report `gone`: every file `ledger` added beside the program by a hijack name that 0.4.1
-/// removes is left instead, with the reason, when the folder (`now`, before the uninstall) holds
-/// a name the baseline (`before`) does not and `ledger` does not place, or the baseline is
-/// capped. Returns what this crate reports, and those files.
+/// removes is left instead, with the reason, when the folder (`now`, before the uninstall: the
+/// names in it that can carry a loader, [`loader_names_in`]) holds a name the baseline
+/// (`before`) does not and `ledger` does not place, or the baseline is capped. (UE4SS's proxy
+/// with no UE4SS beside it is never kept, but C1b's bytes are never the shipped ones.) Returns
+/// what this crate reports, and those files.
 fn proxy_folder_row(
     gone: &str,
     ledger: &astra_game_launcher::Ledger,
@@ -1900,12 +1958,13 @@ fn c1b_install(job: Job, fixtures: &[Fixture], appinfo: &Path, counts: &Counts) 
 
     // The ledger the uninstall reads (the update's, when there was one), and what row
     // `proxy-folder-gained-files` keeps: an added hijack-named file 0.4.1 removes, whose folder
-    // holds a name now that the baseline (`before`) does not and the ledger does not place.
+    // holds a name now that can carry a loader, that the baseline (`before`) does not hold and the
+    // ledger does not place.
     let ledger_b: astra_game_launcher::Ledger = serde_json::from_str(
         &b.norm(&fs::read_to_string(b.profile.join(LEDGER_FILE_NAME)).unwrap()),
     )
     .unwrap();
-    let now = names_in(&root(&b));
+    let now = loader_names_in(&root(&b));
     let (gone_a, gone_b) = (legacy::uninstall(&pa), ours::uninstall(&pb));
     let (want_b, kept_for_folder) = proxy_folder_row(&gone_a, &ledger_b, &before, &now);
     if !kept_for_folder.is_empty() {
@@ -2208,6 +2267,7 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
             13,
         ),
         ("look-alikes kept", get(&c.c1b_lookalikes_kept), 38),
+        ("our loaders played", change(Change::Played), 95),
         // tests/corpus/divergence.txt `proxy-folder-gained-files`, applied.
         (
             "row proxy-folder-gained-files",

@@ -518,11 +518,12 @@ fn foreign_dwmapi() {
 
 /// Row `proxy-folder-gained-files`: Astra's own manifest adds `winhttp.dll` (no Doorstop: no
 /// BepInEx rule keeps it); a `Mods/` folder arrives beside it. 0.4.1's uninstall removes ours;
-/// 0.5.0's keeps it, saying why. With nothing arrived, both remove it alike.
+/// 0.5.0's keeps it, saying why. With nothing arrived, or only what a loader of ours writes
+/// beside its proxy while the game runs (a config, a log, a screenshot), both remove it alike.
 fn proxy_folder_gained_files() {
     let ours_bytes: &[u8] = b"MZ a proxy of ours";
     let z = placing("winhttp.dll", ours_bytes);
-    for gained in [false, true] {
+    for (gained, written) in [(false, false), (true, false), (false, true)] {
         let mut gone = Vec::new();
         for (who, install, uninstall) in [
             (
@@ -532,13 +533,18 @@ fn proxy_folder_gained_files() {
             ),
             ("ours", ours::install, ours::uninstall),
         ] {
-            let t = Tmp::new(&format!("div-proxy-folder-{who}-{gained}"));
+            let t = Tmp::new(&format!("div-proxy-folder-{who}-{gained}-{written}"));
             let game = t.join("game");
             write(&game.join("Game.exe"), b"MZ game");
             let profile = t.join("profile/p");
             install(&game, &profile, &z);
             if gained {
                 write(&game.join("Mods/their_mod.lua"), b"-- theirs");
+            }
+            if written {
+                for name in ["ReShade.ini", "ReShade.log", "Game 2026-11-01 12-00-00.png"] {
+                    write(&game.join(name), b"written while the game ran");
+                }
             }
             gone.push((
                 uninstall(&game, &profile),
@@ -557,7 +563,10 @@ fn proxy_folder_gained_files() {
                 Some(astra_game_launcher::KEPT_FOLDER_GAINED_FILES)
             );
         } else {
-            assert_eq!(new, old, "nothing arrived: 0.5.0 uninstalls as 0.4.1");
+            assert_eq!(
+                new, old,
+                "nothing that can carry a loader arrived ({written}): 0.5.0 uninstalls as 0.4.1"
+            );
         }
     }
 }

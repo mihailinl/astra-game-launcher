@@ -124,7 +124,7 @@ enum Left {
     /// A link where a file we replaced was, to a file with our very bytes elsewhere.
     #[cfg(unix)]
     LinkInPlace,
-    /// A proxy we added whose folder gained a name since (someone's loader may run through it).
+    /// A proxy we added whose folder gained a folder since (someone's loader may run through it).
     ProxyFolderGained,
 }
 
@@ -259,6 +259,183 @@ fn a_replaced_file_that_is_gone_is_not_put_back_and_is_partial() {
         assert!(r.kept.is_empty() && r.restored.is_empty(), "{how}: {r:?}");
         assert!(!w.game.join("settings.json").exists(), "{how}");
     }
+}
+
+const UE4SS_PROXY_LIKE: &[u8] = b"MZ a UE4SS proxy, loading UE4SS from the profile";
+const RESHADE_LIKE: &[u8] = b"MZ a ReShade build, as dxgi.dll";
+const ADDON_LIKE: &[u8] = b"MZ a ReShade add-on";
+
+/// A first-party runner shaped as Astra's own ReShade ones (the Unreal runner, GTA III, Death
+/// Stranding): UE4SS's `dwmapi.dll` and ReShade's `dxgi.dll` beside the program, an add-on
+/// beside them, no `ReShade.ini` (ReShade writes its own while the game runs), and a Proton
+/// override for each proxy.
+fn reshade_runner() -> GiPackage {
+    let m = format!(
+        r#"schema = 1
+
+[integration]
+id = "test.reshade"
+name = "Test ReShade runner"
+version = "1.0.0"
+authors = ["tester"]
+license = "MIT"
+
+[target]
+engine = "unity-mono"
+exe = "*"
+platforms = ["windows-x64", "linux-proton"]
+anti_cheat = "none"
+
+[[files]]
+from = "profile/readme.txt"
+to = "${{profile}}/readme.txt"
+
+[[game_files]]
+from = "dwmapi.dll"
+to = "${{game}}/dwmapi.dll"
+sha256 = "{}"
+
+[[game_files]]
+from = "dxgi.dll"
+to = "${{game}}/dxgi.dll"
+sha256 = "{}"
+
+[[game_files]]
+from = "astra.addon64"
+to = "${{game}}/astra.addon64"
+sha256 = "{}"
+
+[launch]
+proton_dll_overrides = {{ dwmapi = "n,b", dxgi = "n,b" }}
+"#,
+        sha(UE4SS_PROXY_LIKE),
+        sha(RESHADE_LIKE),
+        sha(ADDON_LIKE)
+    );
+    open(&zip(&[
+        E::File("astra-gi.toml", m.as_bytes()),
+        E::File("profile/readme.txt", b"ours"),
+        E::File("dwmapi.dll", UE4SS_PROXY_LIKE),
+        E::File("dxgi.dll", RESHADE_LIKE),
+        E::File("astra.addon64", ADDON_LIKE),
+    ]))
+    .unwrap()
+}
+
+/// What ReShade itself writes beside its proxy while the game runs: its settings, its log, a
+/// preset, a screenshot.
+const RESHADE_WRITES: &[&str] = &[
+    "ReShade.ini",
+    "ReShade.log",
+    "ReShadePreset.ini",
+    "Restore Game 2026-11-01 12-00-00.png",
+];
+
+/// What our own loaders write beside their proxies while the game runs is never a reason to keep
+/// a proxy we added: `uninstall`, `restore_game_files` and the rollback of an update that fails
+/// each remove every proxy, and restore the Proton overrides that load them, exactly as when the
+/// game never ran (and as launcher 0.4.1 did). Kept, UE4SS's proxy would fail every plain start
+/// of the game once the profile that holds UE4SS is gone.
+#[test]
+fn what_our_own_loaders_write_never_keeps_our_proxy() {
+    const PROXIES: [&str; 3] = ["astra.addon64", "dxgi.dll", "dwmapi.dll"];
+    let world = || {
+        let game = Tmp::new("restore-reshade");
+        unity_game(game.path(), GAME);
+        let prefix = Tmp::new("restore-reshade-pfx");
+        fs::write(prefix.join("user.reg"), USER_REG).unwrap();
+        let target = target(
+            game.path(),
+            &format!("{GAME}.exe"),
+            Some(4_000_002),
+            Platform::LinuxProton {
+                prefix: Some(prefix.path().to_path_buf()),
+            },
+        );
+        let profiles = Tmp::new("restore-reshade-profiles");
+        let profile = profiles.join("p");
+        plan_and_install(&reshade_runner(), &target, &profile);
+        // Play once: the overrides go into the prefix, and ReShade writes its files.
+        prepare_launch(
+            &profile,
+            &target,
+            &vars(),
+            Some(std::path::Path::new("/opt/fake/steam")),
+        )
+        .unwrap();
+        let ledger = installed(&profile).unwrap().unwrap();
+        assert_eq!(ledger.proton.len(), 2, "{:?}", ledger.proton);
+        assert_ne!(
+            fs::read_to_string(prefix.join("user.reg")).unwrap(),
+            USER_REG
+        );
+        for name in RESHADE_WRITES {
+            write(&game.join(name), b"written by ReShade while the game ran");
+        }
+        (game, prefix, profiles, profile, target)
+    };
+    let left_alone = |game: &Tmp, at: &str| {
+        for p in PROXIES {
+            assert!(!game.join(p).exists(), "{at}: {p} removed");
+        }
+        for name in RESHADE_WRITES {
+            assert!(
+                game.join(name).is_file(),
+                "{at}: {name} is not ours, and stays"
+            );
+        }
+    };
+
+    for (how, undo) in UNDOS {
+        let (game, prefix, _profiles, profile, target) = world();
+        let r = undo(&profile, &target).unwrap();
+        assert_eq!(r.removed, PROXIES, "{how}: {r:?}");
+        assert!(
+            r.kept.is_empty() && r.kept_reasons.is_empty() && r.warnings.is_empty(),
+            "{how}: {r:?}"
+        );
+        assert!(r.proton_overrides_kept.is_empty(), "{how}: {r:?}");
+        assert!(r.proton_restored, "{how}");
+        assert_eq!(
+            fs::read_to_string(prefix.join("user.reg")).unwrap(),
+            USER_REG,
+            "{how}: the prefix as it was"
+        );
+        left_alone(&game, how);
+    }
+
+    // An update that fails once two proxies are placed again: its rollback carries the first
+    // install's folder baseline, which ReShade's files are not in.
+    let (game, prefix, _profiles, profile, target) = world();
+    let pkg = reshade_runner();
+    let plan = plan_install(&pkg, &target, &profile).unwrap();
+    let placed = std::cell::Cell::new(0u64);
+    let cancel = || placed.get() >= 2;
+    let progress = |p: astra_game_launcher::Progress| {
+        if p.stage == "game-files" {
+            placed.set(p.done);
+        }
+    };
+    let e = install(
+        &pkg,
+        &plan,
+        &target,
+        ACCEPT,
+        &Ctx {
+            cancel: &cancel,
+            progress: &progress,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(e.code, codes::CANCELLED);
+    assert_eq!(placed.get(), 2, "the update placed two files, then stopped");
+    assert_eq!(installed(&profile).unwrap(), None, "the ledger went");
+    assert_eq!(
+        fs::read_to_string(prefix.join("user.reg")).unwrap(),
+        USER_REG,
+        "rollback: the prefix as it was"
+    );
+    left_alone(&game, "rollback");
 }
 
 #[test]

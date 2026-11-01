@@ -20,8 +20,8 @@
 //! - **Abuse `[launch]`**: no `env`; overrides only for DLLs it places, `native,builtin` or `n,b`;
 //!   path arguments only under `${profile}/` or `${game}/`.
 //! - **Uninstall deletes their identical loader**: a hijack-named file we added stays when its
-//!   folder gained a name since the install (`kept_reasons` = `folder-gained-files`), its Proton
-//!   override with it.
+//!   folder gained, since the install, a name that can carry a loader (`kept_reasons` =
+//!   `folder-gained-files`), its Proton override with it.
 //!
 //! And the loader policy never widens Play: only the Doorstop-sharing names are another
 //! manager's to relink.

@@ -886,11 +886,31 @@ pub(crate) fn proxy_folders(
     Ok(out)
 }
 
+/// The extensions of a file that can be, or carry, another mod loader beside a proxy of ours: a
+/// program, a library, an ASI plugin, a ReShade add-on. Nothing else that appears in a proxy's
+/// folder can: a config, a log, a screenshot — what the loaders we place write there themselves
+/// while the game runs (ReShade's `ReShade.ini`, `ReShade.log`, its presets and screenshots) and
+/// what a game writes beside its program.
+const LOADER_CODE_EXTENSIONS: &[&str] = &["dll", "asi", "exe", "addon", "addon32", "addon64"];
+
+/// Whether a name that appeared in a proxy's folder (`dir`: a folder or a link there) can carry
+/// another mod loader: a folder (BepInEx's, UE4SS's, `Mods/`), a link, or a file with one of
+/// [`LOADER_CODE_EXTENSIONS`].
+fn can_carry_a_loader(name: &str, file_type: std::fs::FileType) -> bool {
+    file_type.is_dir()
+        || file_type.is_symlink()
+        || LOADER_CODE_EXTENSIONS.contains(&crate::detect::ext_lower(name).as_str())
+}
+
 /// Whether the folder of `rel`, a hijack-named file `ledger`'s install added, holds a name now
-/// that its [`ProxyFolder`] does not and `ledger` does not place, or its baseline is `capped`:
-/// someone else's loader may run through our proxy now (theirs is byte for byte ours: UE4SS's
-/// `dwmapi.dll`, a hand-made BepInEx's `winhttp.dll`), so the uninstall leaves it. The
-/// trade-off, as R42 binds it: a game update that adds a file there keeps the proxy too, and the
+/// that its [`ProxyFolder`] does not, `ledger` does not place, and that can carry a mod loader
+/// ([`can_carry_a_loader`]: a folder, a link, a program or a library — never a config, a log or
+/// a screenshot, which is what our own ReShade and UE4SS write beside their proxies), or its
+/// baseline is `capped`: someone else's loader may run through our proxy now (theirs is byte for
+/// byte ours: UE4SS's `dwmapi.dll`, a hand-made BepInEx's `winhttp.dll`), so the uninstall
+/// leaves it. Never for UE4SS's proxy with no UE4SS beside it (`crate::former`'s rule 1): nothing
+/// runs through it, and kept it fails every plain start of the game. The trade-off, as R42 binds
+/// it: a game update that adds a library or a folder there keeps the proxy too, and the
 /// uninstall says why (`kept_reasons`). No baseline (a ledger from before 0.5.0): never.
 pub(crate) fn proxy_folder_gained(game_root: &Path, rel: &str, ledger: &Ledger) -> Result<bool> {
     let Some(b) = ledger
@@ -900,16 +920,31 @@ pub(crate) fn proxy_folder_gained(game_root: &Path, rel: &str, ledger: &Ledger) 
     else {
         return Ok(false);
     };
+    let (dir, dir_path) = folder_of(game_root, rel)?;
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    let orphaned_ue4ss = ledger
+        .game_files
+        .iter()
+        .find(|g| g.rel.eq_ignore_ascii_case(rel))
+        .is_some_and(|g| {
+            former::former_kind(&dir_path, name, &g.sha256) == Some(FormerKind::Ue4ssProxy)
+        });
+    if orphaned_ue4ss {
+        return Ok(false);
+    }
     if b.capped {
         return Ok(true);
     }
-    let (dir, dir_path) = folder_of(game_root, rel)?;
     let entries = std::fs::read_dir(&dir_path).map_err(|e| LauncherError::io_at(&e, &dir_path))?;
     for e in entries {
         let e = e.map_err(|e| LauncherError::io_at(&e, &dir_path))?;
         let name = e.file_name().to_string_lossy().into_owned();
+        let file_type = e
+            .file_type()
+            .map_err(|e| LauncherError::io_at(&e, &dir_path))?;
         if !b.names.iter().any(|n| n.eq_ignore_ascii_case(&name))
             && !places(ledger, &dir, &name, false)
+            && can_carry_a_loader(&name, file_type)
         {
             return Ok(true);
         }

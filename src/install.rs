@@ -66,8 +66,9 @@ pub struct UninstallReport {
     pub former_removed: Vec<String>,
     /// Why a file in `kept` was left, where it is not that it changed: `folder-gained-files` for
     /// a hijack-named file we added whose folder holds a name now that was not there before Astra
-    /// first added it and is not ours (someone else's loader may run through it; a game update
-    /// that added a file there reads the same). Its Proton override stays too
+    /// first added it, is not ours, and can carry a loader — a folder, a link, a program or a
+    /// library; never a config, a log or a screenshot (someone else's loader may run through it;
+    /// a game update that added a library there reads the same). Its Proton override stays too
     /// (`proton_overrides_kept`). Absent when empty, and before 0.5.0.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub kept_reasons: BTreeMap<String, String>,
@@ -81,7 +82,8 @@ pub struct UninstallReport {
     pub warnings: Vec<String>,
 }
 
-/// [`UninstallReport::kept_reasons`]: the folder of a file we added gained a name since.
+/// [`UninstallReport::kept_reasons`]: the folder of a file we added gained, since, a name that
+/// can carry another loader.
 pub const KEPT_FOLDER_GAINED_FILES: &str = "folder-gained-files";
 
 fn stale(detail: &str) -> LauncherError {
@@ -303,8 +305,11 @@ fn place(
 }
 
 /// Undoes what a ledger records and removes the ledger: the game half ([`undo_game`]), then the
-/// profile's files, the backups and the ledger itself. A rollback passes no `readd`: with the
-/// baselines the failed install recorded, only what arrived since keeps a proxy, and nothing did.
+/// profile's files, the backups and the ledger itself. A rollback passes no `readd`, and keeps a
+/// proxy exactly where an uninstall of the failed install would: an update carries the first
+/// install's baselines, so what arrived since that install and can carry another loader (a
+/// folder, a library; never the configs and logs our own loaders write, [`proxy_folder_gained`])
+/// keeps it, as the uninstall it stands in for would.
 pub(crate) fn uninstall_ledger(
     profile: &Path,
     game_root: &Path,
@@ -351,7 +356,8 @@ pub(crate) fn uninstall_ledger(
 /// too ([`kept_for_their_loader`]), and so does the Proton override that loads it — unless
 /// `readd`, the plan of the integration replacing this one, adds it again right away. A shared
 /// proxy (`share-loader`) still there keeps its override as well. So does a hijack-named file we
-/// added whose folder gained a name since ([`proxy_folder_gained`], reported in `kept_reasons`).
+/// added whose folder gained, since, a name that can carry another loader
+/// ([`proxy_folder_gained`], reported in `kept_reasons`).
 fn undo_game(
     profile: &Path,
     game_root: &Path,
@@ -419,8 +425,8 @@ fn undo_game(
                         kept_dlls.push(stem.to_string_lossy().into_owned());
                     }
                 }
-                // Its folder gained a name since Astra first added it: someone else's loader may
-                // run through it now (theirs can be byte for byte ours).
+                // Its folder gained a name since Astra first added it that can carry a loader:
+                // someone else's loader may run through it now (theirs can be byte for byte ours).
                 FileState::File { sha256 }
                     if sha256 == g.sha256
                         && !readded(&g.rel)
