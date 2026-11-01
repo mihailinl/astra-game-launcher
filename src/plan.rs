@@ -1195,9 +1195,13 @@ pub(crate) fn plan_install_with(
     }
     // Every anti-cheat signal the launcher reads (merged plan §2.4), before the engine check: the
     // folder signatures, the catalogue's markers `how.engines` carries, and a kernel driver
-    // installed from the game's folder. Steam's store categories (an online game) never refuse
-    // here; that is the daemon's offer rule.
-    if let Some(kind) = anti_cheat_scan(&game_dir, how.engines)?.into_iter().next() {
+    // installed from the game's folder; a descriptor's claim adds its own in `engine_check`.
+    // Steam's store categories (an online game) never refuse here; that is the daemon's offer
+    // rule.
+    if let Some(kind) = anti_cheat_scan(&game_dir, &absolute(&game.dir)?, how.engines)?
+        .into_iter()
+        .next()
+    {
         return Err(LauncherError::new(codes::ANTI_CHEAT).with("kind", kind));
     }
     // Cleared only for an appid the caller gave or the folder proves; the manifest's appid can

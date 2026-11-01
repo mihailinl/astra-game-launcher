@@ -511,14 +511,21 @@ fn add_codes(to: &mut Vec<String>, more: Vec<String>) {
     }
 }
 
-/// The anti-cheat a game folder carries, as planning asks: the signatures over the built-in walk,
-/// then what [`anti_cheat_beyond_the_walk`] adds with `engines`.
-pub(crate) fn anti_cheat_scan(game_dir: &Path, engines: &EngineSet) -> Result<Vec<String>> {
+/// The anti-cheat a game folder carries, as planning asks: the signatures over the built-in walk
+/// of `game_dir` (the folder resolved), then what [`anti_cheat_beyond_the_walk`] adds with
+/// `engines` — the services tied to the folder as the caller spelled it (`given`), which
+/// [`crate::anti_cheat_services`] compares as given and as it is on disk, as a detection asked
+/// with that spelling does.
+pub(crate) fn anti_cheat_scan(
+    game_dir: &Path,
+    given: &Path,
+    engines: &EngineSet,
+) -> Result<Vec<String>> {
     let walked = builtin_walk(game_dir)?;
     let mut found = anti_cheat_of(&walked.entries);
     add_codes(
         &mut found,
-        anti_cheat_beyond_the_walk(game_dir, &walked.entries, engines),
+        anti_cheat_beyond_the_walk(given, &walked.entries, engines),
     );
     Ok(found)
 }

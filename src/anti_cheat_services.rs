@@ -29,7 +29,10 @@
 //! ends at its closing quote, and an unquoted one with arguments at the first `.exe`, `.sys` or
 //! `.dll` followed by a space. The game's folder is compared as given and as it is on disk (a
 //! junction or a short name resolved); an image as written, ignoring ASCII case and folding `.`
-//! and `..`, opening no file — but read from disk when a short name (`PROGRA~1`) is on its way.
+//! and `..` — and, when that is not inside the folder and the image is not below
+//! `%SystemRoot%` (where a machine's hundreds of drivers live), its folder as it is on disk too,
+//! so a driver installed through a junction, a `subst` drive or a short name (`PROGRA~1`) is
+//! tied to the folder it reaches, whichever spelling the caller gave.
 //! An image naming a device (`\Device\HarddiskVolume3\…`) resolves to nothing here and ties no
 //! service.
 //!
@@ -112,17 +115,28 @@ fn tied(
     if !dirs.contains(&canonical) {
         dirs.push(canonical);
     }
-    // An image is compared as written, opening no file — a machine has hundreds of drivers and
-    // every detection asks — but read from disk when a short name (`PROGRA~1`) is on its way.
+    // An image is compared as written first. Else its folder is read from disk — a junction, a
+    // `subst` drive or a short name (`PROGRA~1`) on its way — but never for one below
+    // %SystemRoot%: a machine has hundreds of drivers there, every detection asks, and no game
+    // folder is there.
+    let windows = lexical(system_root);
     let inside = |s: &Service| {
         s.image_path
             .as_deref()
             .and_then(|raw| resolve_image_path(raw, system_root))
             .is_some_and(|image| {
                 let written = lexical(&image);
-                dirs.iter().any(|d| within(&written, d))
-                    || (written.contains('~')
-                        && dirs.iter().any(|d| within(&comparable(&image), d)))
+                if dirs.iter().any(|d| within(&written, d)) {
+                    return true;
+                }
+                if within(&written, &windows) {
+                    return false;
+                }
+                let Some((folder, name)) = image.rsplit_once('\\') else {
+                    return false;
+                };
+                let on_disk = format!("{}\\{}", comparable(folder), name.to_ascii_lowercase());
+                dirs.iter().any(|d| within(&on_disk, d))
             })
     };
     let mut out: Vec<String> = Vec::new();

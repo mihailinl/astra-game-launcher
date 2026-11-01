@@ -546,6 +546,60 @@ fn a_service_is_tied_to_the_game_by_its_image_path() {
         none,
         "no longer a driver"
     );
+    // A driver installed through a junction to the game's folder (a library reached through
+    // one): tied to the folder it reaches, whichever spelling either side uses — planning asks
+    // with the folder resolved.
+    let links = Tmp::new("ac-svc-junction");
+    let junction = links.join("Library");
+    let made = Command::new("cmd")
+        .args(["/c", "mklink", "/J"])
+        .arg(&junction)
+        .arg(game.path())
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "mklink /J: {made:?}");
+    let through = plain(junction.as_path());
+    t.add(
+        "JunctionDriver",
+        1,
+        "REG_SZ",
+        &format!(r"\??\{through}\AntiCheat\guard.sys"),
+    );
+    assert_eq!(
+        of_game(game.path(), tree, &empty),
+        ["kernel-anti-cheat"],
+        "written through the junction, asked with the folder"
+    );
+    assert_eq!(
+        of_game(&junction, tree, &empty),
+        ["kernel-anti-cheat"],
+        "written through the junction, asked through it"
+    );
+    t.add(
+        "JunctionDriver",
+        1,
+        "REG_SZ",
+        r"\SystemRoot\System32\drivers\junction.sys",
+    );
+    t.add(
+        "ElseDriver",
+        1,
+        "REG_SZ",
+        &format!(r"{dir}\AntiCheat\guard.sys"),
+    );
+    assert_eq!(
+        of_game(&junction, tree, &empty),
+        ["kernel-anti-cheat"],
+        "written with the folder, asked through the junction"
+    );
+    t.add(
+        "ElseDriver",
+        16,
+        "REG_SZ",
+        &format!(r"{dir}\AntiCheat\guard.sys"),
+    );
+    assert_eq!(of_game(game.path(), tree, &empty), none);
+    let _ = std::fs::remove_dir(&junction);
     // An image spelled with a short (8.3) name is the same folder, read from disk.
     let long = format!(r"{dir}\AntiCheat\guard.sys");
     let short = {
