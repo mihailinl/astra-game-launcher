@@ -1793,6 +1793,129 @@ fn validate_descriptor_passes_the_source2_descriptor() {
     assert_eq!(r["descriptor"]["sha256"], digest);
 }
 
+/// `mods`, reserved for launcher 0.5.1's mods section: `validate-descriptor` accepts it and says
+/// so as a notice — "mods: not evaluated by this version", step 1, field `mods` — never a
+/// finding, and judges the rest exactly as without it: the Source 2 descriptor passes in all
+/// three spellings, the nested griefer is refused alike. `check` gives the same notice at step 4
+/// and nothing else changes. A `mods` that is no table is no descriptor.
+#[test]
+fn validate_descriptor_takes_mods_as_a_notice_and_judges_the_rest_alike() {
+    let tmp = Tmp::new("validate-mods");
+    let twin = |text: &str| {
+        assert!(text.contains("\nengine = {"), "{text}");
+        text.replacen(
+            "\nengine = {",
+            "\nmods = { root = \"{game}/Mods\", enabled = { format = \"dir-per-mod\" } }\nengine = {",
+            1,
+        )
+    };
+    let notice = |r: &Value, step: u64| {
+        let n = r["notices"].as_array().unwrap();
+        assert_eq!(n.len(), 1, "{r:#}");
+        assert_eq!(n[0]["code"], "mods-not-evaluated", "{r:#}");
+        assert_eq!(
+            (&n[0]["step"], &n[0]["field"]),
+            (&json!(step), &json!("mods"))
+        );
+        assert!(
+            n[0]["detail"]
+                .as_str()
+                .unwrap()
+                .starts_with("mods: not evaluated by this version"),
+            "{r:#}"
+        );
+    };
+    let (exit, plain) = validate(&tmp, "plain.toml", SOURCE2, &[]);
+    assert_eq!(exit, 0, "{plain:#}");
+    assert_eq!(plain["notices"], json!([]), "no mods, no notice");
+
+    let text = twin(SOURCE2);
+    let digest = astra_game_launcher::Descriptor::from_toml(&text)
+        .unwrap()
+        .digest()
+        .to_owned();
+    let (exit, r) = validate(&tmp, "mods.toml", &text, &[]);
+    assert_eq!(exit, 0, "{r:#}");
+    assert_eq!(r["verdict"], "pass");
+    assert_eq!(r["findings"], json!([]));
+    notice(&r, 1);
+    assert_eq!(r["descriptor"]["sha256"], digest);
+    assert_ne!(r["descriptor"]["sha256"], plain["descriptor"]["sha256"]);
+    assert_eq!(r["negative_folders"], plain["negative_folders"]);
+    // From JSON, and as a foundation's [integration.engine.mods].
+    let canonical = astra_game_launcher::Descriptor::from_toml(&text)
+        .unwrap()
+        .canonical_json()
+        .to_owned();
+    let (exit, r) = validate(&tmp, "mods.json", &canonical, &[]);
+    assert_eq!(
+        (exit, &r["descriptor"]["sha256"]),
+        (0, &json!(digest)),
+        "{r:#}"
+    );
+    notice(&r, 1);
+    let manifest = |engine: &str| {
+        format!(
+            "schema = 1\n\n[integration]\nid = \"community.source2\"\nname = \"Source 2\"\nversion = \"1.0.0\"\nlicense = \"MIT\"\n\n{}\n[target]\nengine = \"source2\"\nexe = \"*\"\nplatforms = [\"windows-x64\"]\nanti_cheat = \"none\"\n\n[[files]]\nfrom = \"a.txt\"\nto = \"${{profile}}/a.txt\"\n",
+            engine
+                .replace(
+                    "schema = \"astra.engine/1\"\n",
+                    "[integration.engine]\nschema = \"astra.engine/1\"\n"
+                )
+                .replace("[[rule]]", "[[integration.engine.rule]]")
+        )
+    };
+    let (exit, r) = validate(&tmp, "astra-gi.toml", &manifest(&text), &[]);
+    assert_eq!(exit, 0, "{r:#}");
+    assert_eq!(r["input"]["kind"], "manifest-integration-engine");
+    assert_eq!(r["descriptor"]["sha256"], digest);
+    notice(&r, 1);
+
+    // The nested griefer is refused exactly as without it.
+    let (exit, plain) = validate(&tmp, "nested.toml", NESTED_GRIEFER, &[]);
+    assert_eq!(exit, 1);
+    let (exit, r) = validate(&tmp, "nested-mods.toml", &twin(NESTED_GRIEFER), &[]);
+    assert_eq!(exit, 1, "{r:#}");
+    assert_eq!(r["findings"], plain["findings"], "{r:#}");
+    assert_eq!(r["negative_folders"], plain["negative_folders"]);
+    notice(&r, 1);
+
+    // Not a table: no descriptor (step 1), and nothing to say about `mods`.
+    let (exit, r) = validate(
+        &tmp,
+        "mods-list.toml",
+        &SOURCE2.replacen("\nengine = {", "\nmods = [\"Mods\"]\nengine = {", 1),
+        &[],
+    );
+    assert_eq!(exit, 1);
+    assert_eq!(
+        (
+            &r["findings"][0]["code"],
+            &r["findings"][0]["step"],
+            &r["findings"][0]["field"]
+        ),
+        (&json!("descriptor-invalid"), &json!(1), &json!("mods"))
+    );
+    assert_eq!(r["notices"], json!([]));
+
+    // `check`, of the foundation as a bare manifest: the same findings, the notice at step 4.
+    let plain_file = tmp.join("check-plain.toml");
+    fs::write(&plain_file, manifest(SOURCE2)).unwrap();
+    let mods_file = tmp.join("check-mods.toml");
+    fs::write(&mods_file, manifest(&text)).unwrap();
+    let (exit_plain, plain) = check(plain_file.to_str().unwrap(), &[]);
+    let (exit, r) = check(mods_file.to_str().unwrap(), &[]);
+    assert_eq!(exit, exit_plain, "{r:#}");
+    assert_eq!(r["findings"], plain["findings"], "{r:#}");
+    notice(&r, 4);
+    assert_eq!(plain["notices"], json!([]), "{plain:#}");
+    assert_eq!(statuses(&plain)[3], "pass", "{plain:#}");
+    assert_eq!(statuses(&r)[3], "notice", "{r:#}");
+    let mut s = statuses(&r);
+    s[3] = "pass".to_owned();
+    assert_eq!(s, statuses(&plain));
+}
+
 fn reason_of(r: &Value) -> Vec<(String, String)> {
     r["findings"]
         .as_array()

@@ -49,6 +49,7 @@ comes off this file only in the commit that closes it.
 | 43 | **A restore leaves the packs in the companion.** `restore_game_files` (a withdrawn integration) puts the game's files back and keeps the profile, its `pack_inbox` record and its hold: the packs the integration handed the companion stay installed there until the uninstall, which writes their tombstones. | Whether a withdrawn integration's animations leave the companion at once is the withdrawal policy's (marketplace plan A§4.4), which names game files only. | plan owner, then L | `src/install.rs` `restore_game_files` |
 | 44 | **The companion's design says `<uid>.remove` (§2), its engine reads `<uid tail>.remove`.** `docs/animation-packs.md` §2 lists "`<uid>.remove` tombstones" in `inbox/packs/<integration>/`, and a uid holds a `/` (`astra.peak/climb`); §5 (b) ("the launcher writes `astra.peak/climb.remove` there") and the engine (`inbox.rs`: `<tail>.remove` trashes `<integration>/<tail>`) agree on the tail, which is what the launcher writes. The tail is the uid's as the archive's `animpack.toml` says it, never the archive's file name: §5 (b)'s own example is `peak-climb.astrapack` with uid `astra.peak/climb`. | Not the launcher's text. | astra-companion (one word in §2) | `tests/pack_inbox.rs` `uninstall_writes_the_tombstone_into_the_inbox` |
 | 45 | **Astra passes no companion root yet: every release that uses `${astra_pack_inbox}` is `pack-inbox-unavailable` in the daemon.** The daemon plans with `plan_install` / `plan_install_in`, which name none. | Lane D's: the daemon must call `plan_install_with_user_pack_root` with `CompanionLocation`'s pack root (below, "For the daemon"). Nothing first-party uses the placeholder yet. | D | `tests/pack_inbox.rs` `without_a_root_the_plan_is_refused` |
+| 46 | **`mods` is accepted and not evaluated.** `astra.engine/1` takes an optional top-level `mods` table (L3b step 5; `docs/ENGINE-DESCRIPTOR.md`, "Reserved for launcher 0.5.1"): a table, anything inside it within the value rules, part of the digest and of the size limit, read by nothing (it never reaches the evaluator's model); `gi-probe validate-descriptor` and `check` report the notice `mods-not-evaluated`. What it will say — the player's own mod loader, the mods root, which mods are enabled, how Astra coexists with them — is not implemented, and the specification at this pin does not name `mods`: its schema (`additionalProperties: false`) refuses a descriptor the launcher accepts. | Reserved before the 0.5.0 tag so that a 0.5.0 does not skip whole every descriptor written for 0.5.1 (the spec's §0 rule 5); what it means is 0.5.1's, after the spec's section. | the spec (the section, `mods` as an optional object in the schema, a golden: a descriptor with `mods` that a reader ignoring it accepts for detection), then L (0.5.1) | `tests/engines.rs` `a_mods_table_is_accepted_and_never_read`; `src/engines/descriptor.rs` `a_mods_table_never_reaches_the_model`; C1c, `tests/common/identity.rs` `hostile_mods_set`; `tests/gi_probe.rs` `validate_descriptor_takes_mods_as_a_notice_and_judges_the_rest_alike` |
 
 ## For the daemon (D1)
 
@@ -247,6 +248,14 @@ Also for the spec, not pinned by a golden:
   straight in the folder, its `[animpack] uid` the integration's, an id the companion reads,
   `[a-z0-9._-]{1,64}` not dot-led) and the codes, `pack-inbox-invalid{reason}` and
   `pack-inbox-unavailable`.
+- **`mods` is reserved in `astra.engine/1`** (row 46, L3b step 5): the launcher accepts an
+  optional top-level `mods` table and reads none of it, where the schema at this pin refuses any
+  member it does not name. Add `"mods": { "type": "object" }` to
+  `engine-descriptor-v1.schema.json`, say in §1 that a reader that does not evaluate it ignores
+  it (it is still in the digest), and add the golden: a descriptor with `mods` detects as the
+  same descriptor without it. The mods section itself must keep `mods` a table, never
+  `[[mods]]`, with values the value rules allow (no float, datetime or `null`): a 0.5.0 refuses
+  anything else, and that is the whole descriptor skipped.
 
 ### The grammar
 

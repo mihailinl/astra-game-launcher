@@ -18,7 +18,7 @@ use astra_game_launcher::{
     Binary, Confidence, Descriptor, Detection, EngineCode, EngineSet, ExePick, LauncherError,
     Moderation, Origin, codes, detect_with, detect_with_engines, is_reserved_code,
 };
-use common::identity::{checked, hostile_set, narrowed};
+use common::identity::{MODS, checked, hostile_mods_set, hostile_set, narrowed, with_mods};
 use common::*;
 
 // ---- helpers ----
@@ -179,6 +179,109 @@ fn an_unknown_key_anywhere_refuses_the_descriptor() {
     for c in cases {
         assert_eq!(parse_err(&c).code, codes::DESCRIPTOR_INVALID, "{c}");
     }
+}
+
+/// `mods`, reserved for launcher 0.5.1's mods section: an optional top-level table this version
+/// accepts — inline, as a `[mods]` table, empty, from TOML and from JSON — and never reads. It
+/// is part of the descriptor (its digest, its size), and the game is named exactly as without
+/// it, with or without Steam's hint, by a descriptor whose `mods` spells the grammar's own keys.
+/// Not a table, below the top, or holding what no member may (a float, a datetime, a null): the
+/// descriptor is refused, as any member that breaks its rule is.
+#[test]
+fn a_mods_table_is_accepted_and_never_read() {
+    let plain = Descriptor::from_toml(SOURCE2).unwrap();
+    assert!(!plain.carries_mods());
+    let twins = [
+        with_mods(SOURCE2),
+        format!(
+            "{SOURCE2}\n[mods]\nroot = \"{{game}}/Mods\"\n[mods.enabled]\nformat = \"mods.txt\"\n"
+        ),
+        SOURCE2.replace("[[rule]]", "mods = {}\n[[rule]]"),
+    ];
+    let t = Tmp::new("source2-mods");
+    source2_game(&t);
+    let alone = |desc: &Descriptor| {
+        EngineSet::build([(
+            origin(Moderation::Unchecked, "community", false),
+            Ok(desc.clone()),
+        )])
+    };
+    let hint = Some(r"game\bin\win64\cs2.exe");
+    let want = [
+        d(t.path(), None, &alone(&plain)),
+        d(t.path(), hint, &alone(&plain)),
+    ];
+    assert_eq!(want[0].engine, "source2");
+    for text in &twins {
+        let twin = Descriptor::from_toml(text).unwrap();
+        assert!(twin.carries_mods(), "{text}");
+        assert_ne!(
+            twin.digest(),
+            plain.digest(),
+            "the digest is of the whole descriptor"
+        );
+        let json = Descriptor::from_json(twin.canonical_json().as_bytes()).unwrap();
+        assert_eq!(json.digest(), twin.digest());
+        assert!(json.carries_mods());
+        assert_eq!(twin.check_pass_b(false), Ok(()));
+        let set = alone(&twin);
+        assert_eq!(set.len(), 1, "{:?}", set.skipped());
+        for (h, want) in [None, hint].into_iter().zip(&want) {
+            let mut got = d(t.path(), h, &set);
+            assert_eq!(got.descriptor_sha256.as_deref(), Some(twin.digest()));
+            got.descriptor_sha256 = Some(plain.digest().to_owned());
+            assert_eq!(&got, want, "{text}");
+        }
+    }
+
+    let top = |v: &str| SOURCE2.replace("[[rule]]", &format!("{v}\n[[rule]]"));
+    for bad in [
+        "mods = 1",
+        "mods = \"mine\"",
+        "mods = true",
+        "mods = []",
+        "mods = [ { root = \"Mods\" } ]",
+    ] {
+        let e = parse_err(&top(bad));
+        assert_eq!(
+            (e.code, e.param("field")),
+            (codes::DESCRIPTOR_INVALID, Some("mods")),
+            "{bad}"
+        );
+    }
+    for bad in [
+        top("mods = { ratio = 0.5 }"),
+        top("mods = { since = 2026-11-01 }"),
+        SOURCE2.replace("tier = \"strong\"", "tier = \"strong\"\nmods = {}"),
+        SOURCE2.replace("engine = { codes", "engine = { mods = {}, codes"),
+    ] {
+        assert_eq!(parse_err(&bad).code, codes::DESCRIPTOR_INVALID, "{bad}");
+    }
+    let big = top(&format!(
+        "mods = {{ note = \"{}\" }}",
+        "m".repeat(astra_game_launcher::engines::descriptor::limits::DESCRIPTOR_BYTES)
+    ));
+    assert_eq!(parse_err(&big).code, codes::DESCRIPTOR_TOO_LARGE);
+    // The catalogue's spelling: the same descriptor, its `mods` the only thing wrong.
+    let json = |mods: &str| format!("{{\"mods\":{mods},{}", &plain.canonical_json()[1..]);
+    assert!(
+        Descriptor::from_json(json(r#"{"x":1}"#).as_bytes())
+            .unwrap()
+            .carries_mods()
+    );
+    for mods in [
+        r#"{"x":null}"#,
+        r#"{"n":9007199254740992}"#,
+        r#"{"f":1.5}"#,
+        "2",
+    ] {
+        let e = Descriptor::from_json(json(mods).as_bytes()).unwrap_err();
+        assert_eq!(e.code, codes::DESCRIPTOR_INVALID, "{mods}");
+    }
+    // A newer schema is still skipped whole, before `mods` is looked at.
+    let e = parse_err("schema = \"astra.engine/2\"\nmods = 1\n");
+    assert_eq!(e.code, codes::DESCRIPTOR_SCHEMA_UNKNOWN);
+    assert!(MODS.starts_with("mods = {"));
 }
 
 #[test]
@@ -868,6 +971,22 @@ fn the_hostile_set_admits_what_it_should_and_skips_the_rest() {
             codes::DESCRIPTOR_SCHEMA_UNKNOWN,
         ]
     );
+    // Each carrying a `mods` table: admitted and skipped alike, for the same reasons.
+    let twins = hostile_mods_set();
+    let codes_of = |s: &EngineSet| -> Vec<(String, Origin)> {
+        s.descriptors()
+            .flat_map(|(d, o)| d.codes().map(|(c, _)| (c.as_str().to_owned(), o.clone())))
+            .collect()
+    };
+    assert_eq!(codes_of(twins), codes_of(set));
+    assert!(twins.descriptors().all(|(d, _)| d.carries_mods()));
+    let why = |s: &EngineSet| -> Vec<(usize, Origin, LauncherError)> {
+        s.skipped()
+            .into_iter()
+            .map(|s| (s.index, s.origin.clone(), s.error.clone()))
+            .collect()
+    };
+    assert_eq!(why(twins), why(set));
 }
 
 // ---- Pass B: narrow-only (C1c) ----

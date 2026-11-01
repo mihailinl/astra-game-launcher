@@ -31,6 +31,10 @@
 //!    Two or more is `descriptor-too-broad{reason=two-engines, labels}` (spec §5,
 //!    `E_DESCRIPTOR_TOO_BROAD`, which this launcher spells as its own refusal: debt row 13).
 //!
+//! A descriptor carrying `mods` (reserved for launcher 0.5.1's mods section) is a notice,
+//! `mods-not-evaluated` (step 1, field `mods`: "mods: not evaluated by this version"), never a
+//! finding: this version accepts the table and reads nothing in it ([`mods_notice`]).
+//!
 //! The report gives the descriptor's digest, `sha256(JCS(descriptor))`, which the catalogue
 //! entry's `descriptor_sha256` must equal. The input is the descriptor as TOML or JSON, or a
 //! foundation's `astra-gi.toml` holding it as `[integration.engine]`.
@@ -469,6 +473,24 @@ pub fn corpus(d: &Descriptor, set: &EngineSet, dir: &Path) -> Result<(Value, Vec
     Ok((report, findings))
 }
 
+/// The notice (never a finding) for a descriptor carrying `mods`: reserved for launcher 0.5.1's
+/// mods section, which this version accepts and never reads, so nothing here judged it.
+pub fn mods_notice(d: &Descriptor) -> Option<Finding> {
+    d.carries_mods().then(|| {
+        Finding::new(
+            MODS_NOT_EVALUATED,
+            format!(
+                "mods: not evaluated by this version (launcher {}): reserved for launcher 0.5.1's mods section; accepted, part of the digest, and read by no detection, offer or plan",
+                astra_game_launcher::VERSION
+            ),
+        )
+        .field("mods")
+    })
+}
+
+/// [`mods_notice`]'s code.
+pub const MODS_NOT_EVALUATED: &str = "mods-not-evaluated";
+
 /// The report's `descriptor`: its digest and codes.
 pub fn summary(d: &Descriptor) -> Value {
     json!({
@@ -487,6 +509,7 @@ pub fn run(
     let text = String::from_utf8(bytes).map_err(|_| Fatal::io(file, "not UTF-8"))?;
     let (input, parsed) = parse(&text);
     let mut findings = Vec::new();
+    let mut notices = Vec::new();
     let mut folders = Vec::new();
     let mut descriptor = Value::Null;
     let mut corpus_report = None;
@@ -494,6 +517,7 @@ pub fn run(
         Err(e) => findings.push(refusal(&e, "not an astra.engine/1 descriptor").step(1)),
         Ok(d) => {
             descriptor = summary(&d);
+            notices.extend(mods_notice(&d).map(|n| n.step(1)));
             if let Err(e) = d.check_pass_b(first_party) {
                 findings.push(refusal(&e, "Pass B does not admit this descriptor").step(2));
             }
@@ -529,6 +553,7 @@ pub fn run(
         "spec": spec(),
         "descriptor": descriptor,
         "negative_folders": folders,
+        "notices": notices,
     });
     let mut rest = rest;
     if let Some(c) = corpus_report {

@@ -13,6 +13,13 @@
 //! [`limits::DESCRIPTOR_BYTES`]. An unknown `schema` is `descriptor-schema-unknown` before any
 //! other key is looked at, so a newer schema is skipped whole, never half read.
 //!
+//! **`mods`** (reserved for launcher 0.5.1's mods section): an optional top-level table this
+//! version accepts and never reads. It must be a table, and what it holds keeps to the value
+//! rules above, but no key in it is checked; it is part of the canonical form, so of the digest
+//! and of the size limit, and of nothing else — it never reaches the model the evaluator reads,
+//! so no detection, no offer and no plan can depend on it ([`Descriptor::carries_mods`] says it
+//! is there). Without it a 0.5.0 would skip the whole of every descriptor written for 0.5.1.
+//!
 //! ```toml
 //! schema = "astra.engine/1"
 //! engine = { codes = { source2 = "Source 2" } }
@@ -645,6 +652,10 @@ struct Spec {
     wrappers: Vec<String>,
     #[serde(default)]
     anti_cheat: Vec<MarkerSpec>,
+    /// Reserved for launcher 0.5.1 (the module doc's `mods`): checked to be a table before this
+    /// is read ([`Descriptor::from_value`]), and skipped unread, so nothing of it is kept.
+    #[serde(default, rename = "mods")]
+    _mods: Option<de::IgnoredAny>,
 }
 
 #[derive(Deserialize)]
@@ -2367,6 +2378,8 @@ pub fn is_reserved_code(code: &str) -> bool {
 pub struct Descriptor {
     canonical: String,
     digest: String,
+    /// It carries a `mods` table (reserved for 0.5.1; never in [`Model`]).
+    mods: bool,
     pub(crate) model: Model,
 }
 
@@ -2428,6 +2441,12 @@ impl Descriptor {
             }
             _ => return Err(invalid("schema", "missing")),
         }
+        // Reserved for 0.5.1: a table, read no further.
+        let mods = match obj.get("mods") {
+            None => false,
+            Some(Value::Object(_)) => true,
+            Some(_) => return Err(invalid("mods", "a table, reserved for launcher 0.5.1")),
+        };
         let mut canonical = String::new();
         jcs(&v, &mut canonical);
         if canonical.len() > limits::DESCRIPTOR_BYTES {
@@ -2440,8 +2459,16 @@ impl Descriptor {
         Ok(Descriptor {
             canonical,
             digest,
+            mods,
             model,
         })
+    }
+
+    /// Whether it carries a `mods` table: reserved for launcher 0.5.1's mods section, accepted
+    /// and never read by this version (the module doc's `mods`). Only for saying so: nothing
+    /// this launcher decides reads it.
+    pub fn carries_mods(&self) -> bool {
+        self.mods
     }
 
     /// `sha256(JCS(descriptor))`, lower-case hex.
@@ -2592,5 +2619,54 @@ mod tests {
         let mut out = String::new();
         jcs(&v, &mut out);
         assert_eq!(out, "\"\\u000b\\u001f\\u001e\u{7f}\u{80}\"");
+    }
+
+    /// A `mods` table that would change answers were it read: it spells the descriptor's own
+    /// grammar (a code, a rule claiming every program, the walk's depth bound).
+    const MODS: &str = "mods = { root = \"{game}/Mods\", enabled = { format = \"dir-per-mod\" }, engine = { codes = { taken = \"Taken\" } }, rule = [ { tier = \"strong\", programs = { ext = [\"exe\", \"\"], first = 8, skip_wrappers = false }, code = \"taken\", confidence = \"high\", binary = \"by-ext\" } ], walk = { list_at_limit = [\"x\"] } }";
+
+    /// `text` with [`MODS`] after its `schema` line (the root table).
+    fn with_mods(text: &str) -> String {
+        let mut out = String::new();
+        let mut done = false;
+        for line in text.split_inclusive('\n') {
+            out.push_str(line);
+            if !done && line.starts_with("schema") {
+                out.push_str(MODS);
+                out.push('\n');
+                done = true;
+            }
+        }
+        assert!(done, "{text}");
+        out
+    }
+
+    /// `mods` never reaches the model the evaluator reads — the built-ins' (Pass A) and a
+    /// community descriptor's (Pass B), from TOML and from JSON — nor Pass B's admission: so
+    /// it cannot change which engine a game is, nor which descriptors are asked. It is in the
+    /// digest, as every member is.
+    #[test]
+    fn a_mods_table_never_reaches_the_model() {
+        let community = "schema = \"astra.engine/1\"\nengine = { codes = { probe = \"Probe\" } }\n[[rule]]\ntier = \"strong\"\nprograms = { ext = [\"exe\"], first = 8 }\nrequire = [ { listed = \"probe.dat\", kind = \"file\" } ]\ncode = \"probe\"\nconfidence = \"high\"\nbinary = \"windows\"\nevidence = \"{program}\"\n";
+        let model = |d: &Descriptor| format!("{:?}", d.model);
+        for text in super::super::BUILTIN.into_iter().chain([community]) {
+            let plain = Descriptor::from_toml(text).unwrap();
+            let twin = Descriptor::from_toml(&with_mods(text)).unwrap();
+            assert!(!plain.carries_mods() && twin.carries_mods());
+            assert_ne!(plain.digest(), twin.digest());
+            assert!(twin.canonical_json().contains("\"mods\":{"));
+            assert_eq!(model(&twin), model(&plain), "{text}");
+            let json = Descriptor::from_json(twin.canonical_json().as_bytes()).unwrap();
+            assert_eq!(json.digest(), twin.digest());
+            assert!(json.carries_mods());
+            assert_eq!(model(&json), model(&plain));
+            for first_party in [false, true] {
+                assert_eq!(
+                    twin.check_pass_b(first_party),
+                    plain.check_pass_b(first_party),
+                    "{text}"
+                );
+            }
+        }
     }
 }

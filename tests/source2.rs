@@ -147,6 +147,102 @@ fn a_source2_foundation_installs_plays_and_uninstalls_on_a_source2_game() {
     assert_eq!(snapshot(dir.path()), before);
 }
 
+/// `[integration.engine.mods]`, reserved for launcher 0.5.1's mods section, which this version
+/// accepts and never reads: the foundation lints, detects, plans, installs and uninstalls exactly
+/// as without it, but for the digest that names its descriptor. It is part of that descriptor:
+/// the catalogue's copy without it is another descriptor (`descriptor-mismatch`).
+#[test]
+fn a_foundation_whose_descriptor_carries_mods_installs_as_without_it() {
+    let plain_text = manifest_text();
+    let text = plain_text.replacen(
+        "[integration.loader]\n",
+        "[integration.engine.mods]\nroot = \"{game}/Mods\"\nengine = { codes = { taken = \"Taken\" } }\n\n[integration.engine.mods.enabled]\nformat = \"dir-per-mod\"\n\n[integration.loader]\n",
+        1,
+    );
+    assert_ne!(text, plain_text);
+    let (m, lint) = Manifest::parse_and_lint(&text, false);
+    assert_eq!(lint, Manifest::parse_and_lint(&plain_text, false).1);
+    assert!(lint.is_empty(), "{lint:?}");
+    assert!(
+        m.unwrap()
+            .engine_descriptor()
+            .unwrap()
+            .unwrap()
+            .carries_mods()
+    );
+    let plain = descriptor_of(&plain_text);
+    let d = descriptor_of(&text);
+    assert!(d.carries_mods() && !plain.carries_mods());
+    assert_ne!(d.digest(), plain.digest());
+
+    let run = |d: &Descriptor, text: &str| {
+        let set = engines(d);
+        let dir = Tmp::new("s2-mods-game");
+        source2_game(dir.path());
+        let before = snapshot(dir.path());
+        let mut found = detect_with_engines(dir.path(), None, &set).unwrap();
+        assert_eq!(found.descriptor_sha256.as_deref(), Some(d.digest()));
+        found.descriptor_sha256 = None;
+        let pkg = open(&zip_of(text)).unwrap();
+        let game = target(dir.path(), EXE, None, Platform::Windows);
+        let profiles = Tmp::new("s2-mods-profiles");
+        let profile = profiles.join("p");
+        let plan =
+            plan_install_in(&pkg, &game, &profile, &set, Provenance::Community, None).unwrap();
+        let pinned = plan.engine_descriptor.clone().unwrap();
+        assert_eq!(pinned.sha256, d.digest());
+        let ledger = install(&pkg, &plan, &game, ACCEPT, &Ctx::silent()).unwrap();
+        assert_eq!(ledger.descriptor_sha256.as_deref(), Some(d.digest()));
+        prepare_launch(&profile, &game, &vars(), None).unwrap();
+        uninstall(&profile, &game).unwrap();
+        assert_eq!(snapshot(dir.path()), before);
+        (
+            found,
+            plan.game_files,
+            plan.profile_files,
+            plan.provenance,
+            (pinned.moderation, pinned.publisher, pinned.first_party),
+            ledger.game_files,
+        )
+    };
+    assert_eq!(run(&d, &text), run(&plain, &plain_text));
+
+    // Launchers 0.4.1 and 0.3.1 refuse it as they refuse the foundation without it.
+    let refusals = |text: &str| {
+        let zip = zip_of(text);
+        let sha = sha(&zip);
+        (
+            launcher_legacy::GiPackage::open(&zip, &sha)
+                .unwrap_err()
+                .code,
+            launcher_031::GiPackage::open(&zip, &sha).unwrap_err().code,
+        )
+    };
+    assert_eq!(refusals(&text), refusals(&plain_text));
+
+    // The catalogue's descriptor without `mods` did not name this foundation's.
+    let dir = Tmp::new("s2-mods-mismatch");
+    source2_game(dir.path());
+    let profiles = Tmp::new("s2-mods-profiles");
+    let e = plan_install_in(
+        &open(&zip_of(&text)).unwrap(),
+        &target(dir.path(), EXE, None, Platform::Windows),
+        &profiles.join("p"),
+        &engines(&plain),
+        Provenance::Community,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.param("want"), e.param("got")),
+        (
+            codes::DESCRIPTOR_MISMATCH,
+            Some(d.digest()),
+            Some(plain.digest())
+        )
+    );
+}
+
 /// Launcher 0.4.1 (what the daemon links before D1) and 0.3.1 (what Astra 0.2.7 ships) refuse
 /// the manifest at parse: `[target] engine = "source2"` is no engine they know, so no older
 /// Astra is ever offered a new engine's foundation.

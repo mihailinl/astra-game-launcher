@@ -10,7 +10,12 @@
 //! - **C1c, narrow-only:** with [`hostile_set`], every game Pass A recognised (a code, evidence,
 //!   or a hint used) gets exactly the same answer; only a game Pass A left `unknown` with no
 //!   evidence and no hint may be answered by a descriptor, and then Pass A's anti-cheat stays.
+//! - **C1c, `mods` is never read:** [`hostile_mods_set`], the same descriptors each carrying
+//!   [`MODS`] (reserved for launcher 0.5.1, accepted and ignored by 0.5.0), admits and skips
+//!   exactly as [`hostile_set`] does and answers every game exactly as it does, but for the
+//!   digest that names the descriptor ([`without_mods`]).
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -211,6 +216,87 @@ pub fn moderated_hostile_set() -> &'static EngineSet {
     SET.get_or_init(|| build(&HOSTILE[..1]))
 }
 
+/// An `astra.engine/1` `mods` table (reserved for launcher 0.5.1's mods section) that would
+/// change answers were it read: beside what a mods section may hold, it spells the
+/// descriptor's own grammar — a code, a rule claiming every program, the walk's depth bound.
+pub const MODS: &str = "mods = { root = \"{game}/Mods\", enabled = { format = \"dir-per-mod\" }, loader = [ { listed = \"winhttp.dll\", kind = \"file\" } ], coexist = \"side-by-side\", engine = { codes = { taken = \"Taken\" } }, rule = [ { tier = \"strong\", programs = { ext = [\"exe\", \"x86_64\", \"x86\", \"\"], first = 8, skip_wrappers = false }, code = \"taken\", confidence = \"high\", evidence = \"{program}\", binary = \"by-ext\" } ], walk = { list_at_limit = [\"Game\"] } }";
+
+/// `text` with [`MODS`] after its `schema` line, in the root table. Every [`HOSTILE`] text and
+/// every built-in begins with that line.
+pub fn with_mods(text: &str) -> String {
+    let mut out = String::new();
+    let mut done = false;
+    for line in text.split_inclusive('\n') {
+        out.push_str(line);
+        if !done && line.starts_with("schema") {
+            out.push_str(MODS);
+            out.push('\n');
+            done = true;
+        }
+    }
+    assert!(done, "no schema line: {text}");
+    out
+}
+
+/// [`HOSTILE`], each descriptor carrying [`MODS`].
+pub fn hostile_mods() -> Vec<(&'static str, Moderation, bool, String)> {
+    HOSTILE
+        .iter()
+        .map(|(p, m, fp, text)| (*p, *m, *fp, with_mods(text)))
+        .collect()
+}
+
+/// [`hostile_set`] with [`MODS`] in every descriptor.
+pub fn hostile_mods_set() -> &'static EngineSet {
+    static SET: OnceLock<EngineSet> = OnceLock::new();
+    SET.get_or_init(|| {
+        let twins = hostile_mods();
+        EngineSet::build(twins.iter().map(|(publisher, moderation, fp, text)| {
+            (
+                Origin {
+                    moderation: *moderation,
+                    publisher: (*publisher).to_owned(),
+                    first_party: *fp,
+                },
+                Descriptor::from_toml(text),
+            )
+        }))
+    })
+}
+
+/// Each digest of a [`HOSTILE`] descriptor carrying [`MODS`] → the digest of the same descriptor
+/// without it. Every text parses in both spellings or in neither, and refuses alike.
+fn mods_digests() -> &'static BTreeMap<String, String> {
+    static MAP: OnceLock<BTreeMap<String, String>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        let mut map = BTreeMap::new();
+        for ((_, _, _, plain), (_, _, _, twin)) in HOSTILE.iter().zip(hostile_mods()) {
+            match (Descriptor::from_toml(plain), Descriptor::from_toml(&twin)) {
+                (Ok(p), Ok(t)) => {
+                    assert!(t.carries_mods() && !p.carries_mods());
+                    assert_ne!(p.digest(), t.digest());
+                    map.insert(t.digest().to_owned(), p.digest().to_owned());
+                }
+                (Err(p), Err(t)) => assert_eq!(p.code, t.code, "{plain}"),
+                (p, t) => panic!("mods changed whether it parses: {p:?} vs {t:?}\n{plain}"),
+            }
+        }
+        map
+    })
+}
+
+/// A detection made with [`hostile_mods_set`], its descriptor named by the digest the same
+/// descriptor has without [`MODS`]: what [`hostile_set`] must have answered.
+pub fn without_mods(mut d: Detection) -> Detection {
+    if let Some(s) = d.descriptor_sha256.take() {
+        let plain = mods_digests()
+            .get(&s)
+            .unwrap_or_else(|| panic!("{s}: not a digest of the hostile set with mods"));
+        d.descriptor_sha256 = Some(plain.clone());
+    }
+    d
+}
+
 /// Whether Pass A left this game to the descriptors: the canary's own reading of plan B's
 /// rule, independent of the crate's gate (a weakened gate must not weaken the canary), and held
 /// equal to it in [`checked`].
@@ -248,6 +334,12 @@ pub fn checked_with_hostile(dir: &Path, hint: Option<&str>) -> (Detection, Detec
             "C1c: no descriptor changes what Pass A decided ({dir:?}, hint {hint:?})"
         );
     }
+    let mods = detect_with_engines(dir, hint, hostile_mods_set()).unwrap();
+    assert_eq!(
+        without_mods(mods),
+        hostile,
+        "C1c: a descriptor's `mods` table changes no answer ({dir:?}, hint {hint:?})"
+    );
     (new, hostile)
 }
 

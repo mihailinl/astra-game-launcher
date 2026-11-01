@@ -89,6 +89,8 @@ USAGE
   validate-descriptor
                 an astra.engine/1 descriptor (TOML, JSON, or a manifest's [integration.engine]):
                 it parses, Pass B admits it, and it claims none of the spec's negative folders.
+                A `mods` table (reserved for launcher 0.5.1) is a notice, never a finding: it
+                is not evaluated by this version.
                 --corpus: every recording (*.json, astra.list-shape/1) in the folder is laid
                 below TMPDIR and detected with the descriptor alone; claiming recordings of two
                 or more engines (their labels; `unknown` names none) is too broad.

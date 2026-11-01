@@ -54,6 +54,39 @@ In the library: `EngineSet::build` admits descriptors, `detect_with_engines` ask
 only where the built-ins found nothing), and `plan_install_in` asks the same ones when it
 plans.
 
+## Reserved for launcher 0.5.1: `mods`
+
+`mods` is an optional top-level member of `astra.engine/1`, a table, reserved for launcher
+0.5.1's mods section: how the player's own mod loader is recognised, where its mods are and
+which of them are enabled. That section is still to come in AstraPlugins'
+`spec/games/engine-descriptor-v1.md` (a draft against `spec/games/`); the specification at the
+pin above does not name `mods`. It is reserved now because the specification's §0 rule 5 skips
+the whole of a descriptor holding a field the reader does not know: a mods section that arrived
+after 0.5.0 would make every 0.5.0 drop every foundation that carries one.
+
+Launcher 0.5.0:
+
+- **accepts it** — inline or as a `[mods]` table in a file, in the catalogue's JSON, and as
+  `[integration.engine.mods]` in a foundation's manifest. It must be a table (anything else is
+  `descriptor-invalid`, `field` = `mods`), only at the top level, and what it holds keeps to the
+  rules every member keeps to (no float, datetime or `null`, no integer past 2^53 − 1). No key
+  inside it is checked.
+- **reads nothing in it.** It is part of the canonical form, so of the digest (the catalogue's
+  copy without it is another descriptor: `descriptor-mismatch`) and of the 16 KiB size limit,
+  and of nothing else: it never reaches the model the evaluator reads
+  (`Descriptor::carries_mods` only says it is there), so detection, Pass B's admission, the
+  offers, planning and narrow-only are exactly what they are without it. Canary C1c holds that
+  over every folder the tests detect, with the hostile set's descriptors each carrying a `mods`
+  table that spells the grammar's own keys (`tests/common/identity.rs` `hostile_mods_set`).
+- **says so**: `gi-probe validate-descriptor` reports it as the notice `mods-not-evaluated`
+  ("mods: not evaluated by this version"), never a finding, and `gi-probe check` gives the same
+  notice at step 4.
+
+For this to hold, the coming section must keep `mods` a table (never `[[mods]]`) whose values
+keep to the rules above. Launcher 0.3.1 drops `[integration.engine]` unread (the
+specification's §1), so a manifest it reads is unaffected, and no first-party manifest carries
+`[integration.engine]` at all. Debt row 46.
+
 ## Launcher-only notes
 
 How this launcher reads what the specification leaves open, or says otherwise. Each is also a
