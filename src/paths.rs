@@ -33,9 +33,12 @@ const TEMP_MARK: &str = ".astra-tmp-";
 pub(crate) enum Root {
     Profile,
     Game,
+    /// `${astra_pack_inbox}`: the companion's inbox for this integration's own animation packs,
+    /// a `[[files]]` destination only ([`crate::pack_inbox`]).
+    PackInbox,
 }
 
-/// A destination inside one of the two roots.
+/// A destination inside one of the roots.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct JailPath {
     pub root: Root,
@@ -55,12 +58,15 @@ pub(crate) fn first_placeholder_name(s: &str) -> String {
     after.split('}').next().unwrap_or("").to_owned()
 }
 
-/// Reads `${profile}/a/b` or `${game}/a/b`.
+/// Reads `${profile}/a/b`, `${game}/a/b` or `${astra_pack_inbox}/a`. Every caller holds the root
+/// to the one its key allows.
 pub(crate) fn parse_jailed(s: &str) -> Result<JailPath> {
     let (root, rest) = if let Some(r) = s.strip_prefix("${profile}") {
         (Root::Profile, r)
     } else if let Some(r) = s.strip_prefix("${game}") {
         (Root::Game, r)
+    } else if let Some(r) = s.strip_prefix(crate::pack_inbox::DESTINATION) {
+        (Root::PackInbox, r)
     } else if s.starts_with("${") {
         return Err(
             LauncherError::new(codes::UNKNOWN_PLACEHOLDER).with("name", first_placeholder_name(s))
@@ -638,6 +644,41 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    /// `${astra_pack_inbox}` is a third root with the same lexical jail; which keys may name it is
+    /// each caller's (only `[[files]] to`, `crate::pack_inbox::check_rule`).
+    #[test]
+    fn the_pack_inbox_is_a_root_with_the_same_jail() {
+        let p = parse_jailed("${astra_pack_inbox}/climb.astrapack").unwrap();
+        assert_eq!(
+            (p.root, p.rel, p.is_dir),
+            (Root::PackInbox, vec!["climb.astrapack".to_owned()], false)
+        );
+        let d = parse_jailed("${astra_pack_inbox}/").unwrap();
+        assert_eq!((d.root, d.rel.len(), d.is_dir), (Root::PackInbox, 0, true));
+        for bad in [
+            "${astra_pack_inbox}/../x.astrapack",
+            "${astra_pack_inbox}/a/../../x.astrapack",
+            "${astra_pack_inbox}x.astrapack",
+            "${astra_pack_inbox}/C:x.astrapack",
+            "${astra_pack_inbox}/a\\..\\b.astrapack",
+            "${astra_pack_inbox}/CON.astrapack",
+            "${astra_pack_inbox}/x.astrapack.",
+            "${astra_pack_inbox}//x.astrapack",
+        ] {
+            assert_eq!(
+                parse_jailed(bad).unwrap_err().code,
+                codes::PATH_ESCAPES,
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            parse_jailed("${astra_pack_inbox}/${game}/x")
+                .unwrap_err()
+                .code,
+            codes::UNKNOWN_PLACEHOLDER
+        );
     }
 
     #[test]

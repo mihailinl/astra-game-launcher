@@ -7,7 +7,9 @@
 //!
 //! The flow: [`GiPackage::open`] verifies an `astra-gi.zip` against its SHA-256 and reads its
 //! manifest; [`plan_install`] says exactly what would happen (the consent sheet, as data;
-//! [`plan_install_in`] when the game's engine may be one an engine descriptor describes);
+//! [`plan_install_in`] when the game's engine may be one an engine descriptor describes, and
+//! [`plan_install_with_user_pack_root`] when the integration hands the desktop companion its own
+//! animation packs);
 //! [`install`] does that and writes a ledger; [`prepare_launch`] builds the command and
 //! [`launch`] starts it; [`uninstall`] puts everything back, and [`restore_game_files`] puts the
 //! game's files back and keeps the profile (a withdrawn integration).
@@ -34,6 +36,7 @@ mod launch;
 mod ledger;
 mod manifest;
 mod mods;
+mod pack_inbox;
 mod package;
 mod paths;
 mod plan;
@@ -84,12 +87,16 @@ pub use mods::{
     ModsEnv, ModsLoader, Unplayable, add_mods_root, default_mods_source, discover_mods,
     discover_mods_in, loader_status, mods_choice, mods_last_run, set_mods_choice,
 };
+pub use pack_inbox::{
+    LedgerPackFile, LedgerPackInbox, PackInboxFile, PackInboxPlan, PackInboxReport,
+};
 pub use package::{
-    GiPackage, Limits, PackageSummary, PlacedFile, SummaryConfigWrite, SummaryGameFile,
+    GiPackage, Limits, PackageSummary, PlacedFile, SummaryConfigWrite, SummaryGameFile, SummaryPack,
 };
 pub use plan::{
     Accept, FormerFile, GameAction, GameFileAction, HIJACK_NAMES, InstallPlan, PinnedDescriptor,
-    Provenance, VALVE_ANTI_CHEAT, is_hijack_name, plan_install, plan_install_in, vac_verdict,
+    Provenance, VALVE_ANTI_CHEAT, is_hijack_name, plan_install, plan_install_in,
+    plan_install_with_user_pack_root, vac_verdict,
 };
 pub use running::is_running;
 pub use steam_appinfo::{

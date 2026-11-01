@@ -8,7 +8,8 @@ use serde::Serialize;
 
 use crate::error::{LauncherError, Result, codes};
 
-/// One progress step. `stage` is a code: "profile-files" or "game-files".
+/// One progress step. `stage` is a code: "profile-files", "pack-inbox" (the packs handed to the
+/// desktop companion, `${astra_pack_inbox}`) or "game-files".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Progress {
     pub stage: &'static str,

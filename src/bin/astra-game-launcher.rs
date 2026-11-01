@@ -26,7 +26,8 @@ USAGE
   astra-game-launcher inspect <zip> --sha256 <hex> [--json]
   astra-game-launcher plan <zip> --sha256 <hex> --game <dir> --exe <rel> [--appid N]
                            [--proton-prefix P] [--platform windows|linux-proton|linux-native]
-                           [--steam-root <dir>] --profile <dir> [--json]
+                           [--steam-root <dir>] --profile <dir> [--user-pack-root <dir>]
+                           [--json]
   astra-game-launcher install <same as plan> --yes [--accept-vac-unchecked] [--json]
   astra-game-launcher launch --profile <dir> --game <dir> --exe <rel> [--appid N]
                              [--proton-prefix P] [--platform …] [--steam <path>]
@@ -52,6 +53,10 @@ NOTES
   places (both: a wrong --steam-root does not switch Steam's usual places off). The appid is
   --appid, else the manifest's. When nothing answers, the plan says `vac-unchecked` and
   `install` needs --accept-vac-unchecked besides --yes. `launch` checks VAC again.
+  `plan`/`install --user-pack-root <dir>` names the desktop companion's user root (Astra's
+  <config>/companion/pack, the engine's ASTRA_USER_PACK): an integration that brings its own
+  animation packs (`${astra_pack_inbox}`) puts them in <dir>/inbox/packs/<id>/, and is refused
+  (`pack-inbox-unavailable`) without it. Uninstall writes the packs' tombstones there.
   `launch --dry-run` prepares everything (INI keys, the Proton overrides, which uninstall
   reverts) and prints the command without starting it.
   `mods` lists the player's own mods for the game (r2modman, Thunderstore Mod Manager, Gale, a
@@ -361,6 +366,12 @@ fn plan_text(p: &InstallPlan) -> String {
                 .unwrap_or_default()
         );
     }
+    if let Some(inbox) = &p.pack_inbox {
+        let _ = writeln!(s, "for the desktop companion, in {}:", inbox.dir.display());
+        for f in &inbox.files {
+            let _ = writeln!(s, "  {:<18} {}  uid {}", "pack", f.name, f.uid);
+        }
+    }
     let _ = writeln!(
         s,
         "launch args: {}",
@@ -461,12 +472,22 @@ fn run(argv: &[String]) -> Result<Output, LauncherError> {
             })
         }
         "plan" | "install" => {
-            let mut opts = vec!["--sha256", "--profile"];
+            let mut opts = vec!["--sha256", "--profile", "--user-pack-root"];
             opts.extend_from_slice(GAME_OPTS);
             let a = Args::parse(argv, &opts, &["--json", "--yes", "--accept-vac-unchecked"])?;
             let pkg = open_package(&a)?;
             let game = game_target(&a)?;
-            let plan = gl::plan_install(&pkg, &game, Path::new(a.need("--profile")?))?;
+            // `plan_install`'s planning (row 18 of the debt file: first-party, no descriptors),
+            // with the companion's user root when one is named.
+            let plan = gl::plan_install_with_user_pack_root(
+                &pkg,
+                &game,
+                Path::new(a.need("--profile")?),
+                &gl::EngineSet::empty(),
+                gl::Provenance::FirstParty,
+                None,
+                a.one("--user-pack-root").map(Path::new),
+            )?;
             if cmd == "plan" {
                 return Ok(Output {
                     text: plan_text(&plan),
@@ -546,10 +567,23 @@ fn run(argv: &[String]) -> Result<Output, LauncherError> {
             let a = Args::parse(argv, &opts, &["--json"])?;
             let game = game_target(&a)?;
             let r = gl::uninstall(Path::new(a.need("--profile")?), &game)?;
-            let text = format!(
+            let mut text = format!(
                 "removed: {:?}\nrestored: {:?}\nkept (changed since): {:?}\nprofile files removed: {}\nproton override restored: {}\n",
                 r.removed, r.restored, r.kept, r.profile_files_removed, r.proton_restored
             );
+            if let Some(p) = &r.pack_inbox {
+                let _ = writeln!(
+                    text,
+                    "companion packs: tombstones {:?}, held for another install {:?}, removed unread {:?}{}",
+                    p.tombstones,
+                    p.held,
+                    p.removed,
+                    p.skipped
+                        .as_deref()
+                        .map(|w| format!(" (skipped: {w})"))
+                        .unwrap_or_default()
+                );
+            }
             Ok(Output {
                 json: to_json(&r),
                 text,

@@ -16,7 +16,7 @@ use crate::error::{LauncherError, Result, codes};
 use crate::manifest::{
     FromPattern, IntegrationInfo, MANIFEST_FILE, Manifest, Target, from_pattern, safe_component,
 };
-use crate::paths::{is_reserved, parse_jailed};
+use crate::paths::{Root, is_reserved, parse_jailed};
 
 /// The caps a package must stay under.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +74,8 @@ pub struct GiPackage {
     manifest_text: String,
     pub(crate) profile_files: Vec<PackFile>,
     pub(crate) game_files: Vec<PackFile>,
+    /// `${astra_pack_inbox}`'s packs, each with its uid ([`crate::pack_inbox`]).
+    pub(crate) inbox_files: Vec<crate::pack_inbox::InboxPack>,
     /// Every file of the zip, folders left out: (index, name, size), in the zip's order.
     entries: Vec<(usize, String, u64)>,
 }
@@ -137,6 +139,19 @@ pub struct PackageSummary {
     pub proton_overrides: Vec<(String, String)>,
     pub config_writes: Vec<SummaryConfigWrite>,
     pub variables: Vec<String>,
+    /// The packs it hands the desktop companion (`${astra_pack_inbox}`), in the manifest's order.
+    /// Absent when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pack_inbox: Vec<SummaryPack>,
+}
+
+/// One pack a package hands the desktop companion.
+#[derive(Debug, Clone, Serialize)]
+pub struct SummaryPack {
+    pub name: String,
+    pub sha256: String,
+    /// `[animpack] uid`: `<integration id>/<tail>`.
+    pub uid: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -259,9 +274,16 @@ impl GiPackage {
         };
 
         let mut profile_files: Vec<PackFile> = Vec::new();
+        // `${astra_pack_inbox}`'s: the companion's, never the profile's.
+        let mut inbox: Vec<PackFile> = Vec::new();
         for (n, rule) in manifest.files.iter().enumerate() {
             let dest = parse_jailed(&rule.to)?;
-            let before = profile_files.len();
+            let into = if dest.root == Root::PackInbox {
+                &mut inbox
+            } else {
+                &mut profile_files
+            };
+            let before = into.len();
             match from_pattern(&rule.from, &format!("files[{n}].from"))? {
                 FromPattern::Exact(p) => {
                     let &(index, ref entry, size) = files
@@ -272,7 +294,7 @@ impl GiPackage {
                     if dest.is_dir {
                         rel.push(entry.rsplit('/').next().unwrap_or(entry).to_owned());
                     }
-                    profile_files.push(PackFile {
+                    into.push(PackFile {
                         index,
                         entry: entry.clone(),
                         rel,
@@ -288,7 +310,7 @@ impl GiPackage {
                         if let Some(rest) = entry.strip_prefix(prefix.as_str()) {
                             let mut rel = dest.rel.clone();
                             rel.extend(rest.split('/').map(str::to_owned));
-                            profile_files.push(PackFile {
+                            into.push(PackFile {
                                 index: *index,
                                 entry: entry.clone(),
                                 rel,
@@ -299,9 +321,13 @@ impl GiPackage {
                     }
                 }
             }
-            if profile_files.len() == before {
+            if into.len() == before {
                 return Err(not_in_zip(format!("files[{n}].from")));
             }
+        }
+        // One `.astrapack` straight in the inbox folder, each (a `**` expansion included).
+        for f in &inbox {
+            crate::pack_inbox::check_placed(f)?;
         }
 
         let mut game_files: Vec<PackFile> = Vec::new();
@@ -334,7 +360,7 @@ impl GiPackage {
             }
         }
 
-        for set in [&profile_files, &game_files] {
+        for set in [&profile_files, &game_files, &inbox] {
             let mut dests: HashSet<String> = HashSet::new();
             for f in set {
                 if !dests.insert(f.rel_string().to_lowercase()) {
@@ -349,6 +375,29 @@ impl GiPackage {
         for f in profile_files.iter_mut().chain(game_files.iter_mut()) {
             let bytes = read_entry(&mut ar, f.index, &f.entry, f.size)?;
             f.sha256 = sha256_hex(&bytes);
+        }
+        // A pack's uid is read once, here: what its tombstone is named after at uninstall.
+        let mut inbox_files: Vec<crate::pack_inbox::InboxPack> = Vec::new();
+        for mut f in inbox {
+            let bytes = read_entry(&mut ar, f.index, &f.entry, f.size)?;
+            f.sha256 = sha256_hex(&bytes);
+            let (uid, tombstone) = crate::pack_inbox::read_uid(
+                &f.entry,
+                &bytes,
+                &manifest.integration.id,
+                limits.max_uncompressed_bytes,
+            )?;
+            if inbox_files.iter().any(|p| p.uid == uid) {
+                return Err(LauncherError::new(codes::PACK_INBOX_INVALID)
+                    .with("reason", "uid-twice")
+                    .with("file", f.entry.clone())
+                    .with("uid", uid));
+            }
+            inbox_files.push(crate::pack_inbox::InboxPack {
+                file: f,
+                uid,
+                tombstone,
+            });
         }
         for (n, f) in game_files.iter().enumerate() {
             if let Some(pinned) = &manifest.game_files[n].sha256
@@ -368,6 +417,7 @@ impl GiPackage {
             manifest_text,
             profile_files,
             game_files,
+            inbox_files,
             entries: files,
         })
     }
@@ -386,8 +436,9 @@ impl GiPackage {
         &self.sha256
     }
 
-    /// Every file an install of this package places: the `[[files]]` into the profile, then the
-    /// `[[game_files]]` beside the exe, each with the digest read at [`GiPackage::open`].
+    /// Every file an install of this package places: the `[[files]]` into the profile, the packs
+    /// it hands the desktop companion (`${astra_pack_inbox}/…`), then the `[[game_files]]` beside
+    /// the exe, each with the digest read at [`GiPackage::open`].
     pub fn placed_files(&self) -> Vec<PlacedFile> {
         let place = |root: &str, f: &PackFile| PlacedFile {
             dest: format!("${{{root}}}/{}", f.rel_string()),
@@ -398,6 +449,11 @@ impl GiPackage {
         self.profile_files
             .iter()
             .map(|f| place("profile", f))
+            .chain(
+                self.inbox_files
+                    .iter()
+                    .map(|p| place(crate::pack_inbox::VARIABLE, &p.file)),
+            )
             .chain(self.game_files.iter().map(|f| place("game", f)))
             .collect()
     }
@@ -434,6 +490,15 @@ impl GiPackage {
                 })
                 .collect(),
             variables: m.variables().into_iter().collect(),
+            pack_inbox: self
+                .inbox_files
+                .iter()
+                .map(|p| SummaryPack {
+                    name: p.name().to_owned(),
+                    sha256: p.file.sha256.clone(),
+                    uid: p.uid.clone(),
+                })
+                .collect(),
         }
     }
 

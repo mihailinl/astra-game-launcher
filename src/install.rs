@@ -24,6 +24,7 @@ use crate::ledger::{
     ProfileLock,
 };
 use crate::manifest::IntegrationInfo;
+use crate::pack_inbox::{self, PackInboxPlan, PackInboxReport};
 use crate::package::GiPackage;
 use crate::paths::{
     BACKUP_DIR, FileState, LOCK_FILE, canonical_dir, checked_rel, existing_target, file_state,
@@ -31,7 +32,7 @@ use crate::paths::{
 };
 use crate::plan::{
     Accept, FormerFile, GameAction, GameFileAction, InstallPlan, Planning, kept_for_their_loader,
-    loader_baselines, plan_install_in, plan_install_with, proxy_folder_gained, proxy_folders,
+    loader_baselines, plan_install_with, proxy_folder_gained, proxy_folders,
 };
 use crate::proton;
 use crate::running::refuse_if_running;
@@ -80,6 +81,12 @@ pub struct UninstallReport {
     /// Astra's own file (`not_restored`) is not one. Absent when empty, and before 0.5.0.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// What was done in the desktop companion's inbox for the packs the install handed it
+    /// (`${astra_pack_inbox}`): packs still waiting there removed, a tombstone written for each
+    /// (the companion trashes the pack), or held for another profile's install of the same
+    /// integration. Absent when the install handed it none, and before 0.5.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack_inbox: Option<PackInboxReport>,
 }
 
 /// [`UninstallReport::kept_reasons`]: the folder of a file we added gained, since, a name that
@@ -94,12 +101,13 @@ fn backup_rel(rel: &str) -> String {
     format!("{BACKUP_DIR}/game/{rel}")
 }
 
-/// Installs `plan`. The plan must be what [`crate::plan_install_in`] returns for this package,
-/// game and profile right now — planned again here with the plan's own provenance and with the
-/// engine descriptor it pinned alone ([`InstallPlan::engine_descriptor`], parsed again and its
-/// digest checked), so no plan is installed against another descriptor than the one it was
-/// made with. A changed game folder, profile or descriptor gives `plan-stale`. [`install_in`]
-/// with no anti-cheat markers.
+/// Installs `plan`. The plan must be what [`crate::plan_install_in`] (or
+/// [`crate::plan_install_with_user_pack_root`]) returns for this package, game and profile right
+/// now — planned again here with the plan's own provenance, the companion's user root it names
+/// ([`InstallPlan::pack_inbox`]), and with the engine descriptor it pinned alone
+/// ([`InstallPlan::engine_descriptor`], parsed again and its digest checked), so no plan is
+/// installed against another descriptor than the one it was made with. A changed game folder,
+/// profile or descriptor gives `plan-stale`. [`install_in`] with no anti-cheat markers.
 pub fn install(
     pkg: &GiPackage,
     plan: &InstallPlan,
@@ -145,14 +153,14 @@ pub fn install_in(
         .engine_descriptor
         .as_ref()
         .and(pkg.manifest().engine_code());
-    let fresh = plan_install_in(
-        pkg,
-        game,
-        &plan.profile_dir,
-        &engines,
-        plan.provenance,
-        pick.as_ref(),
-    )?;
+    // With the companion's user root the plan was made with, if it hands the companion packs.
+    let how = Planning {
+        engines: &engines,
+        provenance: plan.provenance,
+        engine_pick: pick.as_ref(),
+        user_pack_root: plan.pack_inbox.as_ref().map(|p| p.user_root.as_path()),
+    };
+    let fresh = plan_install_with(pkg, game, &plan.profile_dir, how, None)?;
     if fresh != *plan {
         return Err(stale("plan"));
     }
@@ -176,14 +184,11 @@ pub fn install_in(
         } else {
             &[]
         };
-        uninstall_ledger(&profile, old_root, old, readd)?;
+        // A pack this plan hands the companion again is no tombstone (the engine replaces it by
+        // its version, and a tombstone would take it off whoever wears it).
+        uninstall_ledger(&profile, old_root, old, readd, plan.pack_inbox.as_ref())?;
         // The game folder as the plan expected it once the old integration is gone. The plan's
         // refusals were judged with that integration in place, as the person will find the game.
-        let how = Planning {
-            engines: &engines,
-            provenance: plan.provenance,
-            engine_pick: pick.as_ref(),
-        };
         let again = plan_install_with(pkg, game, &plan.profile_dir, how, here)?;
         if again.game_files != plan.game_files {
             return Err(stale("after-removing-the-previous-integration"));
@@ -238,6 +243,7 @@ pub fn install_in(
         provenance: plan.provenance,
         descriptor_sha256: plan.engine_descriptor.as_ref().map(|d| d.sha256.clone()),
         proxy_folders,
+        pack_inbox: plan.pack_inbox.as_ref().map(pack_inbox::ledger_of),
     };
     ledger::write(&profile, &ledger)?;
 
@@ -248,7 +254,7 @@ pub fn install_in(
             Ok(ledger)
         }
         Err(e) => {
-            let _ = uninstall_ledger(&profile, &game_root, &ledger, &[]);
+            let _ = uninstall_ledger(&profile, &game_root, &ledger, &[], None);
             Err(e)
         }
     }
@@ -269,6 +275,10 @@ fn place(
         let target = prepare_target(profile, &f.rel)?;
         write_atomic(&target, &bytes)?;
         ctx.report("profile-files", i as u64 + 1, total);
+    }
+
+    if let Some(inbox) = &plan.pack_inbox {
+        pack_inbox::place(pkg, inbox, profile, &mut ar, ctx)?;
     }
 
     let total = pkg.game_files.len() as u64;
@@ -336,7 +346,9 @@ fn place(
 }
 
 /// Undoes what a ledger records and removes the ledger: the game half ([`undo_game`]), then the
-/// profile's files, the backups and the ledger itself. A rollback passes no `readd`, and keeps a
+/// profile's files, the packs it handed the desktop companion ([`crate::pack_inbox`]: a tombstone
+/// for each, but for one `again` — the plan of the update replacing it — hands over again), the
+/// backups and the ledger itself. A rollback passes no `readd`, and keeps a
 /// proxy exactly where an uninstall of the failed install would: an update carries the first
 /// install's baselines, so what arrived since that install and can carry another loader (a
 /// folder, a library; never the configs and logs our own loaders write, [`proxy_folder_gained`])
@@ -346,6 +358,7 @@ pub(crate) fn uninstall_ledger(
     game_root: &Path,
     ledger: &Ledger,
     readd: &[GameFileAction],
+    again: Option<&PackInboxPlan>,
 ) -> Result<UninstallReport> {
     let mut report = undo_game(profile, game_root, ledger, readd)?;
 
@@ -370,6 +383,8 @@ pub(crate) fn uninstall_ledger(
             }
         }
     }
+
+    report.pack_inbox = pack_inbox::undo(profile, ledger, again)?;
 
     remove_tree_no_follow(&profile.join(BACKUP_DIR))?;
     ledger::remove(profile)?;
@@ -412,6 +427,7 @@ fn undo_game(
         former_removed: Vec::new(),
         kept_reasons: BTreeMap::new(),
         warnings: Vec::new(),
+        pack_inbox: None,
     };
     let readded = |rel: &str| {
         readd
@@ -689,7 +705,7 @@ pub fn uninstall(profile_dir: &Path, game: &GameTarget) -> Result<UninstallRepor
         };
         refuse_if_running(&game.exe_file_name()?)?;
         let game_root = placed_root(game, &ledger)?;
-        let mut report = uninstall_ledger(&profile, &game_root, &ledger, &[])?;
+        let mut report = uninstall_ledger(&profile, &game_root, &ledger, &[], None)?;
         report.former_removed = sweep_former(&game_root, &ledger);
         // The player's answer to "play with your mods?" goes with the install, so a reinstall asks
         // again. An update keeps it (it never comes through here). Best effort: the integration is

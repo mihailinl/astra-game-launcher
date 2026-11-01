@@ -19,6 +19,7 @@ use crate::game::{GameTarget, Platform};
 use crate::game::{several_apps, steam_appids_of_dir};
 use crate::ledger::{self, Ledger, LoaderBaseline, ProxyFolder};
 use crate::manifest::{IntegrationInfo, LoaderDecl, Manifest};
+use crate::pack_inbox::PackInboxPlan;
 use crate::package::{GiPackage, PackFile};
 use crate::paths::{
     FileState, absolute, canonical_dir, checked_rel, existing_target, file_state, find_any_case,
@@ -139,6 +140,12 @@ pub struct InstallPlan {
     /// `None` (and absent from the JSON) for a built-in engine, and for none asked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_descriptor: Option<PinnedDescriptor>,
+    /// The packs the integration hands the desktop companion (`${astra_pack_inbox}`), and the
+    /// companion's user root the caller named for them ([`plan_install_with_user_pack_root`]):
+    /// install plans again with that root. Absent (and absent from the JSON) when the package
+    /// places none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack_inbox: Option<PackInboxPlan>,
 }
 
 /// Who vouches for an integration — what its plan may do (plan B §3, "Overwrite a player's
@@ -219,6 +226,8 @@ pub(crate) struct Planning<'a> {
     pub(crate) engines: &'a EngineSet,
     pub(crate) provenance: Provenance,
     pub(crate) engine_pick: Option<&'a EngineCode>,
+    /// The desktop companion's user root (`ASTRA_USER_PACK`), for `${astra_pack_inbox}`.
+    pub(crate) user_pack_root: Option<&'a Path>,
 }
 
 /// Names a Doorstop proxy of ours goes by that Play, uninstall and the loader baselines treat as
@@ -1141,10 +1150,44 @@ pub fn plan_install_in(
     provenance: Provenance,
     engine_pick: Option<&EngineCode>,
 ) -> Result<InstallPlan> {
+    plan_install_with_user_pack_root(
+        pkg,
+        game,
+        profile_root,
+        engines,
+        provenance,
+        engine_pick,
+        None,
+    )
+}
+
+/// [`plan_install_in`], with the desktop companion's user root (`user_pack_root`: the
+/// `ASTRA_USER_PACK` the caller pairs with the companion's engine, the daemon's
+/// `CompanionLocation`) for a package that hands the companion its own animation packs
+/// (`${astra_pack_inbox}`, [`crate::pack_inbox`]): they go to
+/// `<user_pack_root>/inbox/packs/<integration id>/` ([`InstallPlan::pack_inbox`]).
+///
+/// Such a package planned without one is `pack-inbox-unavailable{reason=no-user-root}`: the
+/// launcher never guesses where the companion keeps its data. The root must be an absolute local
+/// folder, or nothing yet (the install makes it, as the companion would at its first start):
+/// `path-escapes` (`reason` = `unc`, `verbatim-unc`, `device`, `verbatim`, `not-absolute`,
+/// `parent`, judged by its text as Windows reads it on every machine; `pack-inbox-overlaps-game`;
+/// a link or a file on the way below it), `pack-inbox-unavailable{reason=not-a-directory}`. A
+/// package that places no pack plans exactly as [`plan_install_in`], whatever root is given.
+pub fn plan_install_with_user_pack_root(
+    pkg: &GiPackage,
+    game: &GameTarget,
+    profile_root: &Path,
+    engines: &EngineSet,
+    provenance: Provenance,
+    engine_pick: Option<&EngineCode>,
+    user_pack_root: Option<&Path>,
+) -> Result<InstallPlan> {
     let how = Planning {
         engines,
         provenance,
         engine_pick,
+        user_pack_root,
     };
     plan_install_with(pkg, game, profile_root, how, None)
 }
@@ -1237,6 +1280,9 @@ pub(crate) fn plan_install_with(
             .with("path", profile_dir.display().to_string())
             .with("reason", "profile-overlaps-game"));
     }
+    // The packs for the desktop companion, and where they go: a package that has some is planned
+    // only with the companion's folder named.
+    let pack_inbox = crate::pack_inbox::plan(pkg, how.user_pack_root, &game_dir)?;
     let existing = if profile_resolved.is_dir() {
         ledger::read(&profile_resolved)?
     } else {
@@ -1399,6 +1445,7 @@ pub(crate) fn plan_install_with(
         vac_checked: vac,
         provenance: how.provenance,
         engine_descriptor,
+        pack_inbox,
     })
 }
 

@@ -613,7 +613,11 @@ fn the_restored_ledger_is_schema_4_and_older_launchers_refuse_it() {
     restore_game_files(&w.profile(), &w.target()).unwrap();
     let v = w.ledger_json();
     assert_eq!(v["schema"], 4);
-    assert_eq!(astra_game_launcher::LEDGER_SCHEMA, 4);
+    assert_eq!(
+        astra_game_launcher::LEDGER_SCHEMA,
+        5,
+        "schema 5: a ledger that handed the companion packs (tests/pack_inbox.rs)"
+    );
     assert_eq!(v["state"], "restored");
     assert_eq!(v["game_files"], serde_json::json!([]));
     for absent in ["proton", "loader_baseline", "proxy_folders"] {

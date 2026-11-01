@@ -182,6 +182,15 @@ pub mod codes {
     pub const CONTENT_LICENCE_CONFLICT: &str = "content-licence-conflict";
     /// A part with no readable VRM licence and no `licence` of its own.
     pub const CONTENT_LICENCE_UNDECLARED: &str = "content-licence-undeclared";
+    // `${astra_pack_inbox}`: the integration's own animation packs, handed to the desktop
+    // companion (`crate::pack_inbox`).
+    /// The plan has nowhere to put them (`reason` = `no-user-root`: the caller named no companion
+    /// user root, with `files`; `not-a-directory`, with `path`). Never a guessed folder.
+    pub const PACK_INBOX_UNAVAILABLE: &str = "pack-inbox-unavailable";
+    /// A file it would place is not a pack the companion's inbox reads (`reason` =
+    /// `integration-id`, `in-a-folder`, `not-a-pack`, `not-a-zip`, `no-animpack-toml`,
+    /// `unreadable`, `uid` (with `uid`, and `want` or `detail`), `uid-twice`; `key` or `file`).
+    pub const PACK_INBOX_INVALID: &str = "pack-inbox-invalid";
     // Other.
     pub const MISSING_VARIABLE: &str = "missing-variable";
     /// A variable's value holds a character it may not carry (a newline into an INI, a NUL).
@@ -263,6 +272,8 @@ pub mod codes {
         CONTENT_LICENCE_REFUSED,
         CONTENT_LICENCE_CONFLICT,
         CONTENT_LICENCE_UNDECLARED,
+        PACK_INBOX_UNAVAILABLE,
+        PACK_INBOX_INVALID,
         MISSING_VARIABLE,
         INVALID_VARIABLE,
         CANCELLED,
@@ -439,6 +450,12 @@ impl LauncherError {
             }
             codes::CONTENT_LICENCE_UNDECLARED => {
                 "a content file of the release has no licence: neither its own nor a declared one"
+            }
+            codes::PACK_INBOX_UNAVAILABLE => {
+                "the integration brings animations for the desktop companion, and no companion folder was given to put them in"
+            }
+            codes::PACK_INBOX_INVALID => {
+                "a file the integration hands the desktop companion is not an animation pack it can read"
             }
             codes::MISSING_VARIABLE => "a variable the integration needs was not given",
             codes::INVALID_VARIABLE => "a variable's value holds a forbidden character",

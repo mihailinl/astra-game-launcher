@@ -1265,6 +1265,59 @@ fn compat_and_check_pass_a_release_with_its_own_content() {
     assert_eq!(r["content"]["parts"][0]["licence_source"], "declared");
 }
 
+/// C2 for `${astra_pack_inbox}` (`src/pack_inbox.rs`): launcher 0.3.1 refuses the placeholder as
+/// it parses the manifest, so `compat` fails the release at step 1 with the finding a release
+/// script reads — `needs-newer-astra{min_astra = 0.2.8, placeholder = astra_pack_inbox}`, never
+/// 0.3.1's bare `unknown-placeholder` — and reads it no further; `check` (this launcher, the
+/// catalogue's ingest) passes the same zip, its pack declared as the release's own content.
+#[test]
+fn compat_holds_a_pack_inbox_release_to_astra_0_2_8() {
+    let tmp = Tmp::new("compat-pack-inbox");
+    let s = src("astra.unity");
+    let manifest = manifest_for(&s, "1.2.3").replacen(
+        "[target]",
+        "[[integration.content]]\npath = \"packs/peak-climb.astrapack\"\nkind = \"animations\"\ntitle = \"Climb\"\ncredit = \"someone\"\nlicence = \"CC-BY-4.0\"\n\n[target]",
+        1,
+    ) + "\n[[files]]\nfrom = \"packs/**\"\nto = \"${astra_pack_inbox}/\"\n";
+    let pack = zip(&[
+        E::File(
+            "animpack.toml",
+            b"[animpack]\nname = \"Climb\"\nkind = \"vrm\"\nuid = \"astra.unity/climb\"\nversion = \"1.0.0\"\nowner = \"integration:astra.unity\"\ngames = [\"astra.unity\"]\n",
+        ),
+        E::File("clips/climb.vrma", b"glTF"),
+    ]);
+    let mut entries = vec![
+        E::File("astra-gi.toml", manifest.as_bytes()),
+        E::File("astra-probe.dll", DLL),
+        E::File("packs/peak-climb.astrapack", &pack),
+    ];
+    entries.extend(PAYLOAD.iter().map(|p| E::File(p, b"payload")));
+    let zip = zip(&entries);
+    let z = put(&tmp, "r", s.asset, &zip);
+    let (exit, r) = probe(&["compat", "--zip", &z, "--source", s.id, "--tag", "v1.2.3"]);
+    assert_eq!(exit, 1, "{r:#}");
+    assert_eq!(r["verdict"], "fail");
+    let findings = r["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1, "{r:#}");
+    assert_eq!(first_failure(&r), (1, "needs-newer-astra".to_owned()));
+    assert_eq!(findings[0]["params"]["min_astra"], "0.2.8");
+    assert_eq!(findings[0]["params"]["placeholder"], "astra_pack_inbox");
+    assert_eq!(findings[0]["params"]["refused"], "unknown-placeholder");
+    assert_eq!(
+        statuses(&r),
+        [
+            "fail", "skipped", "skipped", "skipped", "skipped", "skipped"
+        ]
+    );
+
+    let (code, r) = check(&z, &["--provenance", "first-party"]);
+    assert_eq!(code, 0, "{r:#}");
+    assert_eq!(
+        r["content"]["parts"][0]["path"],
+        "packs/peak-climb.astrapack"
+    );
+}
+
 /// Every kind of break fails at the step that owns it, and no earlier one.
 #[test]
 fn compat_fails_each_break_at_its_step() {

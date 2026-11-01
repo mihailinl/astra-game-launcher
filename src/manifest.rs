@@ -37,6 +37,12 @@
 //!
 //! None of these changes what [`IntegrationInfo`], [`crate::InstallPlan`] or [`crate::Ledger`]
 //! serialise to.
+//!
+//! One thing outside `[integration.*]` is newer than 0.3.1: the `[[files]]` destination
+//! `${astra_pack_inbox}` (the integration's own animation packs, handed to the desktop companion;
+//! [`crate::pack_inbox`]), which 0.3.1 refuses as `unknown-placeholder`. A release that uses it
+//! needs `min_astra` 0.2.8, and `gi-probe compat` says so. It is a destination only: anywhere a
+//! caller's variable may stand it is `unknown-placeholder` here too.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -630,6 +636,13 @@ fn collect_vars(s: &str, into: &mut BTreeSet<String>) -> Result<()> {
         if let Piece::Var(name) = p
             && !OWN_PLACEHOLDERS.contains(&name)
         {
+            // A `[[files]]` destination only: as a caller's variable it would be one no caller
+            // passes, and Play's `missing-variable`.
+            if name == crate::pack_inbox::VARIABLE {
+                return Err(LauncherError::new(codes::UNKNOWN_PLACEHOLDER)
+                    .with("name", name)
+                    .with("reason", "a-files-destination-only"));
+            }
             into.insert(name.to_owned());
         }
     }
@@ -771,10 +784,17 @@ impl Manifest {
             let key = format!("files[{n}]");
             let pattern = from_pattern(&f.from, &format!("{key}.from"))?;
             let to = parse_jailed(&f.to)?;
-            if to.root != Root::Profile {
-                return Err(LauncherError::new(codes::PATH_ESCAPES)
-                    .with("path", f.to.clone())
-                    .with("reason", "files-go-into-the-profile"));
+            match to.root {
+                Root::Profile => {}
+                // The integration's own animation packs, for the desktop companion.
+                Root::PackInbox => {
+                    crate::pack_inbox::check_rule(&self.integration.id, &to, &format!("{key}.to"))?
+                }
+                Root::Game => {
+                    return Err(LauncherError::new(codes::PATH_ESCAPES)
+                        .with("path", f.to.clone())
+                        .with("reason", "files-go-into-the-profile"));
+                }
             }
             if matches!(pattern, FromPattern::Below(_)) && !to.is_dir {
                 return Err(invalid(

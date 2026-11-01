@@ -44,6 +44,11 @@ comes off this file only in the commit that closes it.
 | 38 | **An `.astrachar`'s body has no golden, and AstraPlugins' checker does not judge it.** `manifest.md` §2.7.3 applies the VRM gate to the body of a readable `.astrachar` and flags an unreadable one (`F_CONTENT_ASTRACHAR_UNREADABLE`); `tools/check-games-goldens.py` does neither and `testdata/games/content/` holds no bundle, so the launcher's reading (`src/content.rs` `astrachar_body`: `astrachar.json` parses and its `body.file` is a `.vrm` the bundle holds, beginning with the GLB magic; that body is held to the format rules, then gated; a `ref`, `omitted` or `null` body is unreadable, so a built-in-bodied or pixel character is flagged) is held to our fixtures alone. Beyond the spec, a bundle that reads as two archives is `content-format{reason=zip-inconsistent}` and an `astrachar.json` naming a member twice `{reason=astrachar-json-duplicate-member}`: a reader that took the other body would wear bytes the gate never read. Run over our 41 fixtures and near misses (2026-11-01), the checker and the launcher agree on 37; the four they differ on are bundles whose body the checker never opens. | Writing the spec's vectors and its checker's half is the spec's. | the spec (vectors, the checker), then L to keep or drop the two refusals beyond it | `tests/common/content_fixtures.rs` `hostile` (the five character-bundle fixtures) |
 | 39 | **What is content-typed follows the spec's checker exactly, its limits included.** The extension and the first 32 bytes, as `check-games-goldens.py` reads `raw[:32]`: an ASCII FBX (`; FBX`) only from 18 bytes on, a `.gltf` only with `{` among its first 32 bytes after whitespace, a zip by `PK` and 3, 5 or 7. A GLB under a name the table does not list (`.bin`, a `.png` holding glTF bytes) is not content, and nothing inside an `.astrapack` is judged (an avatar packed in an `animations` part gets no avatar verdict). A game integration is native code: what it hides under another name, in a DLL or encrypted, no check from outside its code can see. | The check covers what Astra's own loaders read by the names the table lists; agreeing with the catalogue's check file for file is worth more than catching a renamed file that only one of the two would. | the spec (whether to widen the table, or open `.astrapack`s), else accepted | `src/content.rs` `a_file_is_content_only_when_its_extension_and_magic_both_say_so`; `tests/content.rs` `only_content_typed_files_need_declaring` |
 | 40 | **Strict glTF JSON is stricter than Python's.** serde_json refuses `NaN`, `Infinity`, a lone surrogate and nesting deeper than 128, which Python's `json` accepts (up to its recursion limit): such a GLB is `content-format{reason=json-invalid}` here and judged by the spec's checker. | Failing closed; no exporter writes them. | the spec (say RFC 8259 JSON), else accepted | `src/content.rs` `strict_object` |
+| 41 | **A pack for `${astra_pack_inbox}` is held to its uid only.** `GiPackage::open` reads each `.astrapack`'s `animpack.toml` (at its root or in its one top-level folder, as the engine's `find_pack_root` looks) for `[animpack] uid = "<integration id>/<tail>"`, the claim the tombstone is named after (`pack-inbox-invalid{reason=uid}` otherwise). The other claims the engine's importer holds an inbox archive to (astra-companion `config/animpack/ops/inbox.rs` `check_claim`: `owner = "integration:<id>"`, `games = ["<id>"]`, a dotted `version`, no `patches` or `follows`, no `captured-` row; `IMPORT_CAPS`) are not asked: a release that breaks one installs, and the engine sets the archive aside in the inbox's `.refused/` on every machine. | Each copy of an engine rule here is a second definition that drifts from the engine's; only the uid is needed to act (the tombstone). Asking the rest belongs to `gi-probe check`, where an author sees it, once the engine's rules are a published contract. | L (after 0.5.0), with the engine's owner: the claim rules as data both read, or `gi-probe check` running the engine's own check | `src/pack_inbox.rs` `read_uid` |
+| 42 | **A pack's hold is a profile path.** An uninstall writes a pack's tombstone only when no other profile's hold in the inbox folder names it and that profile still holds a ledger (`src/pack_inbox.rs` `held_elsewhere`). A profile on a drive that is not mounted, or moved by hand, reads as gone, so another profile's uninstall tombstones a pack it still uses (a reinstall or repair of it delivers the pack again); a moved profile's old hold is never removed (it holds nothing). And two launchers in two profiles of one integration at once — one uninstalling, one installing — can interleave so the install's archive lands before the uninstall's tombstone: the companion imports, then trashes it. | The launcher sees one profile at a time; the profiles of an integration are the daemon's to know. The race needs two Plays of one integration's install and uninstall within milliseconds. | D (the daemon serialises installs per integration, or passes the profiles it holds), else accepted | `tests/pack_inbox.rs` `a_pack_another_install_holds_gets_no_tombstone` |
+| 43 | **A restore leaves the packs in the companion.** `restore_game_files` (a withdrawn integration) puts the game's files back and keeps the profile, its `pack_inbox` record and its hold: the packs the integration handed the companion stay installed there until the uninstall, which writes their tombstones. | Whether a withdrawn integration's animations leave the companion at once is the withdrawal policy's (marketplace plan A§4.4), which names game files only. | plan owner, then L | `src/install.rs` `restore_game_files` |
+| 44 | **The companion's design says `<uid>.remove` (§2), its engine reads `<uid tail>.remove`.** `docs/animation-packs.md` §2 lists "`<uid>.remove` tombstones" in `inbox/packs/<integration>/`, and a uid holds a `/` (`astra.peak/climb`); §5 (b) ("the launcher writes `astra.peak/climb.remove` there") and the engine (`inbox.rs`: `<tail>.remove` trashes `<integration>/<tail>`) agree on the tail, which is what the launcher writes. The tail is the uid's as the archive's `animpack.toml` says it, never the archive's file name: §5 (b)'s own example is `peak-climb.astrapack` with uid `astra.peak/climb`. | Not the launcher's text. | astra-companion (one word in §2) | `tests/pack_inbox.rs` `uninstall_writes_the_tombstone_into_the_inbox` |
+| 45 | **Astra passes no companion root yet: every release that uses `${astra_pack_inbox}` is `pack-inbox-unavailable` in the daemon.** The daemon plans with `plan_install` / `plan_install_in`, which name none. | Lane D's: the daemon must call `plan_install_with_user_pack_root` with `CompanionLocation`'s pack root (below, "For the daemon"). Nothing first-party uses the placeholder yet. | D | `tests/pack_inbox.rs` `without_a_root_the_plan_is_refused` |
 
 ## For the daemon (D1)
 
@@ -107,6 +112,21 @@ ingest. A developer-mode folder import has passed nothing: call `GiPackage::cont
 by its `path`. The catalogue entry's `content_confirmed` (dotted text ids, `market.rights.art`)
 and the games keys in `trust.json`'s `kind_keys` (`games-index-v1.md` §3 at this pin) are the
 catalogue client's; the launcher reads neither.
+
+`${astra_pack_inbox}` (L3b step 4, `crate::pack_inbox`; astra-companion `docs/animation-packs.md`
+§5 (b)): a `[[files]]` destination for the integration's own `.astrapack`s, which go to
+`<user root>/inbox/packs/<integration id>/`. Plan with `plan_install_with_user_pack_root(…,
+Some(<CompanionLocation's pack root>))` — the `ASTRA_USER_PACK` the daemon pairs with the engine,
+`<config>/companion/pack` — wherever it plans with `plan_install_in` now; without it such a release
+is `pack-inbox-unavailable{reason=no-user-root, files}` (row 45). The root need not exist (the
+install makes it). Two new codes in `codes::ALL`, K15 words for each: `pack-inbox-unavailable`
+(`reason` = `no-user-root` | `not-a-directory`) and `pack-inbox-invalid` (`reason`: a file that is
+no pack the companion reads, its uid not the integration's). The plan carries `pack_inbox{dir,
+files[{name, uid, tombstone}]}` (the install sheet may list it: "for the desktop companion"); the
+install reports the progress stage `pack-inbox`; `UninstallReport::pack_inbox` says what it did
+there (`tombstones`, `held` for another profile's install, `removed`, `skipped`). A ledger with
+packs is schema 5. The engine imports the packs at its start and on its watcher; nothing needs
+sending to it.
 
 ## For the specification (K13)
 
@@ -217,6 +237,16 @@ Also for the spec, not pinned by a golden:
 - **The `.astrachar` body** (row 38): vectors for the body gate and the unreadable flag, and
   whether a bundle that reads as two archives, or names a member of `astrachar.json` twice, is
   refused as the launcher refuses it.
+- **`manifest.md` §1 says "No new `${var}` placeholder"; `${astra_pack_inbox}` is one** (L3b
+  step 4): a `[[files]]` destination, not a caller's variable (as one it is `unknown-placeholder`
+  here too), which launcher 0.3.1 refuses as it parses the manifest (`unknown-placeholder{name}`,
+  so before Play), so a release that uses it needs `min_astra` 0.2.8 (`games-index-v1.md`'s entry)
+  and must not reach Astra 0.2.7's users; `gi-probe compat` fails it at step 1 with
+  `needs-newer-astra{min_astra=0.2.8, placeholder=astra_pack_inbox}`. Say so in §1, and add the
+  destination to `manifest.schema.json` and a golden: what may go there (one `.astrapack`
+  straight in the folder, its `[animpack] uid` the integration's, an id the companion reads,
+  `[a-z0-9._-]{1,64}` not dot-led) and the codes, `pack-inbox-invalid{reason}` and
+  `pack-inbox-unavailable`.
 
 ### The grammar
 

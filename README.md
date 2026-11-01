@@ -22,7 +22,7 @@ astra-game-launcher fetch <url> --sha256 <hex> -o <file> [--json]
 astra-game-launcher inspect <zip> --sha256 <hex> [--json]
 astra-game-launcher plan <zip> --sha256 <hex> --game <dir> --exe <rel> [--appid N]
                          [--proton-prefix P] [--platform windows|linux-proton|linux-native]
-                         --profile <dir> [--json]
+                         --profile <dir> [--user-pack-root <dir>] [--json]
 astra-game-launcher install <same as plan> --yes [--json]
 astra-game-launcher launch --profile <dir> --game <dir> --exe <rel> [--appid N]
                            [--proton-prefix P] [--steam <path>] [--var k=v]… [--vars-stdin]
@@ -533,6 +533,43 @@ launcher's or 0.2.7's own refusal code where one refused. **Exit 0**: no finding
 allowed). **Exit 1**: findings. **Exit 2**: a wrong command line or an unreadable file; the
 report then carries `error: {code, detail}` instead, and nothing was concluded.
 
+A release that uses something this launcher reads and 0.3.1 refuses as it parses the manifest
+(`${astra_pack_inbox}`, below) fails `compat` at step 1 with `needs-newer-astra` and
+`params.min_astra` (`0.2.8`): it must not reach Astra 0.2.7's users, and its catalogue entry needs
+that `min_astra`.
+
+## A game integration's own animation packs (0.5.0)
+
+An integration may hand the desktop companion its own animation packs (astra-companion
+`docs/animation-packs.md` §5 (b)): `.astrapack` archives under the `[[files]]` destination
+`${astra_pack_inbox}`, which is `<user root>/inbox/packs/<integration id>/`. `<user root>` is the
+companion's user root (`ASTRA_USER_PACK`, Astra's `<config>/companion/pack`), and only the caller
+can name it: `plan_install_with_user_pack_root(…, Some(root))`, or `plan --user-pack-root <dir>`.
+Without it such a plan is `pack-inbox-unavailable`; the launcher never guesses the folder.
+
+```toml
+[[files]]
+from = "packs/**"                  # packs/peak-climb.astrapack
+to = "${astra_pack_inbox}/"
+```
+
+- Only `.astrapack` files, straight in that folder; each one's `animpack.toml` says
+  `[animpack] uid = "<integration id>/<name>"`, and the integration id is one the companion reads
+  as a folder (`[a-z0-9._-]`, not dot-led). Otherwise `pack-inbox-invalid{reason}`, when the
+  package is opened.
+- The companion imports each pack and deletes its file, so Play never asks for one, and the
+  ledger records them apart from the profile's files (`pack_inbox`; a ledger with packs is
+  schema 5, which launchers 0.3.1 and 0.4.1 refuse).
+- Uninstall removes a pack still waiting there with its digest and writes `<name>.remove` (the
+  uid's `<name>`, not the archive's file name) into the same folder: the companion trashes the
+  pack. An update that hands over the same pack writes none (the companion replaces it by its
+  version); one that drops it does. A runner installed into two games shares one folder: each
+  profile leaves a hold there (`.astra-launcher-<key>.holds`), and a pack another profile's live
+  install holds gets no tombstone (`UninstallReport::pack_inbox`: `tombstones`, `held`, `removed`,
+  `skipped`).
+- Launcher 0.3.1 (Astra 0.2.7) refuses the placeholder (`unknown-placeholder`): a release that
+  uses it needs `min_astra` 0.2.8, and `gi-probe compat` says so.
+
 ## Safety rules the code enforces
 
 - **Verified input.** A zip is used only when its SHA-256 matches the one the caller expects.
@@ -552,7 +589,10 @@ report then carries `error: {code, detail}` instead, and nothing was concluded.
 - **The manifest.** An unknown key in a section that acts (`[target]`, `[[files]]`,
   `[[game_files]]`, `[launch]`, `[[config_writes]]`, or a new top-level section) is refused, so a
   newer feature is never silently ignored. A newer schema is refused with its own code.
-- **The path jail.** Files go only to `${profile}/…` and `${game}/…` (the exe's folder),
+- **The path jail.** Files go only to `${profile}/…` and `${game}/…` (the exe's folder), and an
+  integration's own animation packs to `${astra_pack_inbox}/` (the companion's inbox, below a
+  user root the caller names: absolute, local, judged by its text as Windows reads it on every
+  machine, never overlapping the game),
   relative, with no `..`, no drive or stream colon and no Windows device name. The jail is checked
   again on disk: parent folders are created one by one, a link anywhere on the way is refused,
   and the resolved folder must still be inside the root. Every write is a temporary file plus a

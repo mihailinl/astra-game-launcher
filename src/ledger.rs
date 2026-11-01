@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{LauncherError, Result, codes};
 use crate::manifest::IntegrationInfo;
+use crate::pack_inbox::LedgerPackInbox;
 use crate::paths::{LEDGER_FILE, LOCK_FILE, check_regular_or_absent, write_atomic};
 use crate::plan::{GameAction, Provenance};
 
@@ -21,12 +22,14 @@ use crate::plan::{GameAction, Provenance};
 /// carries it: 1, or 2 for a `proton` array (several overrides), or 3 for a game file shared with
 /// another mod manager (`share-loader`) — shapes an older launcher cannot parse — or 4 for a
 /// `restored` one, which an older launcher must not take for an install it could play or
-/// uninstall by its game files. [`read`] judges the schema before the shape, so from this
+/// uninstall by its game files, or 5 for one that handed the desktop companion packs
+/// (`pack_inbox`), which an older launcher would uninstall without the tombstones that take them
+/// out of the companion again. [`read`] judges the schema before the shape, so from this
 /// launcher on a newer ledger is `schema-too-new` rather than a parse failure (launchers 0.3.1
-/// and 0.4.1 already do: both refuse a schema-4 ledger so); a launcher from before schema 3
+/// and 0.4.1 already do: both refuse a schema-4 or 5 ledger so); a launcher from before schema 3
 /// parsed the shape first and fails on a schema-3 ledger with an `io` error naming the unknown
 /// action.
-pub const LEDGER_SCHEMA: u32 = 4;
+pub const LEDGER_SCHEMA: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -38,7 +41,8 @@ pub enum LedgerState {
     /// records left, and no game files but the `replace`s it could not put back whose backup it
     /// keeps (the player's file, while the profile lasts); Play refused (`needs-reinstall`,
     /// `reason` = `restored`), uninstall undoes what is left and removes the profile's files, and
-    /// installing over it is a fresh install. Always written as schema 4.
+    /// installing over it is a fresh install. Always written as schema 4, or 5 when it still
+    /// records packs handed to the desktop companion (`pack_inbox`, which a restore keeps).
     Restored,
 }
 
@@ -166,6 +170,12 @@ pub struct Ledger {
     /// a launcher before it ignores the key (no schema change).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub proxy_folders: Vec<ProxyFolder>,
+    /// The packs this integration handed the desktop companion (`${astra_pack_inbox}`,
+    /// [`crate::pack_inbox`]) and the user root they went below: never among `files`, since the
+    /// companion imports each one and deletes its file. Absent when there are none; a ledger
+    /// with them is schema 5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack_inbox: Option<LedgerPackInbox>,
 }
 
 /// `proton` is an object when there is one record (every ledger written before several overrides
@@ -232,7 +242,9 @@ pub(crate) fn read(profile: &Path) -> Result<Option<Ledger>> {
 
 /// The schema a ledger is written as: the lowest that can carry it.
 fn schema_for(ledger: &Ledger) -> u32 {
-    if ledger.state == LedgerState::Restored {
+    if ledger.pack_inbox.is_some() {
+        5
+    } else if ledger.state == LedgerState::Restored {
         4
     } else if ledger
         .game_files
