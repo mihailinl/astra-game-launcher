@@ -1028,8 +1028,8 @@ pub enum LicenceSource {
     Declared,
 }
 
-/// One covered part as a catalogue entry's `content[]` carries it (`games-index-v1.md` §2.1),
-/// whatever was refused about it.
+/// One covered part as a catalogue entry's `content[]` carries it (`games-index-v1.md` §2.1), its
+/// JSON exactly that schema's `contentPart` members, whatever was refused about it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PartReport {
     pub path: String,
@@ -1041,8 +1041,10 @@ pub struct PartReport {
     /// `None` is `content-licence-undeclared`.
     pub licence_source: Option<LicenceSource>,
     pub sha256: String,
-    /// What the glTF's extensions make it, when it is a glTF (an `.astrachar`: its body's).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// What the glTF's extensions make it, when it is a glTF (an `.astrachar`: its body's). Not
+    /// a `contentPart` member, so never in the part's JSON: [`Report::classes`] says it beside
+    /// the parts.
+    #[serde(skip)]
     pub gltf: Option<GltfClass>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vrm_licence: Option<VrmLicence>,
@@ -1065,6 +1067,17 @@ pub struct Report {
     /// Every refusal, in order: the files no entry covers, then each entry's.
     pub refusals: Vec<LauncherError>,
     pub flags: Vec<Flag>,
+}
+
+impl Report {
+    /// What each part that is a glTF is (its path, its class), for a report beside the parts: a
+    /// catalogue entry's `content[]` has no member for it.
+    pub fn classes(&self) -> BTreeMap<String, GltfClass> {
+        self.parts
+            .iter()
+            .filter_map(|p| p.gltf.map(|c| (p.path.clone(), c)))
+            .collect()
+    }
 }
 
 fn json_text(v: &Value) -> String {

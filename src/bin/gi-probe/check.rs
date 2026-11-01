@@ -49,7 +49,9 @@
 //!    `content-licence-conflict`; an unknown meta is the notice `content-vrm-meta-unknown`, an
 //!    unreadable `.astrachar` `content-astrachar-unreadable`), and a licence for every part
 //!    (`content-licence-undeclared`). The report's `content.parts` is what a catalogue entry's
-//!    `content[]` carries.
+//!    `content[]` carries, member for member (`games-index-v1.schema.json` `contentPart`), and
+//!    `content.classes` what each glTF part's extensions make it (`avatar`, `animation`,
+//!    `plain`), which `content[]` has no member for.
 //!
 //! Step 2 holds a community release to what a community integration may place and launch
 //! ([`Manifest::lint`]: `loader-undeclared`, `community-limit` for a `[[game_files]]` folder, `[launch]
@@ -542,6 +544,7 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
             content = json!({
                 "content_files": r.content_files,
                 "parts": r.parts,
+                "classes": r.classes(),
             });
             p.close(8, f0, n0, Value::Null);
         }

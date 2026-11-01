@@ -2984,26 +2984,60 @@ fn check_reports_the_parts_a_catalogue_entry_carries() {
     assert_eq!(parts[1]["sha256"], sha(&avatar.1));
     assert_eq!(parts[1]["licence_source"], "vrm");
     assert_eq!(parts[1]["vrm_licence"]["vrm_version"], "0.x");
-    assert_eq!(parts[1]["gltf"], "avatar");
     assert_eq!(parts[0]["licence_source"], "declared");
     assert_eq!(parts[0]["licence"], "CC0-1.0");
     assert!(parts[0].get("vrm_licence").is_none());
+    // Each part is a `contentPart` of the pinned games-index schema: its members, its required
+    // ones, and `vrm_licence` a `vrmLicenceMeta` — taken from the vendored schema itself.
+    let schema: Value = serde_json::from_slice(
+        &fs::read(spec_goldens::root().join("spec/games/schemas/games-index-v1.schema.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let members = |def: &str| -> (BTreeSet<String>, BTreeSet<String>) {
+        let d = &schema["$defs"][def];
+        assert_eq!(d["additionalProperties"], false, "{def}");
+        let props = d["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let required = d["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_owned())
+            .collect();
+        (props, required)
+    };
+    let (part_props, part_required) = members("contentPart");
+    let (meta_props, meta_required) = members("vrmLicenceMeta");
+    let keys = |v: &Value| -> BTreeSet<String> { v.as_object().unwrap().keys().cloned().collect() };
     for p in parts {
-        let keys: BTreeSet<&str> = p.as_object().unwrap().keys().map(String::as_str).collect();
-        let allowed: BTreeSet<&str> = [
-            "path",
-            "kind",
-            "title",
-            "credit",
-            "licence",
-            "licence_source",
-            "sha256",
-            "vrm_licence",
-            "gltf",
-        ]
-        .into();
-        assert!(keys.is_subset(&allowed), "{keys:?}");
+        let k = keys(p);
+        assert!(
+            k.is_subset(&part_props),
+            "{:?} beyond contentPart",
+            k.difference(&part_props)
+        );
+        assert!(
+            part_required.is_subset(&k),
+            "{p}: a required member missing"
+        );
+        assert!(part_required.iter().all(|m| !p[m].is_null()), "{p}");
+        if let Some(m) = p.get("vrm_licence") {
+            assert!(
+                keys(m).is_subset(&meta_props) && meta_required.is_subset(&keys(m)),
+                "{m}"
+            );
+        }
     }
+    // What a glTF part is goes beside the parts.
+    assert_eq!(
+        r["content"]["classes"],
+        json!({ "character/avatar.vrm": "avatar" })
+    );
     // A bare manifest: the step says why it did not look.
     let m = tmp.join("astra-gi.toml");
     fs::write(

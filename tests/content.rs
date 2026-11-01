@@ -109,8 +109,23 @@ fn an_accepted_release_says_where_each_licence_came_from() {
     );
     let vrm = r.parts[1].vrm_licence.as_ref().unwrap();
     assert_eq!(vrm.vrm_version, "0.x");
-    assert_eq!(vrm.fields["licenseName"], "CC_BY");
+    // The gate's fields AND the usage flags (legal G5: games-index-v1 `vrmLicenceMeta`), as the
+    // file carries them: here the avatar's whole VRM 0.x meta.
+    assert_eq!(
+        Value::Object(vrm.fields.clone()),
+        serde_json::json!({
+            "licenseName": "CC_BY",
+            "allowedUserName": "Everyone",
+            "violentUssageName": "Disallow",
+            "sexualUssageName": "Disallow",
+            "commercialUssageName": "Allow"
+        })
+    );
     assert_eq!(r.parts[1].gltf, Some(GltfClass::Avatar));
+    assert_eq!(
+        r.classes().into_iter().collect::<Vec<_>>(),
+        [("character/avatar.vrm".to_owned(), GltfClass::Avatar)]
+    );
     assert!(r.parts.iter().all(|p| p.sha256.len() == 64));
 
     let (refused, flags, r) = library_answer(&zip_of(&by_name("vrm-unknown-but-declared")));
@@ -367,4 +382,142 @@ fn every_character_bundle_of_a_release_shares_its_one_budget() {
         .content()
         .unwrap();
     assert!(r.refusals.is_empty(), "{:?}", r.refusals);
+}
+
+/// The licence kept with a VRM part (`vrm_licence`): the gate's two fields and every usage flag
+/// the file carries (legal G5), of the 1.0 meta where the file carries two that agree — the
+/// spec's goldens `allowed-vrm1.vrm` (all six VRM 1.0 keys) and `vrm-metas-agree.vrm`.
+#[test]
+fn the_vrm_licence_kept_is_every_gate_and_usage_field_of_the_meta_shown() {
+    let vrm1_six = serde_json::json!({
+        "allowRedistribution": true,
+        "avatarPermission": "everyone",
+        "allowExcessivelyViolentUsage": false,
+        "allowExcessivelySexualUsage": false,
+        "allowPoliticalOrReligiousUsage": true,
+        "allowAntisocialOrHateUsage": false
+    });
+    for name in ["allowed-vrm1.vrm", "vrm-metas-agree.vrm"] {
+        let (_, file, bytes, _) = gate_vectors()
+            .into_iter()
+            .find(|(_, f, _, _)| f == name)
+            .unwrap();
+        let (refused, _, r) = library_answer(&content_fixtures::gate_release(&file, &bytes));
+        assert!(refused.is_empty(), "{name}: {refused:?}");
+        let vrm = r.unwrap().parts[0].vrm_licence.clone().unwrap();
+        assert_eq!(vrm.vrm_version, "1.0", "{name}: the 1.0 meta is shown");
+        assert_eq!(Value::Object(vrm.fields), vrm1_six, "{name}");
+    }
+}
+
+/// Every row of `manifest.md` §2.7.1's table, through `GiPackage::content`: a file of that
+/// extension (any letter case) with its format's real signature is content-typed — so undeclared
+/// it is `content-undeclared` — and one whose first bytes miss by one is not.
+#[test]
+fn every_content_extension_is_content_only_with_its_own_signature() {
+    let zip_magic = [&b"PK\x03\x04"[..], b"PK\x05\x06", b"PK\x07\x08"];
+    // (extension, real first bytes, near-miss first bytes)
+    type Row<'a> = (&'a str, Vec<&'a [u8]>, Vec<&'a [u8]>);
+    let rows: Vec<Row> = vec![
+        (
+            ".astrapack",
+            zip_magic.to_vec(),
+            vec![b"PK\x01\x02", b"PK\x04\x03"],
+        ),
+        (
+            ".astrachar",
+            zip_magic.to_vec(),
+            vec![b"PK\x06\x06", b"KP\x03\x04"],
+        ),
+        (".vrma", vec![b"glTF\x02\0\0\0"], vec![b"gltf\x02\0\0\0"]),
+        (".glb", vec![b"glTF\x02\0\0\0"], vec![b"GLTF\x02\0\0\0"]),
+        (".vrm", vec![b"glTF\x02\0\0\0"], vec![b"glTf\x02\0\0\0"]),
+        (
+            ".gltf",
+            vec![b"{\"asset\":{}}", b" \n\t{}"],
+            vec![b"[{}]", b"x{}"],
+        ),
+        (
+            ".fbx",
+            vec![b"Kaydara FBX Binary  \0\x1a\0", b"; FBX 7.4.0 project file"],
+            vec![b"Kaydara fbx Binary  \0\x1a\0", b"; FBX 7.4"],
+        ),
+        (
+            ".png",
+            vec![b"\x89PNG\r\n\x1a\n\0\0"],
+            vec![b"\x89PNG\r\n\x1a\x0b\0\0"],
+        ),
+        (".jpg", vec![b"\xff\xd8\xff\xe0"], vec![b"\xff\xd8\xfe\xe0"]),
+        (
+            ".jpeg",
+            vec![b"\xff\xd8\xff\xdb"],
+            vec![b"\xfe\xd8\xff\xdb"],
+        ),
+        (
+            ".webp",
+            vec![b"RIFF\0\0\0\0WEBPVP8 "],
+            vec![b"RIFF\0\0\0\0WAVEfmt "],
+        ),
+        (
+            ".gif",
+            vec![b"GIF87a\x01\0", b"GIF89a\x01\0"],
+            vec![b"GIF88a\x01\0"],
+        ),
+        (".ogg", vec![b"OggS\0\x02"], vec![b"OggT\0\x02"]),
+        (
+            ".wav",
+            vec![b"RIFF\0\0\0\0WAVEfmt "],
+            vec![b"RIFF\0\0\0\0WEBPVP8 "],
+        ),
+        (
+            ".mp3",
+            vec![b"ID3\x04\0", b"\xff\xfb\x90\x00"],
+            vec![b"ID2\x04\0", b"\xff\x1b\x90\x00"],
+        ),
+        (".flac", vec![b"fLaC\0\0"], vec![b"fLaB\0\0"]),
+    ];
+    let mut out = Vec::new();
+    for (ext, real, near) in &rows {
+        for (i, head) in real.iter().enumerate() {
+            for name in [
+                format!("x/real{i}{ext}"),
+                format!("x/REAL{i}{}", ext.to_uppercase()),
+            ] {
+                let zip = zip_of(&[
+                    ("astra-gi.toml".to_owned(), manifest("").into_bytes()),
+                    (name.clone(), head.to_vec()),
+                ]);
+                let (refused, _, _) = library_answer(&zip);
+                if refused != [(codes::CONTENT_UNDECLARED.to_owned(), name.clone())] {
+                    out.push(format!(
+                        "{name} ({head:?}): {refused:?}, not content-undeclared"
+                    ));
+                }
+            }
+        }
+        for (i, head) in near.iter().enumerate() {
+            let name = format!("x/near{i}{ext}");
+            let zip = zip_of(&[
+                ("astra-gi.toml".to_owned(), manifest("").into_bytes()),
+                (name.clone(), head.to_vec()),
+            ]);
+            let (refused, _, r) = library_answer(&zip);
+            if !refused.is_empty() || !r.is_some_and(|r| r.content_files.is_empty()) {
+                out.push(format!(
+                    "{name} ({head:?}): {refused:?}, but it is no {ext}"
+                ));
+            }
+        }
+    }
+    // The table is closed: these rows are every extension the launcher reads as content.
+    let listed: BTreeSet<&str> = rows.iter().map(|(e, ..)| *e).collect();
+    for ext in [
+        ".bin", ".dll", ".zip", ".txt", ".json", ".tga", ".bmp", ".mp4",
+    ] {
+        assert!(!content::has_content_extension(&format!("a{ext}")), "{ext}");
+    }
+    for ext in &listed {
+        assert!(content::has_content_extension(&format!("a{ext}")), "{ext}");
+    }
+    failures(out);
 }

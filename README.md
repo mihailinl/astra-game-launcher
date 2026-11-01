@@ -483,8 +483,9 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
   8. `content`: the release's own animations, characters, art and audio against
      `[[integration.content]]` (`GiPackage::content`, above): coverage, the format of every GLB
      and `.gltf`, the VRM licence gate and a licence for every part; `content.parts` is what a
-     catalogue entry's `content[]` carries (`sha256`, `licence_source`, `vrm_licence`). A path
-     declared twice is step 1's (`content-duplicate`).
+     catalogue entry's `content[]` carries (`sha256`, `licence_source`, `vrm_licence`: the
+     schema's `contentPart`, nothing else), and `content.classes` what each glTF part is
+     (`avatar`, `animation`, `plain`). A path declared twice is step 1's (`content-duplicate`).
 
   Given a bare `astra-gi.toml` instead of a zip, it makes the steps that need no zip and says
   so.
