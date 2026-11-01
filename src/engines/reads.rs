@@ -204,8 +204,8 @@ mod windows {
         }
 
         /// A symbolic link to a file and a junction to a folder are links: nothing is read
-        /// through either. Debt row 3: run on the Windows VM (a symbolic link needs an elevated
-        /// session or Developer Mode).
+        /// through either. Run on the Windows VM (a symbolic link needs an elevated session or
+        /// Developer Mode).
         #[test]
         fn a_link_is_never_read_through() {
             let dir = std::env::temp_dir().join(format!("agl-links-{}", std::process::id()));
@@ -232,6 +232,232 @@ mod windows {
             assert!(out.status.success(), "mklink /J: {out:?}");
             assert_eq!(super::super::head(&junction, 8), None);
             let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        /// What the cloud-files placeholder below serves.
+        static SERVED: &[u8] = b"\0\x162021.3.16f1\0 the bytes the provider serves .. GDPC";
+
+        /// The test's provider: every FETCH_DATA is answered with [`SERVED`], from the asked
+        /// offset to its end.
+        unsafe extern "system" fn fetch(
+            info: *const windows_sys::Win32::Storage::CloudFilters::CF_CALLBACK_INFO,
+            params: *const windows_sys::Win32::Storage::CloudFilters::CF_CALLBACK_PARAMETERS,
+        ) {
+            use windows_sys::Win32::Storage::CloudFilters::*;
+            // SAFETY: the filter passes a valid info and a FETCH_DATA parameter block, alive for
+            // the whole call; every pointer handed back lives as long as `SERVED`.
+            unsafe {
+                let info = &*info;
+                let offset = (*params).Anonymous.FetchData.RequiredFileOffset.max(0) as usize;
+                let offset = offset.min(SERVED.len());
+                let op = CF_OPERATION_INFO {
+                    StructSize: std::mem::size_of::<CF_OPERATION_INFO>() as u32,
+                    Type: CF_OPERATION_TYPE_TRANSFER_DATA,
+                    ConnectionKey: info.ConnectionKey,
+                    TransferKey: info.TransferKey,
+                    CorrelationVector: std::ptr::null(),
+                    SyncStatus: std::ptr::null(),
+                    RequestKey: info.RequestKey,
+                };
+                let mut p: CF_OPERATION_PARAMETERS = std::mem::zeroed();
+                p.ParamSize = (std::mem::offset_of!(CF_OPERATION_PARAMETERS, Anonymous)
+                    + std::mem::size_of::<CF_OPERATION_PARAMETERS_0_0>())
+                    as u32;
+                p.Anonymous.TransferData = CF_OPERATION_PARAMETERS_0_0 {
+                    Flags: CF_OPERATION_TRANSFER_DATA_FLAG_NONE,
+                    CompletionStatus: 0,
+                    Buffer: SERVED[offset..].as_ptr().cast(),
+                    Offset: offset as i64,
+                    Length: (SERVED.len() - offset) as i64,
+                };
+                CfExecute(&op, &mut p);
+            }
+        }
+
+        fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
+            use std::os::windows::ffi::OsStrExt;
+            s.encode_wide().chain([0]).collect()
+        }
+
+        /// The sync root, registered and connected for one test, under its own temporary
+        /// folder: disconnected, unregistered and removed when dropped, whatever failed.
+        struct SyncRoot {
+            dir: std::path::PathBuf,
+            key: Option<windows_sys::Win32::Storage::CloudFilters::CF_CONNECTION_KEY>,
+            registered: bool,
+        }
+
+        impl Drop for SyncRoot {
+            fn drop(&mut self) {
+                use windows_sys::Win32::Storage::CloudFilters::*;
+                // SAFETY: the key and the path are the ones this root was set up with.
+                unsafe {
+                    if let Some(k) = self.key.take() {
+                        CfDisconnectSyncRoot(k);
+                    }
+                    if self.registered {
+                        CfUnregisterSyncRoot(wide(self.dir.as_os_str()).as_ptr());
+                    }
+                }
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+
+        #[link(name = "ntdll")]
+        unsafe extern "system" {
+            /// `PHCM_EXPOSE_PLACEHOLDERS` (2): this process sees a placeholder's reparse point.
+            fn RtlSetProcessPlaceholderCompatibilityMode(mode: i8) -> i8;
+        }
+
+        /// A reparse point that is no link, that a filter leaves visible and serves: the branch
+        /// of [`disk_file`] that opens a file again. A sync root registered for this test (the
+        /// Cloud Files API, as OneDrive's Files On-Demand uses it) holds a dehydrated
+        /// placeholder whose bytes the test's own provider serves; with the process asking to
+        /// see placeholders (`PHCM_EXPOSE_PLACEHOLDERS`), its cloud reparse tag shows through
+        /// `FILE_FLAG_OPEN_REPARSE_POINT` and it is no name surrogate, so it is opened again the
+        /// ordinary way — through the filter, which fetches the bytes — found to be the same
+        /// file (volume, index), and read: exactly what 0.4.1's plain open read. Measured on the
+        /// Windows VM (2026-10-31, Windows 11, an elevated SSH session): a build that refuses
+        /// every visible reparse point fails here, which the three tests above did not catch;
+        /// one that reads the first handle without opening again passes here (the filter
+        /// serves that handle too) and fails [`an_app_execution_alias_is_not_read`].
+        #[test]
+        fn a_cloud_placeholder_is_read_as_the_file_its_filter_serves() {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::CloudFilters::*;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_NORMAL, FILE_BASIC_INFO, FILE_FLAG_OPEN_REPARSE_POINT,
+            };
+
+            let dir = std::env::temp_dir().join(format!("agl-cloud-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let dir = std::fs::canonicalize(&dir).unwrap();
+            // `canonicalize` gives `\\?\C:\…`; the Cloud Files API wants a plain path.
+            let plain = std::path::PathBuf::from(
+                dir.to_str().unwrap().trim_start_matches(r"\\?\").to_owned(),
+            );
+            let mut root = SyncRoot {
+                dir: plain.clone(),
+                key: None,
+                registered: false,
+            };
+            let root_w = wide(plain.as_os_str());
+            let provider = wide("astra-game-launcher test".as_ref());
+            let version = wide("1".as_ref());
+            let identity = b"agl-test-sync-root";
+            let registration = CF_SYNC_REGISTRATION {
+                StructSize: std::mem::size_of::<CF_SYNC_REGISTRATION>() as u32,
+                ProviderName: provider.as_ptr(),
+                ProviderVersion: version.as_ptr(),
+                SyncRootIdentity: identity.as_ptr().cast(),
+                SyncRootIdentityLength: identity.len() as u32,
+                FileIdentity: std::ptr::null(),
+                FileIdentityLength: 0,
+                ProviderId: windows_sys::core::GUID::from_u128(
+                    0x5a7a_0500_0003_4c38_9a1e_0b5d_0c0d_0a03,
+                ),
+            };
+            let policies = CF_SYNC_POLICIES {
+                StructSize: std::mem::size_of::<CF_SYNC_POLICIES>() as u32,
+                Hydration: CF_HYDRATION_POLICY {
+                    Primary: CF_HYDRATION_POLICY_FULL,
+                    Modifier: CF_HYDRATION_POLICY_MODIFIER_NONE,
+                },
+                Population: CF_POPULATION_POLICY {
+                    Primary: CF_POPULATION_POLICY_ALWAYS_FULL,
+                    Modifier: CF_POPULATION_POLICY_MODIFIER_NONE,
+                },
+                InSync: CF_INSYNC_POLICY_NONE,
+                HardLink: CF_HARDLINK_POLICY_NONE,
+                PlaceholderManagement: CF_PLACEHOLDER_MANAGEMENT_POLICY_DEFAULT,
+            };
+            // SAFETY: every pointer is to a NUL-terminated wide string or a struct alive for
+            // the call.
+            let hr = unsafe {
+                CfRegisterSyncRoot(
+                    root_w.as_ptr(),
+                    &registration,
+                    &policies,
+                    CF_REGISTER_FLAG_NONE,
+                )
+            };
+            assert_eq!(hr, 0, "CfRegisterSyncRoot: {hr:#x}");
+            root.registered = true;
+            let callbacks = [
+                CF_CALLBACK_REGISTRATION {
+                    Type: CF_CALLBACK_TYPE_FETCH_DATA,
+                    Callback: Some(fetch),
+                },
+                CF_CALLBACK_REGISTRATION {
+                    Type: CF_CALLBACK_TYPE_NONE,
+                    Callback: None,
+                },
+            ];
+            let mut key: CF_CONNECTION_KEY = 0;
+            // SAFETY: as above; the table outlives the connection (it is dropped after `root`).
+            let hr = unsafe {
+                CfConnectSyncRoot(
+                    root_w.as_ptr(),
+                    callbacks.as_ptr(),
+                    std::ptr::null(),
+                    CF_CONNECT_FLAG_NONE,
+                    &mut key,
+                )
+            };
+            assert_eq!(hr, 0, "CfConnectSyncRoot: {hr:#x}");
+            root.key = Some(key);
+
+            let name = wide("globalgamemanagers".as_ref());
+            let file_identity = b"served";
+            let mut info: CF_PLACEHOLDER_CREATE_INFO = unsafe { std::mem::zeroed() };
+            info.RelativeFileName = name.as_ptr();
+            info.FsMetadata = CF_FS_METADATA {
+                BasicInfo: FILE_BASIC_INFO {
+                    FileAttributes: FILE_ATTRIBUTE_NORMAL,
+                    ..unsafe { std::mem::zeroed() }
+                },
+                FileSize: SERVED.len() as i64,
+            };
+            info.FileIdentity = file_identity.as_ptr().cast();
+            info.FileIdentityLength = file_identity.len() as u32;
+            info.Flags = CF_PLACEHOLDER_CREATE_FLAG_MARK_IN_SYNC;
+            let mut done = 0u32;
+            // SAFETY: one create info, alive for the call.
+            let hr = unsafe {
+                CfCreatePlaceholders(
+                    root_w.as_ptr(),
+                    &mut info,
+                    1,
+                    CF_CREATE_FLAG_NONE,
+                    &mut done,
+                )
+            };
+            assert_eq!((hr, done, info.Result), (0, 1, 0), "CfCreatePlaceholders");
+            let p = dir.join("globalgamemanagers");
+
+            // SAFETY: a process-wide mode, set before anything here opens the placeholder.
+            unsafe { RtlSetProcessPlaceholderCompatibilityMode(2) };
+            let raw = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(&p)
+                .unwrap();
+            let (attributes, tag) = attributes_and_tag(&raw).unwrap();
+            drop(raw);
+            assert!(
+                attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0,
+                "the filter shows the placeholder's reparse point: attributes {attributes:#x}"
+            );
+            assert_eq!(tag & 0xFFFF_0FFF, 0x9000_001A, "a cloud tag: {tag:#x}");
+            assert_eq!(tag & NAME_SURROGATE, 0, "no name surrogate");
+            assert_eq!(
+                super::super::head(&p, 4096).as_deref(),
+                Some(SERVED),
+                "the placeholder reads as the bytes its filter serves"
+            );
+            assert_eq!(super::super::tail(&p, 4, 12).as_deref(), Some(&b"GDPC"[..]));
+            drop(root);
         }
     }
 }

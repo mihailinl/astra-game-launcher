@@ -26,7 +26,16 @@ pub fn sha(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-/// A folder removed when dropped.
+/// `p` as the launcher spells a path it hands on or reports: on Windows without the `\\?\`
+/// prefix `fs::canonicalize` gives; the same path everywhere else.
+pub fn plain(p: &Path) -> PathBuf {
+    match p.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) => PathBuf::from(rest),
+        None => p.to_path_buf(),
+    }
+}
+
+/// A folder removed when dropped. Its path is canonical, written [`plain`]ly.
 pub struct Tmp(pub PathBuf);
 
 static N: AtomicU64 = AtomicU64::new(0);
@@ -40,7 +49,7 @@ impl Tmp {
         ));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
-        Tmp(fs::canonicalize(&p).unwrap())
+        Tmp(plain(&fs::canonicalize(&p).unwrap()))
     }
 
     pub fn path(&self) -> &Path {

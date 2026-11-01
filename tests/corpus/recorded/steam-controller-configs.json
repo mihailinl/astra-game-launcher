@@ -1,0 +1,25 @@
+{
+"schema": "astra.list-shape/1",
+"game": "Steam Controller Configs",
+"label": "unknown",
+"captured": {"os":"linux","tool":{"source_tree_sha256":"b5dc1151ba1152635289c55b2725f000ee5e9907ce1462187c28b1c239e2124d","version":"0.5.0"}},
+"detection": {"anti_cheat":[],"binary":"unknown","confidence":"low","engine":"unknown","evidence":null,"exe":null,"exe_pick":null,"hint_used":false,"unity_version":null},
+"folders": {
+"": [["1132586200","d"]],
+"1132586200": [["config","d"]],
+"1132586200/config": [["1174180","d"],["2527500","d"],["271590","d"],["280","d"],["3240220","d"],["4000","d"],["413080","d"],["413090","d"],["443510","d"],["620","d"],["730","d"],["769","d"],["configset_2ea-28e-4381e4d8.vdf","f",24],["configset_2ea-28e-4381e4d8g.vdf","f",24],["configset_45e-28e-4381e4d8.vdf","f",24],["configset_45e-b13-4381e4d8.vdf","f",24],["configset_54c-ce6-4381e4d8.vdf","f",24],["configset_955-b400-4381e4d8.vdf","f",24],["configset_Awaiting_Logon.vdf","f",24],["configset_DSa0fa9ceb25d5.vdf","f",24],["configset_DSa0fa9cfec2fc.vdf","f",24],["configset_FX1A311049EE.vdf","f",24],["configset_MT-01b7529c6fd64b94.vdf","f",24],["configset_MT-32a8c5bf07387b8f.vdf","f",24],["configset_MT-3fcc4c2e844eeff1.vdf","f",24],["configset_MT-528a611b442dcad3.vdf","f",24],["configset_MT-6c7cca5a653a3155.vdf","f",24],["configset_MT-d2a6ef0467e337b5.vdf","f",24],["configset_MT-dfc3ddb7bd9183a4.vdf","f",24],["configset_MT-ecb513cbca52d16f.vdf","f",24],["configset_c01337de0001.vdf","f",24],["configset_controller_generic.vdf","f",24],["configset_controller_mobile_touch.vdf","f",89],["configset_controller_neptune.vdf","f",55],["configset_controller_ps4.vdf","f",24],["configset_controller_ps5.vdf","f",68],["configset_controller_xbox360.vdf","f",24],["configset_controller_xboxone.vdf","f",68],["preferences_2ea-28e-4381e4d8.vdf","f",907],["preferences_2ea-28e-4381e4d8g.vdf","f",896],["preferences_45e-28e-4381e4d8.vdf","f",845],["preferences_45e-b13-4381e4d8.vdf","f",834],["preferences_54c-ce6-4381e4d8.vdf","f",1108],["preferences_955-b400-4381e4d8.vdf","f",706],["preferences_DSa0fa9ceb25d5.vdf","f",1108],["preferences_DSa0fa9cfec2fc.vdf","f",1108],["preferences_FX1A311049EE.vdf","f",972],["preferences_MT-01b7529c6fd64b94.vdf","f",943],["preferences_MT-32a8c5bf07387b8f.vdf","f",1521],["preferences_MT-3fcc4c2e844eeff1.vdf","f",1382],["preferences_MT-528a611b442dcad3.vdf","f",967],["preferences_MT-6c7cca5a653a3155.vdf","f",1382],["preferences_MT-d2a6ef0467e337b5.vdf","f",967],["preferences_MT-dfc3ddb7bd9183a4.vdf","f",664],["preferences_MT-ecb513cbca52d16f.vdf","f",943],["preferences_c01337de0001.vdf","f",1071],["steam_autocloud.vdf","f",53],["zenlesszonezero","d"]],
+"1132586200/config/1174180": [["controller_mobile_touch.vdf","f",19125]],
+"1132586200/config/2527500": [["controller_mobile_touch.vdf","f",19356]],
+"1132586200/config/271590": [["controller_mobile_touch.vdf","f",41519]],
+"1132586200/config/280": [["controller_mobile_touch.vdf","f",19771]],
+"1132586200/config/3240220": [["controller_mobile_touch.vdf","f",40292]],
+"1132586200/config/4000": [["controller_xbox360.vdf","f",21169]],
+"1132586200/config/413080": [["controller_mobile_touch.vdf","f",16780]],
+"1132586200/config/413090": [["controller_mobile_touch.vdf","f",106304]],
+"1132586200/config/443510": [["controller_mobile_touch.vdf","f",6409]],
+"1132586200/config/620": [["controller_mobile_touch.vdf","f",114679]],
+"1132586200/config/730": [["controller_mobile_touch.vdf","f",19354],["controller_neptune.vdf","f",19893]],
+"1132586200/config/769": [["controller_mobile_touch.vdf","f",39415]],
+"1132586200/config/zenlesszonezero": [["controller_mobile_touch.vdf","f",14100]]
+}
+}

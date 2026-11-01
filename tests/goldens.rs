@@ -549,3 +549,38 @@ fn a_descriptors_engine_is_engine_mismatch_wherever_planning_has_no_descriptors(
         );
     }
 }
+
+/// K17's pointer: `docs/ENGINE-DESCRIPTOR.md` names the specification at the pinned commit and
+/// never another — every commit it names (a run of at least seven hex digits holding a digit
+/// and a letter) is `PIN`, and it names it at least once. A re-pin changes the page with it.
+#[test]
+fn the_descriptor_doc_points_at_the_pinned_specification() {
+    let doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/ENGINE-DESCRIPTOR.md");
+    let text = fs::read_to_string(&doc).unwrap();
+    let pin = spec_goldens::pin();
+    let mut named = Vec::new();
+    let mut run = String::new();
+    for c in text.chars().chain(std::iter::once(' ')) {
+        if c.is_ascii_hexdigit() && !c.is_ascii_uppercase() {
+            run.push(c);
+            continue;
+        }
+        let boundary = !c.is_ascii_alphanumeric();
+        if boundary
+            && run.len() >= 7
+            && run.chars().any(|c| c.is_ascii_digit())
+            && run.chars().any(|c| c.is_ascii_alphabetic())
+        {
+            named.push(run.clone());
+        }
+        run.clear();
+    }
+    assert!(!named.is_empty(), "the page names no commit");
+    for sha in &named {
+        assert_eq!(
+            sha, &pin,
+            "docs/ENGINE-DESCRIPTOR.md names {sha}; PIN is {pin}"
+        );
+    }
+    assert!(text.contains("spec/games/engine-descriptor-v1.md"));
+}

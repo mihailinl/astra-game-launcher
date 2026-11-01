@@ -18,6 +18,10 @@
 //! - `check` answers every manifest golden of the specification as `tests/goldens.rs` judges the
 //!   library (the same `SPEC_DEFECTS_AT_PIN`), and on release zips: Link files, reserved ids by
 //!   provenance, the descriptor's negative folders, `built_on` and `code_changed`.
+//! - `capture` records what detection lists and only the bytes the rules read, refuses a
+//!   recording over 1 MiB, and replays as the folder it was taken from; the format's reader
+//!   (`tests/corpus/replay.rs`) refuses what breaks it; `validate-descriptor --corpus` refuses a
+//!   descriptor claiming recordings of two engines.
 
 #![cfg(feature = "gi-probe")]
 
@@ -25,6 +29,8 @@ mod common;
 #[path = "common/spec_goldens.rs"]
 mod spec_goldens;
 
+#[path = "corpus/replay.rs"]
+mod replay;
 #[allow(dead_code)]
 #[path = "../src/bin/gi-probe/v027.rs"]
 mod v027;
@@ -2408,4 +2414,473 @@ fn the_first_party_fixtures_pass_k18_as_astras_own() {
         undeclared > 0,
         "no first-party fixture places a loader's name"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// `gi-probe capture`, the recordings' format, and `validate-descriptor --corpus`.
+// ---------------------------------------------------------------------------------------------
+
+/// A PE image's first bytes, then `fill` to `len` bytes, then `tail`.
+fn program_bytes(fill: &[u8], len: usize, tail: &[u8]) -> Vec<u8> {
+    let mut b = common::pe_with_options(common::X64, &[], b"");
+    while b.len() + tail.len() < len {
+        b.extend_from_slice(fill);
+    }
+    b.truncate(len - tail.len());
+    b.extend_from_slice(tail);
+    b
+}
+
+/// What a recording lists in one folder, by name.
+fn listed<'a>(rec: &'a replay::Recording, folder: &str) -> BTreeMap<&'a str, &'a replay::Kind> {
+    rec.folders[folder]
+        .iter()
+        .map(|e| (e.name.as_str(), &e.kind))
+        .collect()
+}
+
+fn capture(dir: &Path, out: &Path, extra: &[&str]) -> (i32, Value) {
+    let mut args = vec![
+        "capture",
+        dir.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ];
+    args.extend(extra);
+    probe(&args)
+}
+
+/// A Unity game with every kind of name beside it: the recording holds every name the walk and
+/// the reads near the program list, a file's size, a version header's first 4 KiB, a
+/// program's first 4 and last 16 bytes — and no other byte, nor any name past what is listed.
+/// Its replay answers as the folder did.
+#[test]
+fn capture_records_what_detection_lists_and_only_the_bytes_the_rules_read() {
+    let tmp = Tmp::new("capture");
+    let game = tmp.join("My Game");
+    let secret = b"SECRET-CONTENT-NEVER-RECORDED";
+    let exe = program_bytes(secret, 9000, b"0123456789abcdef");
+    common::write(&game.join("Game.exe"), &exe);
+    common::write(&game.join("UnityPlayer.dll"), secret);
+    common::write(&game.join("notes.txt"), secret);
+    let mut readme = b"#!/bin/sh\n".to_vec();
+    readme.extend_from_slice(secret);
+    readme.extend_from_slice(b"\nlast sixteen B!\n");
+    common::write(&game.join("start"), &readme);
+    let mut ggm = b"\0\0\0\0\x16\x002021.3.16f1\0".to_vec();
+    ggm.resize(4096, b'.');
+    ggm.extend_from_slice(secret);
+    ggm.extend_from_slice(b"..last 16 bytes.");
+    common::write(&game.join("Game_Data/globalgamemanagers"), &ggm);
+    common::write(&game.join("Game_Data/Managed/Assembly-CSharp.dll"), secret);
+    common::write(&game.join("Game_Data/Managed/deep/deeper/past.dll"), secret);
+    common::write(&game.join("a/b/c/d/e/past-the-walk.txt"), secret);
+    // A program at the walk's depth: the folders the rules look up from it are listed too.
+    common::write(&game.join("x/y/z/Other.exe"), &exe);
+    common::write(
+        &game.join("x/y/z/Other_Data/Managed/Assembly-CSharp.dll"),
+        secret,
+    );
+    common::write(&game.join("x/y/z/Other_Data/Managed/a/b/past.dll"), secret);
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("Game.exe", game.join("linked.exe")).unwrap();
+        let c = std::ffi::CString::new(game.join("pipe").to_str().unwrap()).unwrap();
+        // SAFETY: a NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    }
+    let out = tmp.join("game.json");
+    let (exit, r) = capture(&game, &out, &[]);
+    assert_eq!(exit, 0, "{r:#}");
+    assert_eq!(r["subcommand"], "capture");
+    let text = fs::read_to_string(&out).unwrap();
+    assert!(text.len() <= replay::MAX_RECORDING_BYTES);
+    assert_eq!(r["recording"]["bytes"], text.len());
+    let rec = replay::Recording::parse(&text).unwrap();
+    assert!(
+        !text.contains(&hex::encode(b"SECRET")),
+        "no byte the rules do not read is recorded: {text}"
+    );
+    assert!(
+        !text.contains(tmp.path().to_str().unwrap()),
+        "no path above the folder"
+    );
+    assert_eq!(rec.game, "My Game");
+    let detection = astra_game_launcher::detect_with(&game, None).unwrap();
+    assert_eq!(rec.detection, serde_json::to_value(&detection).unwrap());
+    assert_eq!(detection.engine.as_str(), "unity-mono");
+    assert_eq!(
+        rec.label, "unity-mono",
+        "the label is what the built-ins name"
+    );
+    assert_eq!(rec.os, std::env::consts::OS);
+
+    let top = listed(&rec, "");
+    use replay::Kind;
+    let Kind::File { size, head, tail } = top["Game.exe"] else {
+        panic!("{top:?}")
+    };
+    assert_eq!(
+        (*size, head.as_slice(), tail.as_slice()),
+        (9000, &exe[..4], &exe[9000 - 16..])
+    );
+    let Kind::File { head, tail, .. } = top["start"] else {
+        panic!()
+    };
+    assert_eq!(
+        (head.as_slice(), tail.as_slice()),
+        (&readme[..4], &readme[readme.len() - 16..]),
+        "an extension-less file may be a program: its magic and tail"
+    );
+    for name in ["UnityPlayer.dll", "notes.txt"] {
+        assert_eq!(
+            top[name],
+            &Kind::File {
+                size: secret.len() as u64,
+                head: vec![],
+                tail: vec![]
+            },
+            "{name}: a name and a size"
+        );
+    }
+    let data = listed(&rec, "Game_Data");
+    let Kind::File { size, head, tail } = data["globalgamemanagers"] else {
+        panic!()
+    };
+    assert_eq!(*size, ggm.len() as u64);
+    assert_eq!(head.as_slice(), &ggm[..4096], "a version header's 4 KiB");
+    assert_eq!(
+        tail.as_slice(),
+        &ggm[ggm.len() - 16..],
+        "extension-less, so Pass B may take it for a program: its tail too"
+    );
+    assert!(listed(&rec, "Game_Data/Managed").contains_key("Assembly-CSharp.dll"));
+    // The walk lists three folders deep and names the fourth; nothing past it.
+    assert!(rec.folders.contains_key("Game_Data/Managed/deep"));
+    assert!(!rec.folders.contains_key("Game_Data/Managed/deep/deeper"));
+    assert!(listed(&rec, "a/b/c").contains_key("d"));
+    assert!(!rec.folders.contains_key("a/b/c/d"));
+    // Past the walk, the two folders below a program's are listed; the next one is a name.
+    assert!(
+        listed(&rec, "x/y/z/Other_Data/Managed").contains_key("Assembly-CSharp.dll"),
+        "{:?}",
+        rec.folders.keys().collect::<Vec<_>>()
+    );
+    assert!(listed(&rec, "x/y/z/Other_Data/Managed").contains_key("a"));
+    assert!(!rec.folders.contains_key("x/y/z/Other_Data/Managed/a"));
+    #[cfg(unix)]
+    {
+        assert_eq!(top["linked.exe"], &Kind::Link);
+        assert_eq!(top["pipe"], &Kind::Fifo);
+    }
+
+    // The replay is the folder: sparse files of the recorded sizes, the recorded bytes in place.
+    let again = tmp.join("replay");
+    fs::create_dir(&again).unwrap();
+    replay::materialise(&rec, &again).unwrap();
+    let laid = fs::read(again.join("Game.exe")).unwrap();
+    assert_eq!(laid.len(), 9000);
+    assert_eq!(
+        (&laid[..4], &laid[9000 - 16..]),
+        (&exe[..4], &exe[9000 - 16..])
+    );
+    assert!(laid[4..9000 - 16].iter().all(|b| *b == 0));
+    assert_eq!(
+        serde_json::to_value(astra_game_launcher::detect_with(&again, None).unwrap()).unwrap(),
+        rec.detection
+    );
+    #[cfg(unix)]
+    {
+        let m = fs::symlink_metadata(again.join("linked.exe")).unwrap();
+        assert!(m.file_type().is_symlink());
+        assert!(
+            fs::metadata(again.join("linked.exe")).is_err(),
+            "it leads nowhere"
+        );
+        use std::os::unix::fs::FileTypeExt;
+        assert!(
+            fs::symlink_metadata(again.join("pipe"))
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
+    }
+
+    // A label and an appid given, and Steam's hint: recorded as given.
+    let (exit, r) = capture(
+        &game,
+        &out,
+        &[
+            "--label",
+            "probe-engine",
+            "--appid",
+            "480",
+            "--hint",
+            "Game.exe",
+        ],
+    );
+    assert_eq!(exit, 0, "{r:#}");
+    let rec = replay::Recording::parse(&fs::read_to_string(&out).unwrap()).unwrap();
+    assert_eq!(
+        (rec.label.as_str(), rec.appid, rec.hint.as_deref()),
+        ("probe-engine", Some(480), Some("Game.exe"))
+    );
+    let hinted = astra_game_launcher::detect_with(&game, Some("Game.exe")).unwrap();
+    assert!(hinted.hint_used);
+    assert_eq!(rec.detection, serde_json::to_value(&hinted).unwrap());
+    let (exit, r) = capture(&game, &out, &["--label", "Not A Code"]);
+    assert_eq!(exit, 2, "{r:#}");
+}
+
+/// A recording over 1 MiB is refused, saying so, and nothing is written.
+#[test]
+fn capture_refuses_a_recording_over_a_mebibyte() {
+    let tmp = Tmp::new("capture-large");
+    let game = tmp.join("game");
+    fs::create_dir_all(game.join("many")).unwrap();
+    let long = "n".repeat(120);
+    for i in 0..10_000 {
+        fs::File::create(game.join("many").join(format!("{long}{i:05}"))).unwrap();
+    }
+    let out = tmp.join("large.json");
+    let (exit, r) = capture(&game, &out, &[]);
+    assert_eq!(exit, 1, "{r:#}");
+    assert_eq!(r["findings"][0]["code"], "recording-too-large");
+    assert_eq!(
+        r["findings"][0]["params"]["limit"],
+        replay::MAX_RECORDING_BYTES.to_string()
+    );
+    assert!(r["recording"]["bytes"].as_u64().unwrap() > replay::MAX_RECORDING_BYTES as u64);
+    assert!(!out.exists(), "nothing written");
+    assert_eq!(r["recording"]["walk"]["capped"], true);
+}
+
+/// A minimal recording, as text: `folders` given as JSON.
+fn recording_text(label: &str, folders: Value) -> String {
+    let mut v = json!({
+        "schema": replay::SCHEMA,
+        "game": "synthetic",
+        "label": label,
+        "captured": {"os": "synthetic", "tool": {}},
+        "detection": {},
+        "folders": folders,
+    });
+    if folders_is_null(&v) {
+        v.as_object_mut().unwrap().remove("folders");
+    }
+    v.to_string()
+}
+
+fn folders_is_null(v: &Value) -> bool {
+    v["folders"].is_null()
+}
+
+/// The reader refuses every recording that breaks the format, and lays what it accepts as it
+/// says: sparse, the recorded bytes at their offsets.
+#[test]
+fn a_recording_that_breaks_the_format_is_refused() {
+    let ok = json!({"": [["Game.exe", "f", 100, "4d5a", "ffff"], ["Data", "d"], ["l", "l"]],
+                    "Data": [["x", "f", 0]]});
+    let rec = replay::Recording::parse(&recording_text("unknown", ok.clone())).unwrap();
+    assert_eq!(rec.entries(), 4);
+    let tmp = Tmp::new("replay-format");
+    replay::materialise(&rec, tmp.path()).unwrap();
+    let laid = fs::read(tmp.join("Game.exe")).unwrap();
+    assert_eq!(laid.len(), 100);
+    assert_eq!((&laid[..2], &laid[98..]), (&b"MZ"[..], &[0xff, 0xff][..]));
+    assert!(tmp.join("Data").is_dir() && tmp.join("Data/x").is_file());
+    assert!(
+        replay::materialise(&rec, tmp.path()).is_err(),
+        "only in an empty folder"
+    );
+    let head_4k = "00".repeat(replay::MAX_HEAD + 1);
+    let tail_17 = "00".repeat(replay::MAX_TAIL + 1);
+    for (why, text) in [
+        ("an unknown key", {
+            let mut v: Value =
+                serde_json::from_str(&recording_text("unknown", ok.clone())).unwrap();
+            v["extra"] = json!(1);
+            v.to_string()
+        }),
+        (
+            "another schema",
+            recording_text("unknown", ok.clone()).replace("list-shape/1", "list-shape/2"),
+        ),
+        (
+            "a label that is no code",
+            recording_text("Not A Code", ok.clone()),
+        ),
+        (
+            "no game folder",
+            recording_text("unknown", json!({"Data": []})),
+        ),
+        (
+            "a folder its parent does not hold",
+            recording_text("unknown", json!({"": [], "Data": []})),
+        ),
+        (
+            "a name twice",
+            recording_text("unknown", json!({"": [["a", "d"], ["a", "f", 1]]})),
+        ),
+        (
+            "a name with a slash",
+            recording_text("unknown", json!({"": [["a/b", "f", 1]]})),
+        ),
+        (
+            "a dot-dot",
+            recording_text("unknown", json!({"": [["..", "d"]]})),
+        ),
+        (
+            "a head over 4 KiB",
+            recording_text("unknown", json!({"": [["a", "f", 10_000, head_4k]]})),
+        ),
+        (
+            "a tail over 16 B",
+            recording_text("unknown", json!({"": [["a", "f", 100, "", tail_17]]})),
+        ),
+        (
+            "more bytes than the file",
+            recording_text("unknown", json!({"": [["a", "f", 1, "0000"]]})),
+        ),
+        (
+            "an unknown kind",
+            recording_text("unknown", json!({"": [["a", "x"]]})),
+        ),
+        (
+            "a size on a folder",
+            recording_text("unknown", json!({"": [["a", "d", 1]]})),
+        ),
+        ("no folders", recording_text("unknown", Value::Null)),
+        ("over 1 MiB", {
+            let names: Vec<Value> = (0..60_000)
+                .map(|i| json!([format!("name-{i:08}"), "f", 0]))
+                .collect();
+            recording_text("unknown", json!({"": names}))
+        }),
+    ] {
+        assert!(replay::Recording::parse(&text).is_err(), "{why}: accepted");
+    }
+}
+
+/// A Source 2-shaped game as a synthetic recording, labelled `label`: what the Source 2
+/// descriptor claims (`engine2.dll` beside the program, `core/` in its project), or, with
+/// `anchored` false, the same game without its anchor.
+fn source2_recording(label: &str, anchored: bool) -> String {
+    let mut bin = vec![json!(["game.exe", "f", 4096, "4d5a9000"])];
+    if anchored {
+        bin.push(json!(["engine2.dll", "f", 1024]));
+    }
+    recording_text(
+        label,
+        json!({
+            "": [["game", "d"]],
+            "game": [["bin", "d"], ["core", "d"]],
+            "game/bin": [["win64", "d"]],
+            "game/bin/win64": bin,
+        }),
+    )
+}
+
+/// Spec §5: a descriptor that claims recordings labelled with two or more engines is too broad
+/// (`descriptor-too-broad{reason=two-engines}`); claiming one engine's, or recordings no label
+/// names an engine of, is not.
+#[test]
+fn validate_descriptor_corpus_refuses_claims_on_two_engines() {
+    let tmp = Tmp::new("validate-corpus");
+    let corpus = |name: &str, files: &[(&str, String)]| -> PathBuf {
+        let dir = tmp.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        for (f, text) in files {
+            fs::write(dir.join(f), text).unwrap();
+        }
+        dir
+    };
+    let two = corpus(
+        "two",
+        &[
+            ("a.json", source2_recording("source2", true)),
+            ("b.json", source2_recording("id-tech-7", true)),
+            ("c.json", source2_recording("unity-mono", false)),
+        ],
+    );
+    let (exit, r) = validate(
+        &tmp,
+        "source2.toml",
+        SOURCE2,
+        &["--corpus", two.to_str().unwrap()],
+    );
+    assert_eq!(exit, 1, "{r:#}");
+    assert_eq!(
+        reason_of(&r),
+        [("descriptor-too-broad".to_owned(), "two-engines".to_owned())]
+    );
+    assert_eq!(r["findings"][0]["step"], 4);
+    assert_eq!(r["findings"][0]["params"]["labels"], "id-tech-7,source2");
+    assert_eq!(
+        r["corpus"]["engines_claimed"],
+        json!(["id-tech-7", "source2"])
+    );
+    let rows = r["corpus"]["recordings"].as_array().unwrap();
+    let claimed: Vec<(&str, bool)> = rows
+        .iter()
+        .map(|row| {
+            (
+                row["recording"].as_str().unwrap(),
+                row["claimed"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        claimed,
+        [("a.json", true), ("b.json", true), ("c.json", false)]
+    );
+    assert_eq!(rows[0]["engine"], "source2");
+
+    for (name, files) in [
+        (
+            "one-engine",
+            vec![
+                ("a.json", source2_recording("source2", true)),
+                ("b.json", source2_recording("source2", true)),
+                ("c.json", source2_recording("id-tech-7", false)),
+            ],
+        ),
+        (
+            "unlabelled",
+            vec![
+                ("a.json", source2_recording("unknown", true)),
+                ("b.json", source2_recording("source2", true)),
+            ],
+        ),
+    ] {
+        let dir = corpus(name, &files);
+        let (exit, r) = validate(
+            &tmp,
+            "source2.toml",
+            SOURCE2,
+            &["--corpus", dir.to_str().unwrap()],
+        );
+        assert_eq!(exit, 0, "{name}: {r:#}");
+    }
+
+    // A folder holding something that is not a recording: nothing concluded.
+    let bad = corpus("bad", &[("a.json", "{}".to_owned())]);
+    let (exit, r) = validate(
+        &tmp,
+        "source2.toml",
+        SOURCE2,
+        &["--corpus", bad.to_str().unwrap()],
+    );
+    assert_eq!(exit, 2, "{r:#}");
+
+    // The real recordings: none of them is a Source 2 game, and none is claimed.
+    let (exit, r) = validate(
+        &tmp,
+        "source2.toml",
+        SOURCE2,
+        &["--corpus", path("tests/corpus/recorded").to_str().unwrap()],
+    );
+    assert_eq!(exit, 0, "{r:#}");
+    let rows = r["corpus"]["recordings"].as_array().unwrap();
+    assert!(rows.len() >= 8 && rows.iter().all(|row| row["claimed"] == false));
 }

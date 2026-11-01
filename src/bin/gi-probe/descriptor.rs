@@ -18,11 +18,19 @@
 //!    one, through the same [`astra_game_launcher::detect_with_engines`] Astra calls. Any claim
 //!    (it names the game, or makes it ambiguous) is `descriptor-too-broad{reason=negative:<folder>}`.
 //!
+//! 4. with `--corpus <folder>`: it claims no recordings of two or more engines — every
+//!    `astra.list-shape/1` recording (`*.json`, as `gi-probe capture` writes them; the format is
+//!    `tests/corpus/replay.rs`) in the folder is laid below `TMPDIR` and detected with this
+//!    descriptor alone, as in step 3, with no hint and with the recording's own; the labels of
+//!    those it claims, `unknown` aside (it names no engine), are the engines it claims.
+//!    Two or more is `descriptor-too-broad{reason=two-engines, labels}` (spec §5,
+//!    `E_DESCRIPTOR_TOO_BROAD`, which this launcher spells as its own refusal: debt row 13).
+//!
 //! The report gives the descriptor's digest, `sha256(JCS(descriptor))`, which the catalogue
 //! entry's `descriptor_sha256` must equal. The input is the descriptor as TOML or JSON, or a
-//! foundation's `astra-gi.toml` holding it as `[integration.engine]`. Matching the descriptor
-//! against a corpus of labelled folders (`--corpus`) is a later step's.
+//! foundation's `astra-gi.toml` holding it as `[integration.engine]`.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use astra_game_launcher::{
@@ -30,6 +38,7 @@ use astra_game_launcher::{
 };
 use serde_json::{Value, json};
 
+use crate::replay::{self, Recording};
 use crate::{Fatal, Finding, Scratch, report};
 
 /// The AstraPlugins commit whose `spec/games/` this probe follows (PR #117), and whose goldens
@@ -118,6 +127,21 @@ fn pe_x64() -> Vec<u8> {
     b
 }
 
+/// `d` alone in a set, as an unchecked descriptor (`first_party` as given); the refusals of the
+/// set that would not hold it when Pass B does not admit it.
+fn alone(d: &Descriptor, first_party: bool) -> Result<EngineSet, Vec<LauncherError>> {
+    let origin = Origin {
+        moderation: Moderation::Unchecked,
+        publisher: "gi-probe".to_owned(),
+        first_party,
+    };
+    let set = EngineSet::build([(origin, Ok(d.clone()))]);
+    if set.is_empty() {
+        return Err(set.skipped().into_iter().map(|s| s.error.clone()).collect());
+    }
+    Ok(set)
+}
+
 /// Whether `d` speaks for the game in a detection made with it alone.
 fn claims(d: &Descriptor, det: &Detection) -> bool {
     det.descriptor_sha256.as_deref() == Some(d.digest())
@@ -134,19 +158,10 @@ pub type NegativeFolders = Result<(Vec<Value>, Vec<Finding>), Vec<LauncherError>
 /// `descriptor-too-broad{reason=negative:<folder>}` finding per claim (step unset). `None` when
 /// Pass B does not admit `d`, with the refusals of the set that would not hold it.
 pub fn negative_folders(d: &Descriptor, first_party: bool) -> Result<NegativeFolders, Fatal> {
-    let origin = Origin {
-        moderation: Moderation::Unchecked,
-        publisher: "gi-probe".to_owned(),
-        first_party,
+    let set = match alone(d, first_party) {
+        Ok(set) => set,
+        Err(refused) => return Ok(Err(refused)),
     };
-    let set = EngineSet::build([(origin, Ok(d.clone()))]);
-    if set.is_empty() {
-        return Ok(Err(set
-            .skipped()
-            .into_iter()
-            .map(|s| s.error.clone())
-            .collect()));
-    }
     let scratch = Scratch::new("negative")?;
     let mut folders = Vec::new();
     let mut findings = Vec::new();
@@ -186,6 +201,68 @@ pub fn negative_folders(d: &Descriptor, first_party: bool) -> Result<NegativeFol
     Ok(Ok((folders, findings)))
 }
 
+/// The label of a recording that names no engine.
+const UNLABELLED: &str = "unknown";
+
+/// Step 4: `d`, alone in `set`, asked of every recording in `dir` (see the module doc). The
+/// report's `corpus`, and a `descriptor-too-broad{reason=two-engines}` finding (step unset) when
+/// the recordings it claims carry two or more engines' labels.
+pub fn corpus(d: &Descriptor, set: &EngineSet, dir: &Path) -> Result<(Value, Vec<Finding>), Fatal> {
+    let files = replay::recordings_in(dir).map_err(|e| Fatal::io(dir, e))?;
+    let scratch = Scratch::new("corpus")?;
+    let mut rows = Vec::new();
+    let mut engines = BTreeSet::new();
+    for (i, file) in files.iter().enumerate() {
+        let text = std::fs::read_to_string(file).map_err(|e| Fatal::io(file, e))?;
+        let rec = Recording::parse(&text)
+            .map_err(|e| Fatal::io(file, format!("not an {} recording: {e}", replay::SCHEMA)))?;
+        let root = scratch.path().join(i.to_string());
+        std::fs::create_dir(&root).map_err(|e| Fatal::io(&root, e))?;
+        replay::materialise(&rec, &root).map_err(|e| Fatal::io(file, e))?;
+        let mut claimed = None;
+        let hints = std::iter::once(None).chain(rec.hint.as_deref().map(Some));
+        for hint in hints {
+            let det = detect_with_engines(&root, hint, set)
+                .map_err(|e| Fatal::io(file, format!("{}: {:?}", e.code, e.params)))?;
+            if claims(d, &det) {
+                claimed = Some(det.engine.as_str().to_owned());
+                break;
+            }
+        }
+        if claimed.is_some() && rec.label != UNLABELLED {
+            engines.insert(rec.label.clone());
+        }
+        rows.push(json!({
+            "recording": file.file_name().map(|n| n.to_string_lossy().into_owned()),
+            "label": rec.label,
+            "claimed": claimed.is_some(),
+            "engine": claimed,
+        }));
+    }
+    let mut findings = Vec::new();
+    if engines.len() >= 2 {
+        let labels = engines.iter().cloned().collect::<Vec<_>>().join(",");
+        findings.push(
+            Finding::new(
+                codes::DESCRIPTOR_TOO_BROAD,
+                format!(
+                    "the descriptor claims recordings of {} engines ({labels}) (spec §5): a descriptor names one engine's games",
+                    engines.len()
+                ),
+            )
+            .field("rule")
+            .with("reason", "two-engines")
+            .with("labels", labels),
+        );
+    }
+    let report = json!({
+        "dir": dir.display().to_string(),
+        "recordings": rows,
+        "engines_claimed": engines,
+    });
+    Ok((report, findings))
+}
+
 /// The report's `descriptor`: its digest and codes.
 pub fn summary(d: &Descriptor) -> Value {
     json!({
@@ -195,13 +272,18 @@ pub fn summary(d: &Descriptor) -> Value {
 }
 
 /// `gi-probe validate-descriptor`.
-pub fn run(file: &Path, first_party: bool) -> Result<(Value, bool), Fatal> {
+pub fn run(
+    file: &Path,
+    first_party: bool,
+    corpus_dir: Option<&Path>,
+) -> Result<(Value, bool), Fatal> {
     let bytes = std::fs::read(file).map_err(|e| Fatal::io(file, e))?;
     let text = String::from_utf8(bytes).map_err(|_| Fatal::io(file, "not UTF-8"))?;
     let (input, parsed) = parse(&text);
     let mut findings = Vec::new();
     let mut folders = Vec::new();
     let mut descriptor = Value::Null;
+    let mut corpus_report = None;
     match parsed {
         Err(e) => findings.push(refusal(&e, "not an astra.engine/1 descriptor").step(1)),
         Ok(d) => {
@@ -221,6 +303,12 @@ pub fn run(file: &Path, first_party: bool) -> Result<(Value, bool), Fatal> {
                 Ok((rows, claims)) => {
                     folders = rows;
                     findings.extend(claims.into_iter().map(|f| f.step(3)));
+                    if let Some(dir) = corpus_dir {
+                        let set = alone(&d, first_party).expect("admitted for step 3");
+                        let (r, claims) = corpus(&d, &set, dir)?;
+                        corpus_report = Some(r);
+                        findings.extend(claims.into_iter().map(|f| f.step(4)));
+                    }
                 }
             }
         }
@@ -236,6 +324,10 @@ pub fn run(file: &Path, first_party: bool) -> Result<(Value, bool), Fatal> {
         "descriptor": descriptor,
         "negative_folders": folders,
     });
+    let mut rest = rest;
+    if let Some(c) = corpus_report {
+        rest["corpus"] = c;
+    }
     Ok((report("validate-descriptor", rest, &findings), passed))
 }
 

@@ -47,6 +47,16 @@ fn ours() -> Vec<u8> {
 
 const IL2CPP_DECL: &str = "[integration.mods]\nloader = \"bepinex6-il2cpp\"\nbepinex_build = 788\nchain = \"${profile}/chain/Astra.Chain.dll\"\nchain_config = \"${profile}/chain/chain.ini\"\n";
 
+/// A path as the launcher hands it on: canonical on Unix; on Windows as this test built it
+/// (below its temporary folder, written plainly), `\`-separated as the launcher joins it.
+fn as_handed_on(p: &Path) -> String {
+    if cfg!(windows) {
+        p.display().to_string().replace('/', "\\")
+    } else {
+        fs::canonicalize(p).unwrap().display().to_string()
+    }
+}
+
 struct World {
     tmp: Tmp,
     platform: Platform,
@@ -82,11 +92,7 @@ impl World {
 
     /// The profile as the game sees it, the way 0.3.2 wrote it: `\`-separated, `Z:` under Proton.
     fn profile_text(&self) -> String {
-        let p = fs::canonicalize(self.profile())
-            .unwrap()
-            .display()
-            .to_string()
-            .replace('/', "\\");
+        let p = as_handed_on(&self.profile()).replace('/', "\\");
         match self.platform {
             Platform::LinuxProton { .. } => format!("Z:{p}"),
             _ => p,
@@ -95,7 +101,7 @@ impl World {
 
     /// A path of theirs as the game sees it: as it is natively, `Z:\…` under Proton.
     fn their_text(&self, p: &Path) -> String {
-        let p = fs::canonicalize(p).unwrap().display().to_string();
+        let p = as_handed_on(p);
         match self.platform {
             Platform::LinuxProton { .. } => format!("Z:{}", p.replace('/', "\\")),
             _ => p,
@@ -126,7 +132,10 @@ impl World {
     /// Their Gale profile for this game.
     fn theirs(&self, name: &str) -> PathBuf {
         self.tmp
-            .join("home/.local/share/com.kesomannen.gale")
+            .join("home")
+            .join(".local")
+            .join("share")
+            .join("com.kesomannen.gale")
             .join(GAME)
             .join("profiles")
             .join(name)
@@ -322,7 +331,12 @@ fn under_proton_their_paths_are_z_and_relative_settings_are_found_below_their_ro
             w.their_text(&theirs.join("both"))
         )
     );
-    assert!(p.args[at + 1].starts_with("Z:\\"), "{}", p.args[at + 1]);
+    // A Linux path under Proton: `Z:` and the root's `/` (a Windows host's path has its drive).
+    assert!(
+        cfg!(windows) || p.args[at + 1].starts_with("Z:\\"),
+        "{}",
+        p.args[at + 1]
+    );
     assert_eq!(
         p.args[5],
         format!("{}\\chain\\Astra.Chain.dll", w.profile_text())
@@ -331,11 +345,7 @@ fn under_proton_their_paths_are_z_and_relative_settings_are_found_below_their_ro
     assert!(
         ini.contains(&format!(
             "target = Z:{}\\BepInEx\\core\\BepInEx.Preloader.dll\n",
-            fs::canonicalize(&theirs)
-                .unwrap()
-                .display()
-                .to_string()
-                .replace('/', "\\")
+            as_handed_on(&theirs).replace('/', "\\")
         )),
         "{ini}"
     );

@@ -115,9 +115,15 @@ fn the_plans_source2_example_parses_and_names_its_game() {
 
     // The same game when Steam names the program: the hint is used, and said so.
     let got = d(t.path(), Some(r"game\bin\win64\CS2.EXE"), &set);
+    // Spelled as on disk; on Windows, whose disk finds a name in any case, as the hint spells it.
+    let spelled = if cfg!(windows) {
+        "game/bin/win64/CS2.EXE"
+    } else {
+        "game/bin/win64/cs2.exe"
+    };
     assert_eq!(
         (got.engine.as_str(), got.hint_used, got.exe.clone()),
-        ("source2", true, p("game/bin/win64/cs2.exe"))
+        ("source2", true, p(spelled))
     );
     // And without descriptors it is unknown, exactly as 0.4.1 says.
     assert!(detect_with(t.path(), None).unwrap().engine.is_unknown());

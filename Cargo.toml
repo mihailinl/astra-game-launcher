@@ -59,6 +59,16 @@ windows-sys = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Registry",
+    # gi-probe only (a recording's replay, `tests/corpus/replay.rs`): FSCTL_SET_SPARSE.
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+] }
+
+# Test-only: a registered cloud-files sync root, for `reads::windows::tests` (debt row 3).
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Storage_CloudFilters",
+    "Win32_System_CorrelationVector",
 ] }
 
 [build-dependencies]

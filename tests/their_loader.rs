@@ -600,7 +600,13 @@ fn their_bepinex_under_another_proxy_name_is_a_foreign_loader_not_a_switched_off
         );
         let e = w.plan(Platform::Windows).unwrap_err();
         assert_eq!(e.code, codes::FOREIGN_LOADER, "{name}");
-        assert_eq!(e.param("file"), Some(name));
+        // The name as the disk spells it; on Windows, whose disk finds a name in any case, as
+        // the launcher looked it up.
+        assert!(
+            e.param("file")
+                .is_some_and(|f| f == name || (cfg!(windows) && f.eq_ignore_ascii_case(name))),
+            "{name}: {e:?}"
+        );
     }
     // A version.dll that is not a Doorstop is none of this: the config then decides.
     let w = World::new();

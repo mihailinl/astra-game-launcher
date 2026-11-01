@@ -133,7 +133,7 @@ fn under_proton_the_profile_is_a_z_drive_path_and_steam_gets_applaunch() {
     let game = w.proton();
     let w = w.installed(&game);
     let p = prepare_launch(&w.profile(), &game, &vars(), steam()).unwrap();
-    let profile = fs::canonicalize(w.profile()).unwrap();
+    let profile = plain(&fs::canonicalize(w.profile()).unwrap());
     let z = format!(
         "Z:{}\\BepInEx\\core\\BepInEx.Preloader.dll",
         profile.to_str().unwrap().replace('/', "\\")
@@ -163,7 +163,12 @@ fn under_proton_the_profile_is_a_z_drive_path_and_steam_gets_applaunch() {
     // `launch` writes the play-arm, right before it spawns Steam.
     assert_eq!(
         p.play_arm(),
-        Some((profile.join(astra_game_launcher::PLAY_ARM_FILE_NAME), APPID))
+        Some((
+            fs::canonicalize(w.profile())
+                .unwrap()
+                .join(astra_game_launcher::PLAY_ARM_FILE_NAME),
+            APPID
+        ))
     );
 }
 
@@ -184,8 +189,8 @@ fn a_game_not_on_steam_is_started_directly_with_args_and_env() {
     );
     plan_and_install(&pkg, &game, &w.profile());
     let p = prepare_launch(&w.profile(), &game, &vars(), steam()).unwrap();
-    let profile = fs::canonicalize(w.profile()).unwrap();
-    let game_dir = fs::canonicalize(w.game.path()).unwrap();
+    let profile = plain(&fs::canonicalize(w.profile()).unwrap());
+    let game_dir = plain(&fs::canonicalize(w.game.path()).unwrap());
     assert_eq!(p.program, game_dir.join(format!("{GAME}.exe")));
     assert_eq!(p.cwd.as_deref(), Some(game_dir.as_path()));
     assert_eq!(

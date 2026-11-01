@@ -51,12 +51,22 @@
 //! descriptor's anchor beside it. C1b's plans are also made again with each hostile set and
 //! must not change (C1c for planning; one set per plan, in turn).
 //!
-//! **Against plan B §2's C1** this is the generated corpus at its full size; the `bin/list-shape`
-//! recordings (`tests/corpus/recorded/`) are not here yet (docs/ENGINE-DESCRIPTORS-DEBT.md).
+//! **Over real folders** ([`c1_detection_and_planning_are_launcher_0_4_1s_over_the_recordings`]):
+//! plan B §2's `bin/list-shape` recordings, `tests/corpus/recorded/*.json` — real Steam library
+//! folders as `gi-probe capture` recorded them (`astra.list-shape/1`, `tests/corpus/replay.rs`) —
+//! each laid again below `TMPDIR` (sparse files of the recorded sizes holding the recorded
+//! bytes) and held to the same checks: Detection equal to 0.4.1's with no hint and with the
+//! recorded one, the hostile sets narrow-only, the planning canary, and every program planned by
+//! both launchers with a probe per built-in code. A replay on the OS it was captured on must also
+//! answer what the folder itself answered when it was captured. Recordings of folders that may
+//! not be committed (the owner's own libraries) are replayed the same way from
+//! `AGL_C1_RECORDED=<folder>[:<folder>…]`, never from the repository.
 
 mod common;
 #[path = "corpus/gen.rs"]
 mod corpus;
+#[path = "corpus/replay.rs"]
+mod replay;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
@@ -68,7 +78,7 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use astra_game_launcher::{
     Detection, Engine, EngineSet, ExePick, GameAction, GameTarget, GiPackage, InstallPlan,
     KEPT_FOLDER_GAINED_FILES, LEDGER_FILE_NAME, LauncherError, Platform, Provenance, codes,
-    detect_with_engines, launch_executable, plan_install_in, valve_anti_cheat,
+    detect_with, detect_with_engines, launch_executable, plan_install_in, valve_anti_cheat,
 };
 use common::identity::{
     checked_with_hostile, hostile_lower_set, hostile_set, moderated_hostile_set, narrowed,
@@ -1381,9 +1391,19 @@ impl GameCopy {
         }
     }
 
-    /// `text` with this copy's paths written relative to it.
+    /// `text` with this copy's paths written relative to it: as they are, and as JSON spells
+    /// them (on Windows a `\` inside a JSON string reads `\\`), with and without the `\\?\`
+    /// prefix a canonical Windows path carries.
     fn norm(&self, text: &str) -> String {
-        text.replace(self.tmp.path().to_str().unwrap(), "<copy>")
+        let raw = self.tmp.path().to_str().unwrap();
+        let mut text = text.to_owned();
+        for path in [raw, raw.trim_start_matches(r"\\?\")] {
+            let quoted = serde_json::to_string(path).unwrap();
+            text = text
+                .replace(&quoted[1..quoted.len() - 1], "<copy>")
+                .replace(path, "<copy>");
+        }
+        text
     }
 
     /// A ledger on disk, as text, read with launcher 0.4.1's `Ledger` (every field it has), its
@@ -1909,7 +1929,14 @@ fn c1b_install(job: Job, fixtures: &[Fixture], appinfo: &Path, counts: &Counts) 
             Ordering::Relaxed,
         );
     }
-    let rel_root = root(&b)
+    // As the disk spells it (the snapshot's keys): on Windows the program's path may name a
+    // folder in another case, which that disk resolves.
+    let on_disk = if cfg!(windows) {
+        common::plain(&fs::canonicalize(root(&b)).unwrap())
+    } else {
+        root(&b)
+    };
+    let rel_root = on_disk
         .strip_prefix(b.tmp.path())
         .unwrap()
         .to_string_lossy()
@@ -2073,8 +2100,10 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
         ("odd projects chosen", 750),
         ("trees with 9+ top programs", 300),
     ] {
-        // The odd names are laid on Unix only: no Windows disk holds them.
-        if !cfg!(unix) && k.starts_with("odd ") {
+        // The odd names are laid on Unix only: no Windows disk holds them. And NTFS lists a
+        // folder in its own name order, so a listing cut before it is sorted is the one cut
+        // after: there a truncation hides no hint (measured on the VM, 2026-11-01: 0 in 20,000).
+        if !cfg!(unix) && (k.starts_with("odd ") || k == "hints the truncation hid") {
             continue;
         }
         let floor = (per_20k * trees as usize / 20_000).max(1);
@@ -2431,6 +2460,234 @@ fn c1b_every_manifest_plans_as_0_4_1_on_the_games_it_is_for() {
         rows.0 >= 1 && rows.1 >= 1 && rows.2 >= 1,
         "C1b: a declared row never applied: {rows:?}"
     );
+}
+
+/// The recordings C1 replays (plan B §2's `tests/corpus/recorded/`), relative to the crate.
+const RECORDED: &str = "tests/corpus/recorded";
+/// How many recordings [`RECORDED`] holds, each replayed: the floor. Raised with every recording
+/// added, in the same commit.
+const RECORDINGS: usize = 8;
+/// Folders of recordings replayed beside [`RECORDED`] and never committed
+/// (`AGL_C1_RECORDED=<folder>[:<folder>…]`): the owner's captures of his own libraries.
+const RECORDED_ENV: &str = "AGL_C1_RECORDED";
+
+/// The programs planning is asked about in a recording: every file a built-in rule takes by
+/// its extension, wherever it was recorded, and the detections' own.
+fn recorded_programs(rec: &replay::Recording, seen: &[Seen]) -> Vec<PathBuf> {
+    let mut exes: Vec<PathBuf> = rec
+        .files()
+        .filter(|(path, ..)| {
+            let lower = path.to_ascii_lowercase();
+            [".exe", ".x86_64", ".x86"]
+                .iter()
+                .any(|e| lower.ends_with(e))
+        })
+        .map(|(path, ..)| path.split('/').collect())
+        .collect();
+    for s in seen {
+        for d in [Some(&s.pass_a), Some(&s.with), s.lower.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(exe) = &d.exe
+                && !exes.contains(exe)
+            {
+                exes.push(exe.clone());
+            }
+        }
+    }
+    exes
+}
+
+/// One recording, laid at `dir`: C1 and C1c for its detections (no hint, and the recorded one),
+/// the planning canary for each, and every program planned by both launchers with a probe per
+/// built-in code, the Steam appid turning through the fixture's (flagged, cleared, absent,
+/// none).
+#[allow(clippy::too_many_arguments)]
+fn one_recording(
+    n: usize,
+    rec: &replay::Recording,
+    dir: &Path,
+    zips: &[(Engine, Vec<u8>)],
+    probes: &BTreeMap<&'static str, Vec<u8>>,
+    appinfo: &Path,
+    counts: &Counts,
+) {
+    let mut hints: Vec<Option<&str>> = vec![None];
+    if let Some(h) = rec.hint.as_deref() {
+        hints.push(Some(h));
+    }
+    let mut seen: Vec<Seen> = Vec::new();
+    for hint in hints {
+        let (d, with) = checked_with_hostile(dir, hint);
+        bump(&counts.detections);
+        let mut lower_seen = None;
+        if open_to_descriptors(&d) {
+            bump(&counts.open);
+            if with.descriptor_sha256.is_some() {
+                bump(&counts.claimed);
+            }
+            let lower = detect_with_engines(dir, hint, hostile_lower_set()).unwrap();
+            narrowed(&d, &lower);
+            if lower.descriptor_sha256.is_some() {
+                bump(&counts.claimed_lower);
+            }
+            lower_seen = Some(lower);
+            let moderated = detect_with_engines(dir, hint, moderated_hostile_set()).unwrap();
+            if moderated.descriptor_sha256.is_some() {
+                bump(&counts.moderated_decides);
+                assert_eq!(
+                    with, moderated,
+                    "C1c: a lower standing never replaces nor ambiguates a moderated answer (recording {:?}, hint {hint:?})",
+                    rec.game
+                );
+            }
+        }
+        seen.push(Seen {
+            hint: hint.map(str::to_owned),
+            pass_a: d,
+            with,
+            lower: lower_seen,
+        });
+    }
+    let exes = recorded_programs(rec, &seen);
+    let steam = Tmp::new(&format!("recorded-steam-{n}"));
+    let hints = seen.len();
+    for (i, s) in seen.into_iter().enumerate() {
+        let at = Turn {
+            seed: n as u64,
+            i,
+            hints,
+        };
+        planning_canary(at, dir, steam.path(), s, &exes, probes, counts);
+    }
+    let profile = steam.join("p");
+    let appids = [Some(VAC), Some(CLEAR), Some(UNLISTED), None];
+    for (k, exe) in exes.iter().enumerate() {
+        let p = Planned {
+            dir,
+            exe,
+            appid: appids[(n + k) % appids.len()],
+            appinfo,
+            profile: &profile,
+            proton: false,
+        };
+        for (engine, zip) in zips {
+            let new = plan_new(&p, zip);
+            let old = plan_legacy(&p, zip);
+            assert_eq!(
+                new, old,
+                "C1: planning must refuse and plan exactly as 0.4.1 (recording {:?}, exe {exe:?}, engine {engine:?})",
+                rec.game
+            );
+            bump(&counts.plans);
+            if new.starts_with("anti-cheat ") {
+                bump(&counts.anti_cheat);
+            }
+            if new.starts_with("engine-mismatch ") {
+                bump(&counts.mismatch);
+            }
+        }
+    }
+}
+
+/// Canary C1 over real folders: every recording in [`RECORDED`] (and [`RECORDED_ENV`]'s) laid
+/// again below `TMPDIR` and held to 0.4.1 exactly as a generated tree is ([`one_recording`]);
+/// and a replay on the OS it was captured on answers what the folder itself did then, so the
+/// replay is the folder. The floor is the number of recordings.
+#[test]
+fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_recordings() {
+    let committed = replay::recordings_in(&Path::new(env!("CARGO_MANIFEST_DIR")).join(RECORDED))
+        .expect("tests/corpus/recorded");
+    assert_eq!(
+        committed.len(),
+        RECORDINGS,
+        "C1: {RECORDED} holds {} recordings; RECORDINGS says {RECORDINGS} (raise it with the recording, in the same commit)",
+        committed.len()
+    );
+    let mut files = committed.clone();
+    if let Some(extra) = std::env::var_os(RECORDED_ENV) {
+        for d in std::env::split_paths(&extra) {
+            files.extend(replay::recordings_in(&d).unwrap_or_else(|e| panic!("{d:?}: {e}")));
+        }
+    }
+    let zips: Vec<(Engine, Vec<u8>)> = Engine::ALL
+        .iter()
+        .filter(|e| **e != Engine::Unknown)
+        .map(|e| (*e, probe_zip(e.code())))
+        .collect();
+    let probes: BTreeMap<&'static str, Vec<u8>> =
+        HOSTILE_CODES.iter().map(|c| (*c, probe_zip(c))).collect();
+    let world = Tmp::new("recorded-appinfo");
+    let appinfo = world.join("appinfo.vdf");
+    fs::write(
+        &appinfo,
+        appinfo_vac(&[(VAC, Some(true)), (CLEAR, Some(false))]),
+    )
+    .unwrap();
+    let counts = Counts::default();
+    let (mut replayed, mut faithful, mut with_hint, mut named) = (0, 0, 0, 0);
+    for (n, file) in files.iter().enumerate() {
+        let text = fs::read_to_string(file).unwrap_or_else(|e| panic!("{file:?}: {e}"));
+        let rec = replay::Recording::parse(&text).unwrap_or_else(|e| panic!("{file:?}: {e}"));
+        assert!(
+            !rec.holds_a_fifo(),
+            "{file:?}: a FIFO is a declared divergence (fifo-*, tests/corpus/divergence.txt) that blocks 0.4.1 for good; its case belongs in tests/divergence.rs, where 0.4.1 runs in a child process"
+        );
+        let t = Tmp::new(&format!("recorded-{n}"));
+        replay::materialise(&rec, t.path()).unwrap_or_else(|e| panic!("{file:?}: {e}"));
+        if rec.os == std::env::consts::OS {
+            let d = detect_with(t.path(), rec.hint.as_deref()).unwrap();
+            assert_eq!(
+                serde_json::to_value(&d).unwrap(),
+                rec.detection,
+                "C1: the replay of {file:?} answers otherwise than the folder did when it was captured"
+            );
+            faithful += 1;
+        }
+        if rec.hint.is_some() {
+            with_hint += 1;
+        }
+        if rec.detection["engine"] != "unknown" {
+            named += 1;
+        }
+        one_recording(n, &rec, t.path(), &zips, &probes, &appinfo, &counts);
+        replayed += 1;
+    }
+    let get = |a: &AtomicUsize| a.load(Ordering::Relaxed);
+    let c = &counts;
+    eprintln!(
+        "C1 over the recordings: {replayed} replayed ({} committed), {faithful} held to their capture, {with_hint} with Steam's hint, {named} named by a built-in",
+        committed.len()
+    );
+    for (k, v) in [
+        ("detections", get(&c.detections)),
+        ("open to descriptors", get(&c.open)),
+        ("claimed by the hostile set", get(&c.claimed)),
+        ("claimed by its lower standings", get(&c.claimed_lower)),
+        ("plans", get(&c.plans)),
+        ("anti-cheat refusals", get(&c.anti_cheat)),
+        ("engine-mismatch", get(&c.mismatch)),
+        ("planning: pinned", get(&c.planning_pinned)),
+        ("planning: closed folders", get(&c.planning_closed)),
+        ("planning: named", get(&c.planning_named)),
+        ("planning: hinted", get(&c.planning_hinted)),
+    ] {
+        eprintln!("  {v:7}  {k}");
+    }
+    assert_eq!(replayed, files.len());
+    assert!(
+        replayed >= RECORDINGS,
+        "C1: {replayed} recordings replayed, fewer than the {RECORDINGS} committed"
+    );
+    if cfg!(target_os = "linux") {
+        // Every committed recording was captured on Linux, so here each is held to its capture.
+        assert!(
+            faithful >= RECORDINGS,
+            "C1: {faithful} replays held to their capture"
+        );
+    }
+    assert!(get(&c.plans) >= RECORDINGS && get(&c.detections) >= RECORDINGS);
 }
 
 /// The generator is what C1 was proven on: the same seed, the same tree.

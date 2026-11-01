@@ -18,13 +18,19 @@
 //! - `check`: may a release be published — the launcher's own parse and zip hygiene, the
 //!   `[integration.*]` rules, reserved ids and names, Astra Link's limits, the engine descriptor,
 //!   `built_on` and `code_changed` ([`check`]). What a catalogue's ingest runs.
-//! - `validate-descriptor`: an `astra.engine/1` descriptor, the spec's §5 lint ([`descriptor`]).
+//! - `validate-descriptor`: an `astra.engine/1` descriptor, the spec's §5 lint ([`descriptor`]),
+//!   with `--corpus` its claims over labelled recordings too.
+//! - `capture`: a recording of a real game folder, `astra.list-shape/1` ([`capture`]; the format
+//!   and its replay are `tests/corpus/replay.rs`, included here as [`replay`]).
 //! - `pick`: Astra 0.2.7's choice of release out of a GitHub releases listing, for
 //!   `tools/fetch-first-party-manifests.sh` (the replica, [`v027::releases::pick_with`]).
 
+mod capture;
 mod check;
 mod compat;
 mod descriptor;
+#[path = "../../../tests/corpus/replay.rs"]
+mod replay;
 mod trees;
 mod v027;
 
@@ -49,7 +55,9 @@ USAGE
   gi-probe check <astra-gi.zip | astra-gi.toml> [--provenance first-party|community]
                  [--foundation <foundation's zip>] [--previous <previous release's zip>]
                  [--loaders <the catalogue's loaders[] as a JSON array>]
-  gi-probe validate-descriptor <file> [--first-party]
+  gi-probe validate-descriptor <file> [--first-party] [--corpus <folder of recordings>]
+  gi-probe capture <game folder> --out <recording.json> [--label <engine code>]
+                   [--appid N] [--hint <the program Steam launches, relative>]
   gi-probe pick --source <integration id> --listing <releases.json> [--prerelease]
   gi-probe --version
 
@@ -77,6 +85,17 @@ USAGE
   validate-descriptor
                 an astra.engine/1 descriptor (TOML, JSON, or a manifest's [integration.engine]):
                 it parses, Pass B admits it, and it claims none of the spec's negative folders.
+                --corpus: every recording (*.json, astra.list-shape/1) in the folder is laid
+                below TMPDIR and detected with the descriptor alone; claiming recordings of two
+                or more engines (their labels; `unknown` names none) is too broad.
+  capture       a recording of a game folder for C1 and --corpus: the names, kinds and sizes
+                of everything the detection walk and the reads near a program list, and only
+                the bytes the rules read (a version header's first 4 KiB, a program's first 4
+                and last 16 bytes); no other content, and no path above the folder. The label
+                defaults to the engine the built-in rules name (`unknown` when none does).
+                --appid is recorded; without --hint, what Steam's appinfo.vdf launches for it
+                is the hint. At most 1 MiB: a larger recording is refused
+                (recording-too-large), and nothing is written.
   pick          the release a 0.2.7 release build installs for the source out of a listing
                 (GitHub's GET /repositories/<id>/releases, every page as one array), and the
                 source's compiled fallback pin.
@@ -277,6 +296,8 @@ const KEY_ORDER: &[&str] = &[
     "integration",
     "descriptor",
     "negative_folders",
+    "corpus",
+    "recording",
     "link",
     "built_on",
     "code_changed",
@@ -450,11 +471,35 @@ fn run(argv: &[String]) -> Result<(Value, bool), Fatal> {
             })
         }
         "validate-descriptor" => {
-            let a = Args::parse(rest, &[], &["first-party"])?;
+            let a = Args::parse(rest, &["corpus"], &["first-party"])?;
             let [file] = a.positional.as_slice() else {
                 return Err(Fatal::usage("validate-descriptor takes one file"));
             };
-            descriptor::run(Path::new(file), a.flag("first-party"))
+            descriptor::run(
+                Path::new(file),
+                a.flag("first-party"),
+                a.opt("corpus").map(Path::new),
+            )
+        }
+        "capture" => {
+            let a = Args::parse(rest, &["out", "label", "appid", "hint"], &[])?;
+            let [dir] = a.positional.as_slice() else {
+                return Err(Fatal::usage("capture takes one game folder"));
+            };
+            let appid = match a.opt("appid") {
+                None => None,
+                Some(n) => Some(
+                    n.parse::<u32>()
+                        .map_err(|_| Fatal::usage(format!("--appid is a number, not {n:?}")))?,
+                ),
+            };
+            capture::run(&capture::CaptureArgs {
+                dir: PathBuf::from(dir),
+                out: PathBuf::from(a.need("out")?),
+                label: a.opt("label").map(str::to_owned),
+                appid,
+                hint: a.opt("hint").map(str::to_owned),
+            })
         }
         "pick" => {
             let a = Args::parse(rest, &["source", "listing"], &["prerelease"])?;

@@ -614,7 +614,10 @@ fn launch_writes_the_play_arm_immediately_before_it_asks_steam_to_start_the_game
     let w = World::installed();
     let plan = w.plan().unwrap();
     assert!(!w.play_arm().exists(), "prepare_launch writes none");
-    assert_eq!(plan.play_arm(), Some((w.play_arm(), APPID)));
+    assert_eq!(
+        plan.play_arm().map(|(arm, appid)| (plain(&arm), appid)),
+        Some((w.play_arm(), APPID))
+    );
 
     let spawn = FakeSpawn::new(&w, false);
     let from = now_ms();

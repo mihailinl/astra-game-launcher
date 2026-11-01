@@ -343,9 +343,15 @@ fn a_hint_that_passes_wins_outright() {
         (p("Sub/Tool.exe"), p("Sub/Tool_Data"), true)
     );
     // As Steam may write it: Windows separators, a leading `./`, another case. The answer is
-    // spelled as on disk.
+    // spelled as on disk — on Windows, whose disk finds a name in any case, as the hint spells it
+    // (0.4.1's `child()` answers the exact spelling first, and NTFS has it).
     let d = detect_with(t.path(), Some(r".\SUB\tool.EXE")).unwrap();
-    assert_eq!((d.exe, d.hint_used), (p("Sub/Tool.exe"), true));
+    let spelled = if cfg!(windows) {
+        "SUB/tool.EXE"
+    } else {
+        "Sub/Tool.exe"
+    };
+    assert_eq!((d.exe, d.hint_used), (p(spelled), true));
 }
 
 /// A hint that is not a game by the rules, or not inside the folder, is ignored: the folder is

@@ -271,19 +271,38 @@ Where 0.5.0 answers otherwise — it follows no link, waits on no FIFO, and foll
 naming a Windows device (`COM¹.exe`), where 0.4.1 did all three — is listed in
 [`tests/corpus/divergence.txt`](tests/corpus/divergence.txt).
 
-## Engines learned from data (0.5.0, in progress)
+## Engines learned from data (0.5.0)
 
 An engine the rules above do not know is described by data, an **engine descriptor**
 (`astra.engine/1`, `astra_game_launcher::engines`): which program, and what sits beside it.
 The descriptor is JSON in the signed games catalogue, or the same object as TOML under a
 foundation's `[integration.engine]`; its digest is `sha256(JCS(object))`, so both spellings
-have one digest.
+have one digest. The format is defined by AstraPlugins' `spec/games/engine-descriptor-v1.md`
+at the commit [`docs/ENGINE-DESCRIPTOR.md`](docs/ENGINE-DESCRIPTOR.md) names, which also points
+at the worked examples (the built-ins, `src/engines/builtin/*.toml`) and says how this launcher
+reads what the specification leaves open.
 
 ```rust
-let engines = EngineSet::build(offered);                 // (Origin, Descriptor::from_json(..)) pairs
+let engines = EngineSet::build(offered)                  // (Origin, Descriptor::from_json(..)) pairs
+    .with_anti_cheat_markers(markers);                   // the signed index's anticheat[] rows
 let d = detect_with_engines(&dir, hint, &engines)?;      // Pass A, then perhaps Pass B
 let plan = plan_install_in(&pkg, &game, &profile_dir, &engines, Provenance::Community, pick)?;
+install(&pkg, &plan, &game, &Ctx::silent())?;            // plans again with the pinned descriptor
+restore_game_files(&profile_dir, &game)?;                // a withdrawn integration: the game's files back
 ```
+
+**The 0.5.0 API at a glance** (each item is described below):
+
+| what | items |
+|---|---|
+| detection | `detect_with_engines`, `EngineSet` (`build`, `empty`, `with_anti_cheat_markers`, `skipped`, `descriptors`, `engine_name`), `Descriptor` (`from_json`, `from_toml`, `digest`, `canonical_json`, `codes`, `check_pass_b`), `Origin`, `Moderation`, `AntiCheatMarker`, `AntiCheatMarkerKind`, `EngineCode`, `Detection::{version, engine_candidates, descriptor_sha256, open_to_descriptors, is_ambiguous}`, `ANTI_CHEAT_SIGNATURES`, `ANTI_CHEAT_CODES`, `engines::BUILTIN` |
+| planning | `plan_install_in(pkg, game, profile, &EngineSet, Provenance, pick)`, `Provenance::{FirstParty, Community}`, `InstallPlan::{engine_descriptor, provenance}` (`PinnedDescriptor`), `HIJACK_NAMES`, `is_hijack_name`, `Manifest::parse` (`engine-undeclared`), `Manifest::lint(first_party)`, `Manifest::parse_and_lint`, `LoaderDecl`, `FoundationClaim`, `link_limits`, `KEEP_EXTENSIONS` |
+| install and restore | `restore_game_files`, `UninstallReport::{kept_reasons, warnings}`, `KEPT_FOLDER_GAINED_FILES`, `Ledger::{provenance, descriptor_sha256, proxy_folders}`, `LEDGER_SCHEMA` 4 (`restored`) |
+| Steam | `store_categories`, `store_categories_of`, `online_game`, `online_codes`, `ONLINE_CATEGORIES`, `VAC_CATEGORY` |
+| reserved names | `reserved` (one list, held to the spec's `reserved.yaml`, canary K13): `PROFILE_FILE_NAMES`, `INTEGRATION_ID_PREFIXES` (`astra.`, `minice.`), `INTEGRATION_NAME_SUBSTRINGS`, `engine_codes`, `id_is_reserved`, `integration_name_is_reserved`, `profile_name_is_reserved`, `check_identity`; `is_reserved_code`, `is_valid_engine_code` |
+| new codes (`codes::ALL`) | `anti-cheat-unknown`, `capability-undeclared`, `community-limit`, `descriptor-duplicate`, `descriptor-first-party-only`, `descriptor-invalid`, `descriptor-mismatch`, `descriptor-over-limit`, `descriptor-schema-unknown`, `descriptor-too-broad`, `descriptor-too-large`, `descriptor-unsupported`, `engine-ambiguous`, `engine-code-reserved`, `engine-code-taken`, `engine-name-reserved`, `engine-undeclared`, `foreign-file`, `kernel-anti-cheat`, `link-invalid`, `listed-anti-cheat`, `loader-policy-conflict`, `loader-undeclared`, `needs-newer-astra`, `reserved-id`, `reserved-name` |
+| new warnings | `foreign-loader-in-backup` (a plan), `restore-partial` (an uninstall or restore) |
+| `gi-probe` | `compat`, `check`, `validate-descriptor [--corpus]`, `capture`, `pick` (below) |
 
 - `Detection::engine` is an `EngineCode` (`^[a-z][a-z0-9-]{1,31}$`), serialised exactly as the
   old `Engine` was: `"unity-mono"`, `"unity-il2cpp"`, `"unreal"`, `"godot"`, `"unknown"`, or a
@@ -377,7 +396,8 @@ gi-probe compat --zip astra-gi.zip --source astra.unreal --tag v0.2.1 [--asset N
                 [--prerelease] [--sha256 HEX] [--previous PREV.zip] [--notes NOTES.md]
 gi-probe check astra-gi.zip [--provenance first-party|community] [--foundation F.zip]
                [--previous PREV.zip] [--loaders LOADERS.json]
-gi-probe validate-descriptor engine.toml [--first-party]
+gi-probe validate-descriptor engine.toml [--first-party] [--corpus RECORDINGS/]
+gi-probe capture GAME_DIR --out game.json [--label CODE] [--appid N] [--hint REL]
 gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
 ```
 
@@ -439,8 +459,24 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
   foundation's `astra-gi.toml` holding `[integration.engine]`) parses, Pass B admits it, and it
   claims none of the spec's negative folders (empty, an exe alone, an exe among bare system
   DLLs, `steam_api64.dll` beside an exe), each detected with it alone
-  (`descriptor-too-broad`, `reason=negative:<folder>`). The report gives its digest,
-  `sha256(JCS(descriptor))`.
+  (`descriptor-too-broad`, `reason=negative:<folder>`). With `--corpus`, every recording in
+  the folder (below) is laid below `TMPDIR` and detected with the descriptor alone, with no hint
+  and with the recording's own: claiming recordings labelled with two or more engines is
+  `descriptor-too-broad`, `reason=two-engines` (`unknown` names no engine). The report gives its
+  digest, `sha256(JCS(descriptor))`.
+- **`capture`** records a real game folder as `astra.list-shape/1` (merged plan R29; the format
+  and its replay are `tests/corpus/replay.rs`): every name, kind and size the detection walk and
+  the reads near a program list — the walk's folders, then around each program and Steam's hint
+  the folder, the three above it and two levels below each — links and FIFOs marked, never
+  followed or opened; and only the bytes the rules read: a version header's first 4 KiB, a
+  program-like file's first 4 and last 16 bytes. No other content, and no path above the game
+  folder. It also records this build's answer for the folder, so a replay is held to it. The
+  label defaults to the engine the built-in rules name (`unknown` when none does); `--appid`
+  is recorded and, without `--hint`, gives the hint from Steam's `appinfo.vdf`. A recording over
+  1 MiB is refused (`recording-too-large`) and nothing is written. Canary C1 replays every
+  recording in `tests/corpus/recorded/` (real folders of a Steam library) against launcher 0.4.1;
+  `AGL_C1_RECORDED=<folder>[:<folder>…] cargo test --test identity` replays your own captures the
+  same way without committing them.
 
 **The report** is one JSON object on stdout:
 

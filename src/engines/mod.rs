@@ -41,8 +41,10 @@ pub use descriptor::{Descriptor, is_reserved_code, is_valid_engine_code};
 pub(crate) use eval::{NamedEngine, engine_of_program, is_walked_program, pass_a, pass_b};
 
 /// The built-in descriptors, as text, in the order Pass A asks them: 0.4.1's `passes()` asked
-/// Unity, then Godot, then Unreal of each program.
-const BUILTIN: [&str; 3] = [
+/// Unity, then Godot, then Unreal of each program. Public as the worked examples of the grammar
+/// (`docs/ENGINE-DESCRIPTOR.md`), and for `gi-probe capture`, which reads from them what the
+/// walk lists at its depth bound and which bytes the rules read.
+pub const BUILTIN: [&str; 3] = [
     include_str!("builtin/unity.toml"),
     include_str!("builtin/godot.toml"),
     include_str!("builtin/unreal.toml"),
