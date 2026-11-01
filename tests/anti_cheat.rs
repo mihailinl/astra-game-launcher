@@ -355,7 +355,7 @@ fn every_game_gets_the_markers_whichever_pass_named_it() {
 }
 
 /// The spec's own `anticheat[]` rows (games-index-v1 §2.3), from AstraPlugins' goldens as
-/// `tests/goldens/astraplugins/` vendors them at its `PIN` (d46e44a): the valid index's rows are
+/// `tests/goldens/astraplugins/` vendors them at its `PIN`: the valid index's rows are
 /// `AntiCheatMarker`s as they are (their display `name` is not read), and fire; a row of an
 /// unknown `kind` (`vectors.json`: `anticheat-marker-bad-kind`, refuse) is no marker.
 #[test]

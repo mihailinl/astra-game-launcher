@@ -1620,10 +1620,6 @@ fn validate_descriptor_passes_the_source2_descriptor() {
     assert_eq!(r["descriptor"]["codes"], json!({ "source2": "Source 2" }));
     assert_eq!(r["input"]["kind"], "descriptor-toml");
     assert_eq!(r["spec"]["sha"], spec_goldens::pin().as_str());
-    assert_eq!(
-        spec_goldens::pin(),
-        "d46e44a089387589018f28cfc3403399f7c3b89d"
-    );
     let folders = r["negative_folders"].as_array().unwrap();
     assert_eq!(folders.len(), 4);
     assert!(folders.iter().all(|f| f["claimed"] == false));

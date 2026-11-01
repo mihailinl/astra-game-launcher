@@ -42,7 +42,9 @@ pub fn pin() -> String {
 }
 
 /// The sums, checked once: every file of the copy is listed in `SHA256SUMS` with its digest,
-/// and nothing listed is missing. Every judgement below asks this first.
+/// and nothing listed is missing — and every file of AstraPlugins' is the commit's at `PIN`
+/// ([`proven_at_pin`]), which no regenerated sum can make so. Every judgement below asks this
+/// first.
 pub fn sums() -> &'static BTreeMap<String, String> {
     static SUMS: LazyLock<BTreeMap<String, String>> = LazyLock::new(|| {
         let root = root();
@@ -86,9 +88,182 @@ pub fn sums() -> &'static BTreeMap<String, String> {
             pin.len() == 40 && pin.bytes().all(|b| b.is_ascii_hexdigit()),
             "PIN: {pin:?}"
         );
+        proven_at_pin(&root, pin, &listed);
         listed
     });
     &SUMS
+}
+
+/// Files of the copy that are the vendoring's own, not AstraPlugins'.
+fn own(path: &str) -> bool {
+    matches!(path, "PIN" | "NOTICE" | "SHA256SUMS") || path.starts_with("GIT-OBJECTS/")
+}
+
+/// What git names an object of `kind` holding `data`: SHA-1 of `<kind> <len>\0<data>`.
+fn git_id(kind: &str, data: &[u8]) -> String {
+    let mut framed = format!("{kind} {}\0", data.len()).into_bytes();
+    framed.extend_from_slice(data);
+    hex::encode(sha1(&framed))
+}
+
+/// SHA-1 (FIPS 180-4), for git's object ids alone: a commit id commits to its tree, each tree to
+/// what it holds, each blob to its bytes.
+fn sha1(data: &[u8]) -> [u8; 20] {
+    let mut h: [u32; 5] = [
+        0x6745_2301,
+        0xEFCD_AB89,
+        0x98BA_DCFE,
+        0x1032_5476,
+        0xC3D2_E1F0,
+    ];
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&((data.len() as u64) * 8).to_be_bytes());
+    for chunk in msg.chunks(64) {
+        let mut w = [0u32; 80];
+        for (i, word) in chunk.chunks(4).enumerate() {
+            w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e] = h;
+        for (i, wi) in w.iter().enumerate() {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | (!b & d), 0x5A82_7999),
+                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
+                _ => (b ^ c ^ d, 0xCA62_C1D6),
+            };
+            let t = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(*wi);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = t;
+        }
+        for (x, y) in h.iter_mut().zip([a, b, c, d, e]) {
+            *x = x.wrapping_add(y);
+        }
+    }
+    let mut out = [0u8; 20];
+    for (o, x) in out.chunks_mut(4).zip(h) {
+        o.copy_from_slice(&x.to_be_bytes());
+    }
+    out
+}
+
+/// A raw git tree: each entry's name, with its mode and its object's id.
+fn tree_entries(data: &[u8]) -> BTreeMap<String, (String, String)> {
+    let mut out = BTreeMap::new();
+    let mut rest = data;
+    while !rest.is_empty() {
+        let space = rest
+            .iter()
+            .position(|b| *b == b' ')
+            .expect("a tree entry's mode");
+        let nul = rest
+            .iter()
+            .position(|b| *b == 0)
+            .expect("a tree entry's name");
+        let mode = String::from_utf8(rest[..space].to_vec()).unwrap();
+        let name = String::from_utf8(rest[space + 1..nul].to_vec()).unwrap();
+        let id = hex::encode(&rest[nul + 1..nul + 21]);
+        out.insert(name, (mode, id));
+        rest = &rest[nul + 21..];
+    }
+    out
+}
+
+/// That the copy is AstraPlugins' at `pin`, by git's own ids and nothing the vendoring wrote:
+/// `GIT-OBJECTS/<pin>` is the commit whose SHA-1 is `pin`; from its tree, each folder's tree
+/// object (each also hashing to its name) leads to every vendored file, whose bytes hash to the
+/// blob id that tree names; and every file the pinned trees hold below `testdata/games/`, every
+/// `*.json` of `spec/games/schemas/` and `spec/games/reserved.yaml` is vendored. A hand edit of
+/// any byte, its sums regenerated, still fails here; so does any file added or left out.
+fn proven_at_pin(root: &Path, pin: &str, listed: &BTreeMap<String, String>) {
+    assert_eq!(
+        hex::encode(sha1(b"abc")),
+        "a9993e364706816aba3e25717850c26c9cd0d89d",
+        "SHA-1 itself"
+    );
+    assert_eq!(
+        git_id("blob", b""),
+        "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    );
+    let object = |id: &str, kind: &str| -> Vec<u8> {
+        let data = fs::read(root.join("GIT-OBJECTS").join(id))
+            .unwrap_or_else(|e| panic!("GIT-OBJECTS/{id}: {e}: re-vendor"));
+        assert_eq!(
+            git_id(kind, &data),
+            id,
+            "GIT-OBJECTS/{id} is no {kind} of that id: re-vendor"
+        );
+        data
+    };
+    let commit = object(pin, "commit");
+    let tree = std::str::from_utf8(&commit)
+        .ok()
+        .and_then(|t| t.lines().next())
+        .and_then(|l| l.strip_prefix("tree "))
+        .expect("the commit's first line names its tree")
+        .to_owned();
+    // The object at a `/`-separated path below the commit's tree: its mode and id.
+    let at = |path: &str| -> Option<(String, String)> {
+        let mut entry = ("40000".to_owned(), tree.clone());
+        for c in path.split('/') {
+            assert_eq!(entry.0, "40000", "{path}: a file on the way at PIN");
+            entry = tree_entries(&object(&entry.1, "tree")).get(c)?.clone();
+        }
+        Some(entry)
+    };
+    for path in listed.keys().filter(|p| !own(p)) {
+        let (mode, id) = at(path).unwrap_or_else(|| panic!("{path}: not in AstraPlugins at PIN"));
+        assert!(mode.starts_with("100"), "{path}: no file at PIN ({mode})");
+        let bytes = fs::read(root.join(path)).unwrap();
+        assert_eq!(
+            git_id("blob", &bytes),
+            id,
+            "{path} is not AstraPlugins' at PIN {pin}: re-vendor with tools/vendor-astraplugins-goldens.sh, never by hand"
+        );
+    }
+    // Nothing the pinned folders hold is left out.
+    fn files_below(
+        object: &dyn Fn(&str, &str) -> Vec<u8>,
+        id: &str,
+        prefix: &str,
+        out: &mut Vec<String>,
+    ) {
+        for (name, (mode, oid)) in tree_entries(&object(id, "tree")) {
+            let path = format!("{prefix}/{name}");
+            if mode == "40000" {
+                files_below(object, &oid, &path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    let mut want = vec!["spec/games/reserved.yaml".to_owned()];
+    let (_, games) = at("testdata/games").expect("testdata/games at PIN");
+    files_below(&object, &games, "testdata/games", &mut want);
+    let (_, schemas) = at("spec/games/schemas").expect("spec/games/schemas at PIN");
+    let mut all = Vec::new();
+    files_below(&object, &schemas, "spec/games/schemas", &mut all);
+    want.extend(all.into_iter().filter(|p| p.ends_with(".json")));
+    want.sort();
+    let got: Vec<String> = listed.keys().filter(|p| !own(p)).cloned().collect();
+    assert_eq!(
+        got, want,
+        "the copy is exactly what PIN holds of those folders"
+    );
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {

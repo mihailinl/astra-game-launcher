@@ -7,15 +7,21 @@
 # testdata/games/, plus spec/games/reserved.yaml and spec/games/schemas/*.json, exactly as the
 # commit holds them (read out of git with `git archive`, so the checkout's working tree, dirty or
 # not, plays no part), then writes PIN (that commit), NOTICE (where the files come from, and their
-# licence) and SHA256SUMS (every file but SHA256SUMS itself, `sha256sum` format, sorted by path).
+# licence), GIT-OBJECTS/ (the commit object and every tree object on the way to a vendored file,
+# raw, each named by its id) and SHA256SUMS (every file but SHA256SUMS itself, `sha256sum` format,
+# sorted by path).
 #
 #   tools/vendor-astraplugins-goldens.sh <AstraPlugins checkout> [<commit>]
 #
 # <commit> defaults to the checkout's HEAD; when given, HEAD must be that commit, so a re-pin
 # names what it pins. A re-pin is this one command: tests/goldens.rs reads the PIN and the sums,
-# `gi-probe` reads the PIN, and every known disagreement with the goldens is one list,
-# SPEC_DEFECTS_AT_PIN (tests/common/spec_defects.rs), which a fixed golden turns red until its
-# entry goes. Never edit a vendored file by hand: the sums would say so.
+# `gi-probe` reads the PIN, it rewrites the pinned commit (in full and as its first seven digits)
+# in docs/ENGINE-DESCRIPTOR.md and docs/ENGINE-DESCRIPTORS-DEBT.md, and every known disagreement
+# with the goldens is one list, SPEC_DEFECTS_AT_PIN (tests/common/spec_goldens.rs), which a fixed
+# golden turns red until its entry goes. Never edit a vendored file by hand: the sums would say
+# so, and so would the git objects — tests/common/spec_goldens.rs checks the chain from PIN (the
+# commit's own SHA-1) through each tree to every vendored file's blob, which no regenerated sum
+# can satisfy.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -38,7 +44,8 @@ for p in testdata/games spec/games/reserved.yaml spec/games/schemas; do
   git -C "$co" cat-file -e "$head:$p" 2>/dev/null || die "$head has no $p"
 done
 
-tmp="$(mktemp -d)"
+# Never /tmp (RAM on some desks): beside the checkout's own temporary folder, or the repository.
+tmp="$(mktemp -d -p "${TMPDIR:-$root}" vendor-goldens.XXXXXX)"
 trap 'rm -rf "$tmp"' EXIT
 git -C "$co" archive --format=tar "$head" testdata/games spec/games/reserved.yaml |
   tar -x -C "$tmp"
@@ -47,9 +54,25 @@ mapfile -t schemas < <(git -C "$co" ls-tree --name-only "$head" spec/games/schem
 [ "${#schemas[@]}" -gt 0 ] || die "$head has no spec/games/schemas/*.json"
 git -C "$co" archive --format=tar "$head" "${schemas[@]}" | tar -x -C "$tmp"
 
+# The commit, and every tree from its root to each vendored file, as git stores them.
+objs="$tmp/GIT-OBJECTS"
+mkdir -p "$objs"
+git -C "$co" cat-file commit "$head" >"$objs/$head"
+dump_tree() {
+  git -C "$co" cat-file tree "$1" >"$objs/$1"
+}
+dump_tree "$(git -C "$co" rev-parse "$head^{tree}")"
+for p in spec spec/games spec/games/schemas testdata testdata/games; do
+  dump_tree "$(git -C "$co" rev-parse "$head:$p")"
+done
+git -C "$co" ls-tree -r -t "$head" testdata/games | while read -r _mode type oid _name; do
+  if [ "$type" = tree ]; then dump_tree "$oid"; fi
+done
+
+old_pin="$(cat "$dest/PIN" 2>/dev/null || true)"
 rm -rf "$dest"
 mkdir -p "$dest"
-cp -a "$tmp/testdata" "$tmp/spec" "$dest/"
+cp -a "$tmp/testdata" "$tmp/spec" "$objs" "$dest/"
 printf '%s\n' "$head" >"$dest/PIN"
 cat >"$dest/NOTICE" <<EOF
 Copied by tools/vendor-astraplugins-goldens.sh from mihailinl/AstraPlugins at commit $head:
@@ -64,5 +87,12 @@ EOF
     sha256sum -- "$f"
   done >SHA256SUMS
 )
+# The pages that name the pinned commit, re-pinned with it (tests/goldens.rs holds
+# docs/ENGINE-DESCRIPTOR.md to PIN).
+if [ -n "$old_pin" ] && [ "$old_pin" != "$head" ]; then
+  for doc in "$root/docs/ENGINE-DESCRIPTOR.md" "$root/docs/ENGINE-DESCRIPTORS-DEBT.md"; do
+    sed -i "s/$old_pin/$head/g; s/${old_pin:0:7}/${head:0:7}/g" "$doc"
+  done
+fi
 printf 'vendored AstraPlugins %s into %s (%s files)\n' "$head" "${dest#"$root"/}" \
   "$(wc -l <"$dest/SHA256SUMS")"
