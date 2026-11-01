@@ -45,6 +45,17 @@ fn astrapack(uid: &str) -> Vec<u8> {
     astrapack_at("", uid)
 }
 
+/// [`astrapack`] of another `version`: other bytes, the same uid.
+fn astrapack_version(uid: &str, version: &str) -> Vec<u8> {
+    let toml = format!(
+        "[animpack]\nname = \"PEAK climbing\"\nkind = \"vrm\"\nuid = \"{uid}\"\nversion = \"{version}\"\nowner = \"integration:test.unity\"\ngames = [\"test.unity\"]\n"
+    );
+    zip(&[
+        E::File("animpack.toml", toml.as_bytes()),
+        E::File("clips/climb.vrma", b"glTF fake vrma"),
+    ])
+}
+
 /// The runner, with `rules` (more `[[files]]`) and its zip's `packs`.
 fn with_packs(rules: &str, version: &str, packs: &[(&str, Vec<u8>)]) -> Vec<u8> {
     let m = runner_manifest(rules).replacen(
@@ -143,6 +154,15 @@ impl World {
     /// What the companion's engine does with an archive in its inbox: imports it and deletes it.
     fn engine_imports(&self) {
         fs::remove_file(self.inbox().join(PACK)).unwrap();
+    }
+
+    /// [`World::engine_imports`] for every archive and tombstone waiting there.
+    fn engine_imports_all(&self) {
+        for n in self.inbox_names() {
+            if !n.starts_with('.') {
+                fs::remove_file(self.inbox().join(n)).unwrap();
+            }
+        }
     }
 
     /// The inbox's file names, dot-led (the launcher's holds) included.
@@ -353,6 +373,25 @@ fn a_pack_another_install_holds_gets_no_tombstone() {
     assert_eq!(p.tombstones, [TOMBSTONE]);
     assert_eq!(a.inbox_names(), [TOMBSTONE]);
 
+    // Both delivered it and the companion has imported neither (it was closed between the two
+    // installs): the pack waiting there is B's too, so A's uninstall leaves it, file and all.
+    fs::remove_file(a.inbox().join(TOMBSTONE)).unwrap();
+    a.install(&pkg);
+    install(&pkg, &plan_b(&pkg), &b.target(), ACCEPT, &Ctx::silent()).unwrap();
+    let p = a.uninstall().pack_inbox.unwrap();
+    assert!(p.removed.is_empty(), "{p:?}");
+    assert_eq!(p.held, [TOMBSTONE]);
+    assert_eq!(fs::read(a.inbox().join(PACK)).unwrap(), astrapack(UID));
+    let p = uninstall(&b.profile(), &b.target())
+        .unwrap()
+        .pack_inbox
+        .unwrap();
+    assert_eq!(
+        (p.removed, p.tombstones),
+        (vec![PACK.to_owned()], vec![TOMBSTONE.to_owned()])
+    );
+    assert_eq!(a.inbox_names(), [TOMBSTONE]);
+
     // A hold of a profile deleted by hand (no ledger behind it) holds nothing.
     fs::remove_file(a.inbox().join(TOMBSTONE)).unwrap();
     a.install(&pkg);
@@ -390,6 +429,87 @@ fn an_update_writes_a_tombstone_only_for_a_pack_it_drops() {
         [TOMBSTONE],
         "the dropped pack's tombstone; no hold"
     );
+
+    // The hand-over is by uid, never by the archive's bytes or its file name. New bytes of the
+    // same uid under the same name, and the same uid under a new name: no tombstone (the
+    // companion replaces the pack by its version). Another uid under the old name: the old uid's
+    // tombstone, beside the new pack.
+    let pack_names = |w: &World| -> Vec<String> {
+        w.inbox_names()
+            .into_iter()
+            .filter(|n| !n.ends_with(".holds"))
+            .collect()
+    };
+    let update = |w: &World, version: &str, name: &str, pack: Vec<u8>| {
+        w.engine_imports_all();
+        let entry = format!("packs/{name}");
+        w.install(&open(&with_packs(INTO_INBOX, version, &[(&entry, pack)])).unwrap());
+    };
+    let w = World::new();
+    w.install(&climber("1.0.0"));
+    update(&w, "1.1.0", PACK, astrapack_version(UID, "1.1.0"));
+    assert_eq!(pack_names(&w), [PACK], "new bytes, same uid: no tombstone");
+    update(&w, "1.2.0", "climb-v2.astrapack", astrapack(UID));
+    assert_eq!(
+        pack_names(&w),
+        ["climb-v2.astrapack"],
+        "a new name, same uid: no tombstone"
+    );
+    update(
+        &w,
+        "1.3.0",
+        "climb-v2.astrapack",
+        astrapack("test.unity/climb2"),
+    );
+    assert_eq!(
+        pack_names(&w),
+        ["climb-v2.astrapack", TOMBSTONE],
+        "the old name, another uid: the old uid's tombstone"
+    );
+    assert_eq!(w.holds(), 1);
+
+    // An update planned into ANOTHER companion root (its location moved): the old root's pack
+    // gets its tombstone there, and the new root the pack and a hold — never a hand-over across
+    // two roots.
+    let w = World::new();
+    w.install(&climber("1.0.0"));
+    w.engine_imports();
+    let moved = w.companion.join("moved");
+    let pkg = climber("1.1.0");
+    let plan = w.plan(&pkg, Some(&moved)).unwrap();
+    install(&pkg, &plan, &w.target(), ACCEPT, &Ctx::silent()).unwrap();
+    assert_eq!(w.inbox_names(), [TOMBSTONE], "the old root");
+    let new_inbox = moved.join("inbox/packs/test.unity");
+    assert!(new_inbox.join(PACK).is_file());
+    assert!(!new_inbox.join(TOMBSTONE).exists());
+    assert_eq!(
+        fs::read_dir(&new_inbox)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".holds"))
+            .count(),
+        1
+    );
+
+    // An update that stops after the old install is undone and before its own ledger exists
+    // (cancelled there): the pack it held back a tombstone for, because it would hand it over
+    // again, gets that tombstone now — else nothing would ever write it.
+    let w = World::new();
+    w.install(&climber("1.0.0"));
+    w.engine_imports();
+    let pkg = climber("1.1.0");
+    let plan = w.plan(&pkg, Some(&w.root())).unwrap();
+    let ledger = w.profile().join("astra-launcher-ledger.json");
+    let undone = || !ledger.exists();
+    let quiet = |_: astra_game_launcher::Progress| {};
+    let ctx = Ctx {
+        cancel: &undone,
+        progress: &quiet,
+    };
+    let e = install(&pkg, &plan, &w.target(), ACCEPT, &ctx).unwrap_err();
+    assert_eq!(e.code, codes::CANCELLED);
+    assert_eq!(installed(&w.profile()).unwrap(), None);
+    assert_eq!(w.inbox_names(), [TOMBSTONE], "the tombstone, and no hold");
 
     // Cancelled once the pack is placed: rolled back.
     let w = World::new();
@@ -501,13 +621,22 @@ fn the_inbox_is_jailed() {
     for (field, value) in [
         ("tombstone", serde_json::json!("../../../escaped.remove")),
         ("user_root", serde_json::json!(r"\\server\share\pack")),
+        ("name", serde_json::json!("../../../../escaped.astrapack")),
     ] {
         let w = World::new();
         w.install(&pkg);
+        // A file of the player's outside the inbox, where the tampered name points, its digest
+        // the ledger's: never removed.
+        let planted = w.companion.join("escaped.astrapack");
+        write(&planted, b"the player's own file");
         let path = w.profile().join("astra-launcher-ledger.json");
         let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         match field {
             "tombstone" => v["pack_inbox"]["files"][0]["tombstone"] = value,
+            "name" => {
+                v["pack_inbox"]["files"][0]["name"] = value;
+                v["pack_inbox"]["files"][0]["sha256"] = sha(b"the player's own file").into();
+            }
             _ => v["pack_inbox"]["user_root"] = value,
         }
         fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
@@ -517,6 +646,11 @@ fn the_inbox_is_jailed() {
         assert!(
             !w.root().join("escaped.remove").exists()
                 && !w.companion.join("escaped.remove").exists()
+        );
+        assert_eq!(
+            fs::read(&planted).unwrap(),
+            b"the player's own file",
+            "{field}"
         );
         assert_eq!(
             installed(&w.profile()).unwrap(),
@@ -726,6 +860,26 @@ fn the_pack_says_a_uid_of_this_integration() {
         ],
     );
     assert_eq!(reason(twice), "uid-twice");
+    // Two packs of two uids at one name in two letter cases: one file on Windows, so the second
+    // would overwrite the first while the ledger records both.
+    let rules = "\n[[files]]\nfrom = \"packs/a/climb.astrapack\"\nto = \"${astra_pack_inbox}/\"\n\n[[files]]\nfrom = \"packs/b/Climb.astrapack\"\nto = \"${astra_pack_inbox}/\"\n";
+    let e = refusal(&with_packs(
+        rules,
+        "1.0.0",
+        &[
+            ("packs/a/climb.astrapack", astrapack("test.unity/a")),
+            ("packs/b/Climb.astrapack", astrapack("test.unity/b")),
+        ],
+    ));
+    assert_eq!(
+        (e.code, e.param("key"), e.param("detail")),
+        (
+            codes::MANIFEST_INVALID,
+            Some("files"),
+            Some("two sources for Climb.astrapack")
+        ),
+        "{e}"
+    );
 
     // An id the companion does not read as an inbox folder.
     for id in ["Test.Unity", ".hidden", "a."] {

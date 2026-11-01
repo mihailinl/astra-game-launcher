@@ -178,6 +178,9 @@ pub fn install_in(
     // Measured before the replaced integration is undone, which may take files from that folder.
     let loader_baseline = loader_baselines(&game_root, &plan.game_files, here)?;
     let proxy_folders = proxy_folders(&game_root, &plan.game_files, pkg.manifest(), here)?;
+    // The replaced integration's packs this plan hands the companion again: their tombstones are
+    // held back below, and owed until this install's own ledger records the packs.
+    let mut handed_over: Option<&Ledger> = None;
     if let (Some(old), Some(old_root)) = (&old, &old_root) {
         let readd: &[GameFileAction] = if here.is_some() {
             &plan.game_files
@@ -187,18 +190,60 @@ pub fn install_in(
         // A pack this plan hands the companion again is no tombstone (the engine replaces it by
         // its version, and a tombstone would take it off whoever wears it).
         uninstall_ledger(&profile, old_root, old, readd, plan.pack_inbox.as_ref())?;
-        // The game folder as the plan expected it once the old integration is gone. The plan's
-        // refusals were judged with that integration in place, as the person will find the game.
-        let again = plan_install_with(pkg, game, &plan.profile_dir, how, here)?;
-        if again.game_files != plan.game_files {
-            return Err(stale("after-removing-the-previous-integration"));
+        if old.pack_inbox.is_some() && plan.pack_inbox.is_some() {
+            handed_over = Some(old);
         }
     }
 
-    // What an older Astra left beside the program, and no ledger names: gone before ours arrive.
-    remove_former(&game_root, &plan.former_files)?;
+    // From the old install's undoing to this one's ledger: a refusal here leaves neither ledger,
+    // so the tombstones held back for the hand-over are written now, or nothing ever would.
+    let written = (|| -> Result<Ledger> {
+        if old.is_some() {
+            ctx.check()?;
+            // The game folder as the plan expected it once the old integration is gone. The
+            // plan's refusals were judged with that integration in place, as the person will find
+            // the game.
+            let again = plan_install_with(pkg, game, &plan.profile_dir, how, here)?;
+            if again.game_files != plan.game_files {
+                return Err(stale("after-removing-the-previous-integration"));
+            }
+        }
+        // What an older Astra left beside the program, and no ledger names: gone before ours
+        // arrive.
+        remove_former(&game_root, &plan.former_files)?;
+        let ledger = new_ledger(pkg, plan, game, &accept, loader_baseline, proxy_folders)?;
+        ledger::write(&profile, &ledger)?;
+        Ok(ledger)
+    })();
+    let mut ledger = written.inspect_err(|_| {
+        if let Some(old) = handed_over {
+            let _ = pack_inbox::undo(&profile, old, None);
+        }
+    })?;
 
-    let mut ledger = Ledger {
+    match place(pkg, plan, &profile, &game_root, ctx) {
+        Ok(()) => {
+            ledger.state = LedgerState::Installed;
+            ledger::write(&profile, &ledger)?;
+            Ok(ledger)
+        }
+        Err(e) => {
+            let _ = uninstall_ledger(&profile, &game_root, &ledger, &[], None);
+            Err(e)
+        }
+    }
+}
+
+/// The ledger of `plan` as an install begins it (`Installing`).
+fn new_ledger(
+    pkg: &GiPackage,
+    plan: &InstallPlan,
+    game: &GameTarget,
+    accept: &Accept,
+    loader_baseline: Vec<crate::ledger::LoaderBaseline>,
+    proxy_folders: Vec<crate::ledger::ProxyFolder>,
+) -> Result<Ledger> {
+    Ok(Ledger {
         // `ledger::write` stores the lowest schema that carries it; nothing is in `proton` yet.
         schema: 1,
         state: LedgerState::Installing,
@@ -244,20 +289,7 @@ pub fn install_in(
         descriptor_sha256: plan.engine_descriptor.as_ref().map(|d| d.sha256.clone()),
         proxy_folders,
         pack_inbox: plan.pack_inbox.as_ref().map(pack_inbox::ledger_of),
-    };
-    ledger::write(&profile, &ledger)?;
-
-    match place(pkg, plan, &profile, &game_root, ctx) {
-        Ok(()) => {
-            ledger.state = LedgerState::Installed;
-            ledger::write(&profile, &ledger)?;
-            Ok(ledger)
-        }
-        Err(e) => {
-            let _ = uninstall_ledger(&profile, &game_root, &ledger, &[], None);
-            Err(e)
-        }
-    }
+    })
 }
 
 fn place(

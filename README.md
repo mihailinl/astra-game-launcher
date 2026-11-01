@@ -566,11 +566,12 @@ to = "${astra_pack_inbox}/"
   schema 5, which launchers 0.3.1 and 0.4.1 refuse).
 - Uninstall removes a pack still waiting there with its digest and writes `<name>.remove` (the
   uid's `<name>`, not the archive's file name) into the same folder: the companion trashes the
-  pack. An update that hands over the same pack writes none (the companion replaces it by its
-  version); one that drops it does. A runner installed into two games shares one folder: each
+  pack. An update that hands over the same pack (by uid, whatever its bytes or file name) writes
+  none (the companion replaces it by its version); one that drops it does, and so does one that
+  stops before its own ledger exists. A runner installed into two games shares one folder: each
   profile leaves a hold there (`.astra-launcher-<key>.holds`), and a pack another profile's live
-  install holds gets no tombstone (`UninstallReport::pack_inbox`: `tombstones`, `held`, `removed`,
-  `skipped`).
+  install holds is neither removed while it waits nor given a tombstone
+  (`UninstallReport::pack_inbox`: `tombstones`, `held`, `removed`, `skipped`).
 - Launcher 0.3.1 (Astra 0.2.7) refuses the placeholder (`unknown-placeholder`): a release that
   uses it needs `min_astra` 0.2.8, and `gi-probe compat` says so.
 

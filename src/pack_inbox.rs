@@ -45,10 +45,11 @@
 //! - **One folder per integration, whichever game**: a runner installed into two games delivers
 //!   into one folder. Every profile that delivered a pack leaves a HOLD beside it
 //!   (`.astra-launcher-<key>.holds`, dot-led, so the engine never reads it) naming the tombstones
-//!   its own uninstall would write; an uninstall writes a tombstone only when no live hold of
-//!   another profile names it (one whose profile still holds a ledger). An update that delivers the
-//!   same pack again writes none for it (the engine replaces the pack by its version, and a
-//!   tombstone would take it off the characters wearing it).
+//!   its own uninstall would write; an uninstall removes a waiting pack and writes a tombstone
+//!   only when no live hold of another profile names it (one whose profile still holds a ledger).
+//!   An update that delivers the same pack (the same uid) again writes none for it (the engine
+//!   replaces the pack by its version, and a tombstone would take it off the characters wearing
+//!   it), unless it stops before its own ledger records the pack: then it writes it after all.
 //!
 //! Launcher 0.3.1 (Astra 0.2.7) refuses the placeholder when it parses the manifest
 //! (`unknown-placeholder`), so a release that uses it needs `min_astra` 0.2.8; `gi-probe compat`
@@ -574,10 +575,12 @@ fn same_root(a: &Path, b: &Path) -> bool {
 }
 
 /// Uninstall's half, for `ledger` of the canonical `profile`: a pack still waiting in the inbox
-/// with our digest is removed, this profile's hold goes, and each tombstone is written unless
-/// `again` (the plan of the update replacing this install) delivers the same pack into the same
-/// root again, or another profile's live hold names it. `None` when the ledger handed the
-/// companion nothing.
+/// with our digest is removed unless another profile's live hold names it, this profile's hold
+/// goes, and each tombstone is written unless `again` (the plan of the update replacing this
+/// install) delivers the same pack (by uid) into the same root again, or another profile's live
+/// hold names it. `None` when the ledger handed the companion nothing. Asked again with `again`
+/// `None` it writes exactly the tombstones `again` held back: what an update that stops before its
+/// own ledger exists does ([`crate::install`]).
 pub(crate) fn undo(
     profile: &Path,
     ledger: &Ledger,
@@ -625,7 +628,13 @@ pub(crate) fn undo(
     let own = hold_name(profile);
     let mut held = BTreeSet::new();
     if let Some(dir) = &dir {
+        // Asked first: a pack still waiting that another install delivered too is the one that
+        // install waits for (the companion was closed between the two), not ours to remove.
+        held = held_elsewhere(dir, &own);
         for f in &inbox.files {
+            if held.contains(&f.tombstone) {
+                continue;
+            }
             let p = dir.join(&f.name);
             match file_state(&p) {
                 Ok(FileState::File { sha256 }) if sha256 == f.sha256 => {
@@ -643,7 +652,6 @@ pub(crate) fn undo(
         if fs::symlink_metadata(&p).is_ok_and(|m| m.is_file()) {
             fs::remove_file(&p).map_err(|e| LauncherError::io_at(&e, &p))?;
         }
-        held = held_elsewhere(dir, &own);
     }
     let again = again.filter(|a| same_root(&a.user_root, &inbox.user_root));
     for f in &inbox.files {
