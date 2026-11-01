@@ -12,7 +12,8 @@
 //! back, to be overwritten again): a relinked proxy that still does our proxy's job is recorded
 //! as shared (`share-loader`, with the digest there now), one that no longer does is
 //! `shared-loader-changed`, and a changed config of the kind a plan leaves alone when it is
-//! already there (`doorstop_config.ini`, `ReShade.ini`: `plan::keep_if_present`) is recorded as
+//! already there (`doorstop_config.ini`, `ReShade.ini`, and the manifest's own
+//! `[integration.loader] keep_if_present`: `plan::LoaderPolicy::keep`) is recorded as
 //! theirs (`keep-existing`) and never rewritten. A Doorstop config that is theirs is kept out of
 //! the session by the Doorstop options a foreign config gets (`doorstop::session_options`); only
 //! that file decides those options, never `ReShade.ini`. A file of ours that is gone, and any
@@ -58,7 +59,7 @@ use crate::paths::{
     file_state, is_private, parse_jailed, plain, prepare_target, real_case, write_atomic,
     write_atomic_private,
 };
-use crate::plan::{GameAction, is_loader_proxy, keep_if_present};
+use crate::plan::{GameAction, LoaderPolicy, is_loader_proxy};
 use crate::proton;
 use crate::running::refuse_if_running;
 
@@ -530,11 +531,13 @@ pub fn prepare_launch_with(
         };
         // A config we added (or found with our very bytes) that someone else rewrote since — a
         // mod manager's `doorstop_config.ini` over ours (r2modman and Gale copy theirs in at every
-        // modded start), the settings ReShade saves into `ReShade.ini`: theirs now, as one that
-        // was there before us would be. Never rewritten. Only a Doorstop config changes the
-        // session, through `foreign_config`, which reads that file alone.
+        // modded start), the settings ReShade saves into `ReShade.ini`, a name the manifest's own
+        // `[integration.loader] keep_if_present` lists (what its loader saves into): theirs now,
+        // as one that was there before us would be — the names planning keeps. Never rewritten.
+        // Only a Doorstop config changes the session, through `foreign_config`, which reads that
+        // file alone.
         if matches!(g.action, GameAction::Add | GameAction::ReuseKnownProxy)
-            && keep_if_present(&g.rel)
+            && LoaderPolicy::of(&m).keep(&g.rel)
         {
             relinked.push((i, GameAction::KeepExisting, now));
             continue;

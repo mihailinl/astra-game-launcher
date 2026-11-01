@@ -332,6 +332,49 @@ fn a_damaged_install_is_not_launched() {
     assert_eq!(e.code, codes::NOT_INSTALLED);
 }
 
+/// A config the integration added whose name its own `[integration.loader] keep_if_present`
+/// lists, rewritten since by the loader that reads it (the settings it saves): the player's now,
+/// as planning would keep it — Play records it as `keep-existing` and starts, where any other
+/// changed file of ours is still `needs-reinstall`.
+#[test]
+fn play_keeps_a_config_the_manifest_names_as_its_loaders_to_keep() {
+    let w = World::new();
+    let m = runner_manifest(
+        "\n[integration.loader]\nkeep_if_present = [\"s2bridge.ini\"]\n\n[[game_files]]\nfrom = \"extra/s2bridge.ini\"\nto = \"${game}/S2Bridge.ini\"\n",
+    );
+    let pkg = open(&zip(&[
+        E::File("astra-gi.toml", m.as_bytes()),
+        E::File("winhttp.dll", WINHTTP),
+        E::File("doorstop_config.ini", DOORSTOP_INI),
+        E::File("BepInEx/core/BepInEx.Preloader.dll", PRELOADER),
+        E::File("BepInEx/core/BepInEx.dll", CORE_DLL),
+        E::File("extra/s2bridge.ini", b"[bridge]\nport = 0\n"),
+    ]))
+    .unwrap();
+    let game = w.proton();
+    plan_and_install(&pkg, &game, &w.profile());
+    let saved: &[u8] = b"[bridge]\nport = 4242 ; saved by the bridge\n";
+    fs::write(w.game.join("S2Bridge.ini"), saved).unwrap();
+    prepare_launch(&w.profile(), &game, &vars(), steam()).unwrap();
+    let ledger = installed(&w.profile()).unwrap().unwrap();
+    let g = ledger
+        .game_files
+        .iter()
+        .find(|g| g.rel == "S2Bridge.ini")
+        .unwrap();
+    assert_eq!(
+        (g.action, g.sha256.as_str()),
+        (
+            astra_game_launcher::GameAction::KeepExisting,
+            sha(saved).as_str()
+        )
+    );
+    assert_eq!(fs::read(w.game.join("S2Bridge.ini")).unwrap(), saved);
+    // Uninstall leaves it: it is theirs.
+    uninstall(&w.profile(), &game).unwrap();
+    assert_eq!(fs::read(w.game.join("S2Bridge.ini")).unwrap(), saved);
+}
+
 #[test]
 fn several_overrides_are_all_applied_and_all_restored_byte_exactly() {
     let w = World::new();
