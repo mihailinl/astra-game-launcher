@@ -141,11 +141,23 @@ pub fn install(
     let game_root = game.game_root()?;
 
     let old = ledger::read(&profile)?;
+    // The folder the replaced integration placed its files in, which is this plan's only when
+    // the program is still where it was (a game update may have moved it: then the old one is
+    // undone in its own folder, and nothing of it is this folder's).
+    let old_root = old.as_ref().map(|l| placed_root(game, l)).transpose()?;
+    let here = old
+        .as_ref()
+        .filter(|_| old_root.as_ref().is_none_or(|r| *r == game_root));
     // Measured before the replaced integration is undone, which may take files from that folder.
-    let loader_baseline = loader_baselines(&game_root, &plan.game_files, old.as_ref())?;
-    let proxy_folders = proxy_folders(&game_root, &plan.game_files, pkg.manifest(), old.as_ref())?;
-    if let Some(old) = &old {
-        uninstall_ledger(&profile, &game_root, old, &plan.game_files)?;
+    let loader_baseline = loader_baselines(&game_root, &plan.game_files, here)?;
+    let proxy_folders = proxy_folders(&game_root, &plan.game_files, pkg.manifest(), here)?;
+    if let (Some(old), Some(old_root)) = (&old, &old_root) {
+        let readd: &[GameFileAction] = if here.is_some() {
+            &plan.game_files
+        } else {
+            &[]
+        };
+        uninstall_ledger(&profile, old_root, old, readd)?;
         // The game folder as the plan expected it once the old integration is gone. The plan's
         // refusals were judged with that integration in place, as the person will find the game.
         let how = Planning {
@@ -153,7 +165,7 @@ pub fn install(
             provenance: plan.provenance,
             engine_pick: pick.as_ref(),
         };
-        let again = plan_install_with(pkg, game, &plan.profile_dir, how, Some(old))?;
+        let again = plan_install_with(pkg, game, &plan.profile_dir, how, here)?;
         if again.game_files != plan.game_files {
             return Err(stale("after-removing-the-previous-integration"));
         }
@@ -627,13 +639,20 @@ fn recorded_game_root(game: &GameTarget, ledger: &Ledger) -> Option<PathBuf> {
 }
 
 /// The folder `ledger`'s game files were PLACED in: the ledger's, not today's detection. An exe
-/// detected differently now (a launcher fix, a game update) must not send an uninstall or a
-/// restore to another folder while ours stay behind. Trusted only inside the same game folder.
-fn placed_root(game: &GameTarget, ledger: &Ledger) -> Result<PathBuf> {
+/// detected differently now (a launcher fix, a game update) must not send an uninstall, a
+/// restore or an update's undo to another folder while ours stay behind. Trusted only inside the
+/// same game folder.
+pub(crate) fn placed_root(game: &GameTarget, ledger: &Ledger) -> Result<PathBuf> {
     match recorded_game_root(game, ledger) {
         Some(root) => Ok(root),
         None => game_root_for_uninstall(game),
     }
+}
+
+/// Whether `ledger`'s game files are in `game_root`, the folder of the program `game` names
+/// today ([`placed_root`]): only then does planning read them there, as the files it replaces.
+pub(crate) fn placed_in(game: &GameTarget, ledger: &Ledger, game_root: &Path) -> Result<bool> {
+    Ok(placed_root(game, ledger)? == game_root)
 }
 
 /// Removes an installed integration: restores the game files, the Proton override and the

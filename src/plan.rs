@@ -1234,6 +1234,13 @@ pub(crate) fn plan_install_with(
     } else {
         None
     };
+    // The installed integration's files are this folder's only when it placed them here: a game
+    // update that moved the program leaves them in the folder the ledger names, where install
+    // undoes them ([`crate::install`]), and nothing here is theirs.
+    let here = match &existing {
+        Some(l) if crate::install::placed_in(game, l, &game_root)? => Some(l),
+        _ => None,
+    };
 
     let exe_path = game_root.join(game.exe_file_name()?);
     let policy = LoaderPolicy::of(m);
@@ -1246,7 +1253,7 @@ pub(crate) fn plan_install_with(
         let rel = real.join("/");
         let path = existing_target(&game_root, &real)?;
         let (state, in_backup) = match &path {
-            Some(path) => state_before(path, &rel, existing.as_ref(), after)?,
+            Some(path) => state_before(path, &rel, here, after)?,
             None => (FileState::Absent, false),
         };
         let name = f
@@ -1257,7 +1264,7 @@ pub(crate) fn plan_install_with(
         // A file an older Astra left there (`crate::former`, its rules exactly) and no ledger
         // names: ours takes its place, as onto nothing. A file of the current ledger is the
         // ledger's, never this.
-        let recorded = existing.as_ref().is_some_and(|l| {
+        let recorded = here.is_some_and(|l| {
             l.game_files
                 .iter()
                 .any(|g| g.rel.eq_ignore_ascii_case(&rel))
@@ -1339,9 +1346,7 @@ pub(crate) fn plan_install_with(
         .into_iter()
         .filter(|f| {
             !game_files.iter().any(|g| names(&g.rel_path, &f.name))
-                && !existing
-                    .as_ref()
-                    .is_some_and(|l| l.game_files.iter().any(|g| names(&g.rel, &f.name)))
+                && !here.is_some_and(|l| l.game_files.iter().any(|g| names(&g.rel, &f.name)))
         })
         .map(|f| FormerFile {
             rel_path: f.name,

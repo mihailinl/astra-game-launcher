@@ -309,6 +309,62 @@ fn installing_again_replaces_the_previous_install_cleanly() {
     );
 }
 
+/// A game update moved the program into another folder (`bin/`): installing again undoes the
+/// previous install in the folder it placed its files in — ours removed there, the game's own
+/// file put back — and plans the new folder as one nothing of ours is in. Undone in today's
+/// folder instead, nothing of it is found there and the old files stay behind with no ledger.
+#[test]
+fn an_update_after_the_program_moved_undoes_the_previous_install_where_it_placed_it() {
+    let w = World::new();
+    write(&w.game.join("settings.json"), b"original");
+    // A folder the game had from the start (so the update gains no name beside our proxy).
+    write(&w.game.join("bin/readme.txt"), b"the game's");
+    let pkg = with_settings();
+    plan_and_install(&pkg, &w.target(), &w.profile());
+    // The update: the program and its data in bin/, a settings file of the game's there too,
+    // and a file of the update's own by our proxy's name in the new folder (a copy of ours).
+    let bin = w.game.join("bin");
+    unity_game(&bin, GAME);
+    write(&bin.join("settings.json"), b"original, in bin");
+    write(&bin.join("winhttp.dll"), WINHTTP);
+    fs::remove_file(w.game.join(&exe())).unwrap();
+    let before_bin = snapshot(&bin);
+    let moved = target(
+        w.game.path(),
+        &format!("bin/{}", exe()),
+        None,
+        Platform::Windows,
+    );
+    let plan = plan_install(&pkg, &moved, &w.profile()).unwrap();
+    let actions: Vec<_> = plan
+        .game_files
+        .iter()
+        .map(|g| (g.rel_path.as_str(), g.action))
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            ("winhttp.dll", GameAction::ReuseKnownProxy),
+            ("doorstop_config.ini", GameAction::Add),
+            ("settings.json", GameAction::Replace),
+        ],
+        "bin/ holds nothing of the previous install"
+    );
+    assert!(plan.warnings.contains(&"replaces-integration".to_owned()));
+    install(&pkg, &plan, &moved, ACCEPT, &Ctx::silent()).unwrap();
+    // The old folder is the game's again.
+    for ours in ["winhttp.dll", "doorstop_config.ini"] {
+        assert!(
+            !w.game.join(ours).exists(),
+            "{ours} removed where it was placed"
+        );
+    }
+    assert_eq!(fs::read(w.game.join("settings.json")).unwrap(), b"original");
+    // And the new install undoes cleanly in its own folder.
+    uninstall(&w.profile(), &moved).unwrap();
+    assert_eq!(snapshot(&bin), before_bin, "bin/ as the update left it");
+}
+
 #[test]
 fn the_jail_holds_on_disk_through_links() {
     #[cfg(unix)]
