@@ -70,8 +70,9 @@ itself (K16).
 `needs-newer-astra`, `loader-policy-conflict`, `unknown-key` in `[integration.loader]`). What a
 release must also pass before anyone is offered it — a community id or name reading as Astra's
 (`reserved-id`, `reserved-name`), `${bridge_token}` handed on without the capability
-(`capability-undeclared`), Link v1's limits (`link-invalid`), the descriptor's Pass B admission —
-is `Manifest::lint(first_party)`, which a catalogue entry has passed at ingest (`gi-probe check`).
+(`capability-undeclared`), Link v1's limits (`link-invalid`), an `[integration] sdk` that is no
+usable URL (`manifest-invalid{key=integration.sdk}`; parse drops it, `Manifest::sdk` is then
+`None`), the descriptor's Pass B admission — is `Manifest::lint(first_party)`, which a catalogue entry has passed at ingest (`gi-probe check`).
 A developer-mode folder import has passed nothing: call `Manifest::lint(false)` on it and show
 what it returns. Every code the launcher can return is `codes::ALL` (K15).
 
@@ -138,7 +139,8 @@ Also for the spec, not pinned by a golden:
 - **`capability-undeclared`** counts `${bridge_token}` anywhere the manifest hands it on:
   `[[config_writes]]`, `[launch] args` and `env`.
 - **`[integration] sdk`** is an `https://` URL, at most 2,048 bytes, with no space or control
-  character.
+  character: metadata, so another value never refuses the manifest (parse drops it); `gi-probe
+  check` reports it (`manifest-invalid`, key `integration.sdk`).
 - **`code_changed`** (`gi-probe check --previous`) counts `.dll .so .dylib .jar .lua .py .js .exe`
   and also `.asi .pyd .pyc` and a versioned `.so.N`, in `[[files]]` and `[[game_files]]` alike.
 - **`reserved-name`'s fold** is not NFKC (row 17), and it reads a name word by word: the spec's

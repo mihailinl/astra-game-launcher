@@ -179,6 +179,9 @@ struct IntegrationTables {
     foundation_unknown: Vec<String>,
     link: Option<toml::Value>,
     sdk: Option<String>,
+    /// `[integration] sdk` is there but no usable URL: metadata, so never a refusal at parse —
+    /// [`Manifest::lint`]'s finding.
+    sdk_unusable: bool,
 }
 
 // `toml::Value` is not `Eq` (it may hold a float); the tables are equal when their values are.
@@ -191,6 +194,7 @@ impl PartialEq for IntegrationTables {
             && self.foundation_unknown == o.foundation_unknown
             && self.link == o.link
             && self.sdk == o.sdk
+            && self.sdk_unusable == o.sdk_unusable
     }
 }
 
@@ -491,7 +495,8 @@ fn read_foundation(v: &toml::Value) -> Result<(FoundationClaim, Vec<String>)> {
 }
 
 /// `[integration] sdk`: an `https://` URL with no space or control character, at most 2,048
-/// bytes. Shown (in developer mode), so nothing else.
+/// bytes. Shown (in developer mode), so nothing else. Metadata (manifest.md §2.5): an unusable
+/// one is dropped at parse and is [`Manifest::lint`]'s finding, never the manifest's refusal.
 fn read_sdk(v: &toml::Value) -> Result<String> {
     match v.as_str() {
         Some(url)
@@ -529,7 +534,10 @@ impl IntegrationTables {
         }
         t.link = integration.get("link").cloned();
         if let Some(v) = integration.get("sdk") {
-            t.sdk = Some(read_sdk(v)?);
+            match read_sdk(v) {
+                Ok(url) => t.sdk = Some(url),
+                Err(_) => t.sdk_unusable = true,
+            }
         }
         Ok(t)
     }
@@ -947,7 +955,9 @@ impl Manifest {
         self.tables.link.as_ref()
     }
 
-    /// `[integration] sdk`: the URL a developer building on this integration starts from.
+    /// `[integration] sdk`: the URL a developer building on this integration starts from. `None`
+    /// when absent or no usable URL (an `https://` URL, no space or control character, at most
+    /// 2,048 bytes); the latter is [`Manifest::lint`]'s finding.
     pub fn sdk(&self) -> Option<&str> {
         self.tables.sdk.as_deref()
     }
@@ -1006,7 +1016,9 @@ impl Manifest {
     ///    once each per list), description and label lengths, and relative file paths
     ///    (`link-invalid{field, reason}`, or `unknown-key` for a key it does not have);
     /// 4. `[integration.foundation]`'s unknown keys (`unknown-key`);
-    /// 5. `[integration.engine]`: its own refusal, else Pass B's
+    /// 5. an `[integration] sdk` that is no usable URL (`manifest-invalid{key=integration.sdk}`:
+    ///    metadata, which parse drops);
+    /// 6. `[integration.engine]`: its own refusal, else Pass B's
     ///    ([`Descriptor::check_pass_b`] with `first_party`).
     ///
     /// The zip's half (the files a link names, their sizes; `built_on`; `code_changed`) and the
@@ -1028,6 +1040,9 @@ impl Manifest {
         }
         for key in &self.tables.foundation_unknown {
             out.push(unknown_key(key.clone()));
+        }
+        if self.tables.sdk_unusable {
+            out.push(invalid("integration.sdk", "an https:// URL"));
         }
         match self.engine_descriptor() {
             Some(Err(e)) => out.push(e.clone()),
@@ -1553,9 +1568,22 @@ evidence = "{core}"
                 .sdk(),
             Some("https://github.com/x/sdk")
         );
+        // Metadata: an unusable one never refuses the manifest (an install, a Play that parses
+        // the ledger's copy); it is dropped, and the linter says so.
         for url in ["http://x", "javascript:alert(1)", "https://a b", "https://"] {
-            assert_eq!(code_of(&sdk(url)), codes::MANIFEST_INVALID, "{url}");
+            let m = Manifest::parse(&sdk(url)).unwrap_or_else(|e| panic!("{url}: {e}"));
+            assert_eq!(m.sdk(), None, "{url}");
+            assert_eq!(
+                m.lint(true)
+                    .iter()
+                    .map(|e| (e.code, e.param("key")))
+                    .collect::<Vec<_>>(),
+                [(codes::MANIFEST_INVALID, Some("integration.sdk"))],
+                "{url}"
+            );
         }
+        let m = Manifest::parse(&manifest("sdk = 3", "", "")).unwrap();
+        assert_eq!((m.sdk(), m.lint(true).len()), (None, 1));
     }
 
     #[test]
