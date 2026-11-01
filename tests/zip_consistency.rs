@@ -4,14 +4,18 @@
 
 //! Zip cloaking (`src/zip_consistency.rs`), through [`GiPackage::open`]:
 //!
-//! - AstraPlugins' three vectors (`tests/fixtures/zip-cloaking/`, held to its digests) are read by
-//!   zip 9 alone without a complaint, and refused here, each for its own reason;
+//! - AstraPlugins' three vectors (its `testdata/zip-cloaking/`, vendored at the pinned commit in
+//!   `tests/goldens/astraplugins/` and proved there by git's own ids, and held to the digests its
+//!   `SHA256SUMS` states) are read by zip 9 alone without a complaint, and refused here, each for
+//!   its own reason;
 //! - one integration packed by every common writer (`tests/fixtures/zip-writers/`), data
 //!   descriptors included, still opens;
 //! - each check's shape, built by hand into a package that would otherwise open (zip 9 reads its
 //!   manifest and its files), is refused as `zip-inconsistent` — and the near misses are not.
 
 mod common;
+#[path = "common/spec_goldens.rs"]
+mod spec_goldens;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -77,20 +81,36 @@ const VECTORS: [(&str, &str, &str, &str); 3] = [
     ),
 ];
 
+/// Where the vendored vectors are: AstraPlugins' `testdata/zip-cloaking/` at `PIN`.
+const VECTORS_DIR: &str = "tests/goldens/astraplugins/testdata/zip-cloaking";
+
 fn vector(name: &str) -> Vec<u8> {
-    let bytes = fs::read(dir("tests/fixtures/zip-cloaking").join(name)).unwrap();
+    // The copy is AstraPlugins' at PIN, by git's own ids (a regenerated vector, its sums
+    // rewritten, fails there), before any digest below is believed.
+    spec_goldens::sums();
+    let bytes = fs::read(dir(VECTORS_DIR).join(name)).unwrap();
     let want = VECTORS.iter().find(|v| v.0 == name).unwrap().1;
     assert_eq!(
         sha(&bytes),
         want,
-        "tests/fixtures/zip-cloaking/{name} is not AstraPlugins' golden: copy it from there, never regenerate it"
+        "{VECTORS_DIR}/{name} is not the golden every reader pins: re-vendor with tools/vendor-astraplugins-goldens.sh, never regenerate it"
     );
     bytes
 }
 
+/// The vectors are AstraPlugins' bytes at the pinned commit (`spec_goldens::sums` proves the
+/// vendored copy against `PIN`), and its `SHA256SUMS` — the digests every reader of an archive
+/// Astra installs pins them by, Astra's daemon among them — states exactly [`VECTORS`]' digests.
 #[test]
 fn the_vectors_are_astraplugins_bytes() {
-    let listed = sums("tests/fixtures/zip-cloaking");
+    let vendored = spec_goldens::sums();
+    for (name, ..) in VECTORS {
+        assert!(
+            vendored.contains_key(&format!("testdata/zip-cloaking/{name}")),
+            "{name} is not in the vendored copy"
+        );
+    }
+    let listed = sums(VECTORS_DIR);
     let want: BTreeMap<String, String> = VECTORS
         .iter()
         .map(|(n, d, _, _)| ((*n).to_owned(), (*d).to_owned()))

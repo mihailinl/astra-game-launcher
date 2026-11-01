@@ -395,10 +395,7 @@ pub fn hostile() -> Vec<Fixture> {
         format!(r#"{{"asset":{{"version":"2.0"}},"buffers":[{{"byteLength":4,"uri":"{uri}"}}]}}"#)
             .into_bytes()
     };
-    let cloaked = fs::read(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/zip-cloaking/upath.zip"),
-    )
-    .unwrap();
+    let cloaked = fs::read(root().join("testdata/zip-cloaking/upath.zip")).unwrap();
     let mut out = vec![
         fx(
             "a picture no entry declares",

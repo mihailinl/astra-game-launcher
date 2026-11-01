@@ -11,7 +11,8 @@
 //! that walks the local headers reads: a catalogue's ingest, `unzip` from a pipe, libarchive (so
 //! bsdtar and Windows' `tar.exe`). The checks are those of Astra's own installer
 //! (`ops::install_plugin::refuse_inconsistent_headers`) and of AstraPlugins'
-//! `testdata/zip-cloaking/` (whose three vectors `tests/fixtures/zip-cloaking/` holds by digest):
+//! `testdata/zip-cloaking/` (whose three vectors `tests/goldens/astraplugins/` vendors at the
+//! pinned commit):
 //!
 //! 1. zip 9's `validate_header_consistency`: every local header against its central record (name,
 //!    method, encryption and data-descriptor flags, CRC and sizes, a descriptor's zeros allowed);

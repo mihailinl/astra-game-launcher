@@ -593,7 +593,8 @@ to = "${astra_pack_inbox}/"
   sits, signed, exactly at its entry's end, and a stored entry with one holds no descriptor
   signature in its data. Otherwise
   `zip-inconsistent` ("zip cloaking"; `src/zip_consistency.rs`, AstraPlugins'
-  `testdata/zip-cloaking/` vectors in `tests/fixtures/zip-cloaking/`).
+  `testdata/zip-cloaking/` vectors, vendored at the pinned commit in
+  `tests/goldens/astraplugins/`).
 - **The zip.** At most 256 MiB compressed, 1 GiB uncompressed (counting what the checks unpack
   of every archive inside it too: its packs, its `.astrachar` bundles, each held to the same
   rules), 20 000 entries. Symbolic links,

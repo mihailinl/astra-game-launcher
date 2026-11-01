@@ -4,12 +4,13 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # Vendors AstraPlugins' game-integration goldens into tests/goldens/astraplugins/: every file of
-# testdata/games/, plus spec/games/reserved.yaml and spec/games/schemas/*.json, exactly as the
+# testdata/games/ and testdata/zip-cloaking/ (the vectors every reader of an archive Astra
+# installs refuses), plus spec/games/reserved.yaml and spec/games/schemas/*.json, exactly as the
 # commit holds them (read out of git with `git archive`, so the checkout's working tree, dirty or
 # not, plays no part), then writes PIN (that commit), NOTICE (where the files come from, and their
 # licence), GIT-OBJECTS/ (the commit object and every tree object on the way to a vendored file,
-# raw, each named by its id) and SHA256SUMS (every file but SHA256SUMS itself, `sha256sum` format,
-# sorted by path).
+# raw, each named by its id) and SHA256SUMS (every file but this SHA256SUMS itself, a vendored
+# folder's own SHA256SUMS included, `sha256sum` format, sorted by path).
 #
 #   tools/vendor-astraplugins-goldens.sh <AstraPlugins checkout> [<commit>]
 #
@@ -40,15 +41,15 @@ if [ $# -eq 2 ]; then
   want="$(git -C "$co" rev-parse --verify "$2^{commit}")" || die "no commit $2 in $co"
   [ "$head" = "$want" ] || die "$co is at $head, not $want: check the commit out first"
 fi
-for p in testdata/games spec/games/reserved.yaml spec/games/schemas; do
+for p in testdata/games testdata/zip-cloaking spec/games/reserved.yaml spec/games/schemas; do
   git -C "$co" cat-file -e "$head:$p" 2>/dev/null || die "$head has no $p"
 done
 
 # Never /tmp (RAM on some desks): beside the checkout's own temporary folder, or the repository.
 tmp="$(mktemp -d -p "${TMPDIR:-$root}" vendor-goldens.XXXXXX)"
 trap 'rm -rf "$tmp"' EXIT
-git -C "$co" archive --format=tar "$head" testdata/games spec/games/reserved.yaml |
-  tar -x -C "$tmp"
+git -C "$co" archive --format=tar "$head" testdata/games testdata/zip-cloaking \
+  spec/games/reserved.yaml | tar -x -C "$tmp"
 # Only the schemas' JSON files.
 mapfile -t schemas < <(git -C "$co" ls-tree --name-only "$head" spec/games/schemas/ | grep '\.json$')
 [ "${#schemas[@]}" -gt 0 ] || die "$head has no spec/games/schemas/*.json"
@@ -62,12 +63,13 @@ dump_tree() {
   git -C "$co" cat-file tree "$1" >"$objs/$1"
 }
 dump_tree "$(git -C "$co" rev-parse "$head^{tree}")"
-for p in spec spec/games spec/games/schemas testdata testdata/games; do
+for p in spec spec/games spec/games/schemas testdata testdata/games testdata/zip-cloaking; do
   dump_tree "$(git -C "$co" rev-parse "$head:$p")"
 done
-git -C "$co" ls-tree -r -t "$head" testdata/games | while read -r _mode type oid _name; do
-  if [ "$type" = tree ]; then dump_tree "$oid"; fi
-done
+git -C "$co" ls-tree -r -t "$head" testdata/games testdata/zip-cloaking |
+  while read -r _mode type oid _name; do
+    if [ "$type" = tree ]; then dump_tree "$oid"; fi
+  done
 
 old_pin="$(cat "$dest/PIN" 2>/dev/null || true)"
 rm -rf "$dest"
@@ -76,14 +78,15 @@ cp -a "$tmp/testdata" "$tmp/spec" "$objs" "$dest/"
 printf '%s\n' "$head" >"$dest/PIN"
 cat >"$dest/NOTICE" <<EOF
 Copied by tools/vendor-astraplugins-goldens.sh from mihailinl/AstraPlugins at commit $head:
-testdata/games/, spec/games/reserved.yaml and spec/games/schemas/*.json, byte for byte.
+testdata/games/, testdata/zip-cloaking/, spec/games/reserved.yaml and spec/games/schemas/*.json,
+byte for byte.
 AstraPlugins licenses spec/ and testdata/ under GPL-3.0-or-later (its LICENSE); these files keep
 that licence. They are test data this crate's tests read, never part of the launcher's
 MPL-2.0 sources or of anything it builds.
 EOF
 (
   cd "$dest"
-  find . -type f ! -name SHA256SUMS -printf '%P\n' | LC_ALL=C sort | while IFS= read -r f; do
+  find . -type f ! -path ./SHA256SUMS -printf '%P\n' | LC_ALL=C sort | while IFS= read -r f; do
     sha256sum -- "$f"
   done >SHA256SUMS
 )

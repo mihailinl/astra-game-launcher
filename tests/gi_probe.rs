@@ -1511,7 +1511,9 @@ fn compat_refuses_a_zip_that_reads_as_two_archives_before_031_reads_it() {
         ("upath.zip", "unicode-path"),
         ("stored-dd.zip", "descriptor-missing"),
     ] {
-        let z = path("tests/fixtures/zip-cloaking").join(name);
+        let z = spec_goldens::root()
+            .join("testdata/zip-cloaking")
+            .join(name);
         let (exit, r) = probe(&[
             "compat",
             "--zip",
@@ -2788,7 +2790,9 @@ fn check_refuses_a_zip_that_reads_as_two_archives_and_reads_no_further() {
         ("upath.zip", "notes.txt", "unicode-path"),
         ("stored-dd.zip", "notes.txt", "descriptor-missing"),
     ] {
-        let file = path("tests/fixtures/zip-cloaking").join(name);
+        let file = spec_goldens::root()
+            .join("testdata/zip-cloaking")
+            .join(name);
         for provenance in ["community", "first-party"] {
             let (exit, r) = check(file.to_str().unwrap(), &["--provenance", provenance]);
             assert_eq!(exit, 1, "{name}: {r:#}");

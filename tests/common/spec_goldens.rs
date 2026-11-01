@@ -186,8 +186,9 @@ fn tree_entries(data: &[u8]) -> BTreeMap<String, (String, String)> {
 /// That the copy is AstraPlugins' at `pin`, by git's own ids and nothing the vendoring wrote:
 /// `GIT-OBJECTS/<pin>` is the commit whose SHA-1 is `pin`; from its tree, each folder's tree
 /// object (each also hashing to its name) leads to every vendored file, whose bytes hash to the
-/// blob id that tree names; and every file the pinned trees hold below `testdata/games/`, every
-/// `*.json` of `spec/games/schemas/` and `spec/games/reserved.yaml` is vendored. A hand edit of
+/// blob id that tree names; and every file the pinned trees hold below `testdata/games/` and
+/// `testdata/zip-cloaking/`, every `*.json` of `spec/games/schemas/` and
+/// `spec/games/reserved.yaml` is vendored. A hand edit of
 /// any byte, its sums regenerated, still fails here; so does any file added or left out.
 fn proven_at_pin(root: &Path, pin: &str, listed: &BTreeMap<String, String>) {
     assert_eq!(
@@ -252,8 +253,10 @@ fn proven_at_pin(root: &Path, pin: &str, listed: &BTreeMap<String, String>) {
         }
     }
     let mut want = vec!["spec/games/reserved.yaml".to_owned()];
-    let (_, games) = at("testdata/games").expect("testdata/games at PIN");
-    files_below(&object, &games, "testdata/games", &mut want);
+    for folder in ["testdata/games", "testdata/zip-cloaking"] {
+        let (_, tree) = at(folder).unwrap_or_else(|| panic!("{folder} at PIN"));
+        files_below(&object, &tree, folder, &mut want);
+    }
     let (_, schemas) = at("spec/games/schemas").expect("spec/games/schemas at PIN");
     let mut all = Vec::new();
     files_below(&object, &schemas, "spec/games/schemas", &mut all);
