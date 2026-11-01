@@ -173,10 +173,10 @@ impl Entry {
 }
 
 /// A name a folder may hold in a recording: one path component the launcher itself would write
-/// on every platform it serves (`astra_game_launcher::is_portable_name`) — no `/`, `\\`, `:`,
+/// on every platform it serves (`astra_game_launcher::is_portable_name`) — no `/`, `\`, `:`,
 /// `<>"|?*`, control character, `.`/`..`, trailing dot or space, or Windows device name. A
 /// recording is data someone else made: a name legal on Linux that Windows reads as a path
-/// (`..\\x`, `C:\\…`, `\\\\host\\share\\x`) would make a replay there lay files outside its folder,
+/// (`..\x`, `C:\…`, `\\host\share\x`) would make a replay there lay files outside its folder,
 /// so such a recording is refused, never laid, on every OS.
 pub fn valid_name(name: &str) -> Result<(), String> {
     if !astra_game_launcher::is_portable_name(name) {
