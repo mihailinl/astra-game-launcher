@@ -711,12 +711,16 @@ pub fn uninstall(profile_dir: &Path, game: &GameTarget) -> Result<UninstallRepor
 /// undone exactly as [`uninstall`] undoes them — one function, the restore rules M2 sets
 /// ([`UninstallReport::warnings`]: `restore-partial` for anything left as it is) — and so are the
 /// files an older Astra left beside the program. The profile's own files stay (the mods choice
-/// and Play's files too); the backups go, as nothing names them any more. The ledger is then
-/// rewritten as [`LedgerState::Restored`] with no game files, no Proton records and no baselines:
-/// schema 4, which a launcher before 0.5.0 refuses (`schema-too-new`) rather than plays. After it,
-/// Play is `needs-reinstall` (`reason` = `restored`), [`uninstall`] removes the profile's files and
-/// the ledger, and [`install`] is a fresh install. A restore over a restored ledger changes
-/// nothing. `not-installed` when the profile holds no ledger.
+/// and Play's files too), and so does the backup of every file we replaced that could not be put
+/// back — the game's or the player's own is there now, or nothing is (M2 puts a backup back only
+/// over our file) — while it still holds what was backed up: the player's file (a mod loader of
+/// theirs, step 10a) lasts as long as the profile does. Every other backup goes. The ledger is
+/// then rewritten as [`LedgerState::Restored`] with no game files but those `replace`s whose
+/// backup stays, no Proton records and no baselines: schema 4, which a launcher before 0.5.0
+/// refuses (`schema-too-new`) rather than plays. After it, Play is `needs-reinstall` (`reason` =
+/// `restored`), [`uninstall`] undoes what is left as the restore rules allow and removes the
+/// profile's files and the ledger, and [`install`] is a fresh install. A restore over a restored
+/// ledger changes nothing. `not-installed` when the profile holds no ledger.
 pub fn restore_game_files(profile_dir: &Path, game: &GameTarget) -> Result<UninstallReport> {
     let profile = match canonical_dir(profile_dir) {
         Ok(p) => p,
@@ -730,17 +734,94 @@ pub fn restore_game_files(profile_dir: &Path, game: &GameTarget) -> Result<Unins
     let game_root = placed_root(game, &ledger)?;
     let mut report = undo_game(&profile, &game_root, &ledger, &[])?;
     report.former_removed = sweep_former(&game_root, &ledger);
+    // A file we replaced whose original is not back (and is no older Astra's file): its backup
+    // stays, recorded, while it still holds what was backed up.
+    let mut held = Vec::new();
+    for g in &ledger.game_files {
+        let Some(b) = g
+            .backup
+            .as_ref()
+            .filter(|_| g.action == GameAction::Replace)
+        else {
+            continue;
+        };
+        if report.restored.contains(&g.rel) || report.not_restored.contains(&g.rel) {
+            continue;
+        }
+        let back = existing_target(&game_root, &checked_rel(&g.rel)?)
+            .ok()
+            .flatten()
+            .and_then(|t| file_state(&t).ok())
+            == Some(FileState::File {
+                sha256: b.sha256.clone(),
+            });
+        let intact = existing_target(&profile, &checked_rel(&b.rel)?)
+            .ok()
+            .flatten()
+            .and_then(|p| file_state(&p).ok())
+            == Some(FileState::File {
+                sha256: b.sha256.clone(),
+            });
+        if !back && intact {
+            held.push(g.clone());
+        }
+    }
+    let keep: Vec<String> = held
+        .iter()
+        .filter_map(|g| g.backup.as_ref().map(|b| b.rel.clone()))
+        .collect();
     let restored = Ledger {
         state: LedgerState::Restored,
-        game_files: Vec::new(),
+        game_files: held,
         proton: Vec::new(),
         loader_baseline: Vec::new(),
         proxy_folders: Vec::new(),
         ..ledger
     };
     ledger::write(&profile, &restored)?;
-    remove_tree_no_follow(&profile.join(BACKUP_DIR))?;
+    remove_backups_but(&profile, &keep)?;
     Ok(report)
+}
+
+/// Removes the profile's backups but the files `keep` names (`/`-separated, below the profile),
+/// never following a link; a folder left empty goes too.
+fn remove_backups_but(profile: &Path, keep: &[String]) -> Result<()> {
+    if keep.is_empty() {
+        return remove_tree_no_follow(&profile.join(BACKUP_DIR));
+    }
+    fn walk(profile: &Path, dir: &Path, keep: &[String]) -> Result<()> {
+        let entries = match fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(LauncherError::io_at(&e, dir)),
+        };
+        for e in entries {
+            let e = e.map_err(|e| LauncherError::io_at(&e, dir))?;
+            let p = e.path();
+            let rel = p
+                .strip_prefix(profile)
+                .map(|r| r.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            match fs::symlink_metadata(&p) {
+                Ok(m) if m.is_dir() => {
+                    walk(profile, &p, keep)?;
+                    let _ = fs::remove_dir(&p);
+                }
+                Ok(_) if keep.iter().any(|k| k.eq_ignore_ascii_case(&rel)) => {}
+                Ok(_) => fs::remove_file(&p).map_err(|e| LauncherError::io_at(&e, &p))?,
+                Err(e) => return Err(LauncherError::io_at(&e, &p)),
+            }
+        }
+        Ok(())
+    }
+    let root = profile.join(BACKUP_DIR);
+    match fs::symlink_metadata(&root) {
+        Ok(m) if m.is_dir() => walk(profile, &root, keep),
+        // A link or a file in its place: no backup of ours is behind it.
+        Ok(_) => remove_tree_no_follow(&root),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(LauncherError::io_at(&e, &root)),
+    }
 }
 
 /// The ledger of a profile, if anything is installed there.

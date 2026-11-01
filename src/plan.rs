@@ -119,7 +119,7 @@ pub struct InstallPlan {
     /// "vac-unchecked" (the same fact as `vac_checked == false`, for a sheet that lists codes),
     /// "former-astra-files" (`former_files` is not empty), "foreign-loader-in-backup" (a
     /// `replace` of a loader's file the current install already made, kept: the player's loader
-    /// is in Astra's backup, and comes back at uninstall).
+    /// is in Astra's backup, and comes back at uninstall while ours is still in its place).
     pub warnings: Vec<String>,
     /// Steam's Valve Anti-Cheat flag was READ for this app and is clear. `false`: no TRUSTED Steam
     /// appid (the caller's, or the one the folder's appmanifest proves; never the integration

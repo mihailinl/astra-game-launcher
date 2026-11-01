@@ -16,9 +16,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use astra_game_launcher::{
-    Ctx, GameTarget, GiPackage, KEPT_FOLDER_GAINED_FILES, LEDGER_FILE_NAME, LedgerState, Platform,
-    UninstallReport, codes, install, installed, plan_install, prepare_launch, restore_game_files,
-    uninstall,
+    Ctx, GameAction, GameTarget, GiPackage, KEPT_FOLDER_GAINED_FILES, LEDGER_FILE_NAME,
+    LedgerState, Platform, UninstallReport, codes, install, installed, plan_install,
+    prepare_launch, restore_game_files, uninstall,
 };
 use common::*;
 
@@ -245,6 +245,61 @@ fn a_file_with_our_digest_is_removed_or_restored_and_nothing_else_is_touched() {
         let json = serde_json::to_string(&r).unwrap();
         assert!(!json.contains("warnings"), "{how}: {json}");
     }
+}
+
+/// A file we replaced that a restore cannot put back — the game updated it over ours, or it is
+/// gone — keeps its backup while the profile does, its `replace` named in the restored ledger:
+/// the player's file is never lost while the profile that holds it lasts. A backup that changed
+/// since is not kept. The uninstall that follows applies the restore rules again (nothing goes
+/// back over a file that is not ours) and removes the profile.
+#[test]
+fn a_restore_keeps_the_backup_it_could_not_put_back() {
+    for gone in [false, true] {
+        let w = World::new().install();
+        let backup = w.backup();
+        if gone {
+            fs::remove_file(w.game.join("settings.json")).unwrap();
+        } else {
+            write(&w.game.join("settings.json"), b"{\"game\":\"update 2\"}");
+        }
+        let r = restore_game_files(&w.profile(), &w.target()).unwrap();
+        assert_eq!(r.warnings, [codes::RESTORE_PARTIAL], "gone {gone}: {r:?}");
+        assert_eq!(
+            fs::read(&backup).unwrap(),
+            ORIGINAL,
+            "gone {gone}: the original is still held"
+        );
+        let l = installed(&w.profile()).unwrap().unwrap();
+        assert_eq!(l.state, LedgerState::Restored);
+        let held: Vec<_> = l
+            .game_files
+            .iter()
+            .map(|g| (g.rel.as_str(), g.action))
+            .collect();
+        assert_eq!(
+            held,
+            [("settings.json", GameAction::Replace)],
+            "gone {gone}"
+        );
+        assert!(l.proton.is_empty() && l.proxy_folders.is_empty());
+        let e = prepare_launch(&w.profile(), &w.target(), &vars(), None).unwrap_err();
+        assert_eq!(e.param("reason"), Some("restored"));
+        // Again: nothing changes, the backup stays.
+        restore_game_files(&w.profile(), &w.target()).unwrap();
+        assert_eq!(fs::read(&backup).unwrap(), ORIGINAL);
+        let u = uninstall(&w.profile(), &w.target()).unwrap();
+        assert!(u.restored.is_empty(), "gone {gone}: {u:?}");
+        assert!(!backup.exists() && installed(&w.profile()).unwrap().is_none());
+    }
+    // A backup that no longer holds what was backed up is not kept.
+    let w = World::new().install();
+    write(&w.game.join("settings.json"), b"{\"game\":\"update 2\"}");
+    let backup = w.backup();
+    write(&backup, b"not what was backed up");
+    restore_game_files(&w.profile(), &w.target()).unwrap();
+    assert!(!backup.exists());
+    let l = installed(&w.profile()).unwrap().unwrap();
+    assert!(l.game_files.is_empty(), "{:?}", l.game_files);
 }
 
 /// A file we replaced that is gone: the backup goes back only over our file, so the player's

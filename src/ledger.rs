@@ -34,10 +34,11 @@ pub enum LedgerState {
     /// Written before the first file is placed; a crash leaves this, and uninstall rolls it back.
     Installing,
     Installed,
-    /// [`crate::restore_game_files`] put the game's files back and kept the profile: no game
-    /// files and no Proton records left, Play refused (`needs-reinstall`, `reason` = `restored`),
-    /// uninstall removes the profile's files, and installing over it is a fresh install. Always
-    /// written as schema 4.
+    /// [`crate::restore_game_files`] put the game's files back and kept the profile: no Proton
+    /// records left, and no game files but the `replace`s it could not put back whose backup it
+    /// keeps (the player's file, while the profile lasts); Play refused (`needs-reinstall`,
+    /// `reason` = `restored`), uninstall undoes what is left and removes the profile's files, and
+    /// installing over it is a fresh install. Always written as schema 4.
     Restored,
 }
 

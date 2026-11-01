@@ -42,7 +42,8 @@ pub mod codes {
     pub const FOREIGN_FILE: &str = "foreign-file";
     /// A plan's warning, not a refusal: a file of a mod loader (`dwmapi.dll`, a UE4SS) that an
     /// earlier launcher replaced with ours stays replaced on this update. The player's loader is
-    /// in Astra's backup, and the uninstall puts it back.
+    /// in Astra's backup, and the uninstall or a restore puts it back while ours is still in its
+    /// place (a restore that cannot keeps the backup in the profile).
     pub const FOREIGN_LOADER_IN_BACKUP: &str = "foreign-loader-in-backup";
     /// The manifest names a different game (`field` = "exe" or "steam_appid").
     pub const GAME_MISMATCH: &str = "game-mismatch";
@@ -308,7 +309,7 @@ impl LauncherError {
                 "a file of the game's is where this integration would place its own; only Astra's own integrations may replace one"
             }
             codes::FOREIGN_LOADER_IN_BACKUP => {
-                "another mod loader's file is kept in Astra's backup and comes back when this integration is uninstalled"
+                "another mod loader's file is kept in Astra's backup and comes back when this integration is uninstalled, while Astra's file is still in its place"
             }
             codes::GAME_MISMATCH => "this integration is for a different game",
             codes::PLATFORM_UNSUPPORTED => "this integration does not support the game's platform",
