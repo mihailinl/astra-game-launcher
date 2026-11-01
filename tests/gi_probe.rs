@@ -2884,3 +2884,57 @@ fn validate_descriptor_corpus_refuses_claims_on_two_engines() {
     let rows = r["corpus"]["recordings"].as_array().unwrap();
     assert!(rows.len() >= 8 && rows.iter().all(|row| row["claimed"] == false));
 }
+
+/// A recording is data someone else made (a pull request's recordings, `validate-descriptor
+/// --corpus`): every name it holds, a file's or a folder key's, must be one component the
+/// launcher would write on every OS. One Windows reads as a path — climbing out (`..\x`), a
+/// drive (`C:\…`, `C:x`), a share (`\\host\share\x`, which opens SMB with the author's
+/// credentials), a stream (`a:b`), a device (`CON`), a trailing dot — refuses the whole
+/// recording, never laid, on this OS as on Windows.
+#[test]
+fn a_recording_whose_names_windows_reads_as_paths_is_refused() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/recorded");
+    let first = replay::recordings_in(&dir).unwrap().remove(0);
+    let text = fs::read_to_string(&first).unwrap();
+    replay::Recording::parse(&text).unwrap();
+    let v: Value = serde_json::from_str(&text).unwrap();
+    let hostile = [
+        r"..\..\x.cmd",
+        r"C:\Users\u\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\x.cmd",
+        r"\\attacker\share\x",
+        "C:x",
+        "a:b",
+        "CON",
+        "nul.txt",
+        "trailing.",
+        "trailing ",
+        "a\u{1}b",
+        "what?",
+    ];
+    for name in hostile {
+        // As a file's name in the top folder.
+        let mut file = v.clone();
+        file["folders"][""]
+            .as_array_mut()
+            .unwrap()
+            .push(json!([name, "f", 4, "68690a00"]));
+        let e = replay::Recording::parse(&file.to_string()).unwrap_err();
+        assert!(e.contains("is not a name a folder holds"), "{name:?}: {e}");
+        // As a folder key.
+        let mut folder = v.clone();
+        folder["folders"][""]
+            .as_array_mut()
+            .unwrap()
+            .push(json!([name, "d"]));
+        folder["folders"][name] = json!([["x.txt", "f", 1, "78"]]);
+        assert!(
+            replay::Recording::parse(&folder.to_string()).is_err(),
+            "{name:?} as a folder"
+        );
+    }
+    // The committed recordings all keep to the rule.
+    for f in replay::recordings_in(&dir).unwrap() {
+        replay::Recording::parse(&fs::read_to_string(&f).unwrap())
+            .unwrap_or_else(|e| panic!("{f:?}: {e}"));
+    }
+}

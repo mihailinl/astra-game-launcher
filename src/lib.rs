@@ -117,6 +117,16 @@ pub fn check_local_path(path: &std::path::Path) -> Result<()> {
     paths::require_local(path)
 }
 
+/// Whether `name` is one path component the launcher would write on every platform it serves:
+/// not empty, no `/`, `\`, `:`, `<>"|?*` or control character, not `.` or `..`, no trailing dot
+/// or space, no Windows device name (`CON`, `NUL`, `COM1`, `LPT¹`, …), at most 255 bytes. A
+/// caller that lays files from data someone else made (a recording's replay, `gi-probe
+/// validate-descriptor --corpus`) holds every name to it before joining it to a path: on Windows
+/// `..\x`, `C:\…` and `\\host\share\x` are paths, not names.
+pub fn is_portable_name(name: &str) -> bool {
+    paths::check_component(name)
+}
+
 /// This build's own version (`Cargo.toml`'s `[package].version`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

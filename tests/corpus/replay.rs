@@ -172,9 +172,14 @@ impl Entry {
     }
 }
 
-/// A name a folder may hold in a recording: not empty, not `.` or `..`, no `/` and no NUL.
+/// A name a folder may hold in a recording: one path component the launcher itself would write
+/// on every platform it serves (`astra_game_launcher::is_portable_name`) — no `/`, `\\`, `:`,
+/// `<>"|?*`, control character, `.`/`..`, trailing dot or space, or Windows device name. A
+/// recording is data someone else made: a name legal on Linux that Windows reads as a path
+/// (`..\\x`, `C:\\…`, `\\\\host\\share\\x`) would make a replay there lay files outside its folder,
+/// so such a recording is refused, never laid, on every OS.
 pub fn valid_name(name: &str) -> Result<(), String> {
-    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
+    if !astra_game_launcher::is_portable_name(name) {
         return Err(format!("{name:?} is not a name a folder holds"));
     }
     Ok(())
@@ -488,6 +493,14 @@ pub fn materialise(rec: &Recording, root: &Path) -> io::Result<()> {
         };
         for e in entries {
             let p = dir.join(&e.name);
+            // Every name was held to `valid_name` at parse: a path that is not below `root` now
+            // is a recording that did not come through it.
+            if !p.starts_with(root) || p.components().any(|c| c.as_os_str() == "..") {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}: a name leaves the replay's folder", p.display()),
+                ));
+            }
             match &e.kind {
                 Kind::Dir => fs::create_dir(&p)?,
                 Kind::File { size, head, tail } => lay_file(&p, *size, head, tail)?,
