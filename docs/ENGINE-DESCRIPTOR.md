@@ -77,6 +77,13 @@ request to the specification to say the same.
   `negative:<folder>` or `two-engines` for its `E_DESCRIPTOR_TOO_BROAD` (merged plan R32:
   kebab-case wire codes). A recording labelled `unknown` names no engine, so it never counts
   towards `two-engines`.
+- **Anchors.** A Pass B rule's anchor is a top-level `listed` check whose pattern is wholly
+  literal: no `*` and no placeholder. §2.4 also counts a pattern that holds a placeholder
+  (`{stem}_Data`, `{program}.pdb`) once it is substituted per candidate; the launcher does not —
+  its one-lookup prefilter (a game folder's name set, before any rule runs) needs the name
+  itself — so a rule whose only top-level `listed` checks hold a placeholder is
+  `descriptor-too-broad{reason=no-anchor}`. Give such a rule a literal anchor beside it (a file
+  every game of the engine ships under one name).
 - **Goldens.** Pin the outcome of each case as (phase, first_party) → code, plus `field` where
   there is one. Never pin the reason's text.
 - **The parts only Astra's own descriptors use.** The built-ins in `src/engines/builtin/*.toml`

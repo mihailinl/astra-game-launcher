@@ -142,6 +142,11 @@ Also for the spec, not pinned by a golden:
   check` reports it (`manifest-invalid`, key `integration.sdk`).
 - **`code_changed`** (`gi-probe check --previous`) counts `.dll .so .dylib .jar .lua .py .js .exe`
   and also `.asi .pyd .pyc` and a versioned `.so.N`, in `[[files]]` and `[[game_files]]` alike.
+- **Pass B's anchor is wholly literal** (`ENGINE-DESCRIPTOR.md`, "Anchors"): §2.4 counts a
+  `listed` pattern holding a placeholder (`{stem}_Data`) as an anchor once substituted; the
+  launcher refuses a rule with no literal one (`descriptor-too-broad{reason=no-anchor}`,
+  `src/engines/descriptor.rs` `check_pass_b`). Say the launcher's reading in §2.4, or the
+  launcher learns to key its prefilter on a placeholder pattern's literal part.
 - **`reserved-name`'s fold** is not NFKC (row 17), and it reads a name word by word: the spec's
   fold keeps the separators, so `Mini Cell` and `Gemini Celestial` are not reserved, while a run
   of one- and two-letter pieces (`O f f i c i a l`, `Mi-ni-ce`) is read as one word. Say how
