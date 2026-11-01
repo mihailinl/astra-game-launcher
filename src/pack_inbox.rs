@@ -16,8 +16,11 @@
 //!
 //! - **What may go there**: `.astrapack` files only (any letter case of the extension, not
 //!   dot-led), straight in the folder (never below it: the engine reads only the folder's own
-//!   files), each one a zip whose `animpack.toml` (at its root, or in its one top-level folder, as
-//!   the engine looks) says `[animpack] uid = "<integration id>/<tail>"` — the one claim the
+//!   files), each read from an entry of the release that is itself a content-typed `.astrapack`
+//!   (so the content check sees what the companion imports: `reason=not-content-typed`
+//!   otherwise), each one a zip whose `animpack.toml` (at its root, or in its one top-level
+//!   folder, as the engine looks; a case variant there is `animpack-toml-case`) says
+//!   `[animpack] uid = "<integration id>/<tail>"` — the one claim the
 //!   engine holds an inbox archive to that names it, and the one the tombstone needs
 //!   (`pack-inbox-invalid{file, reason}` otherwise, when the package is opened). Before that, the
 //!   archive is held to what the release around it is (`zip-inconsistent`, `zip-unsafe-entry`,
@@ -246,9 +249,9 @@ pub(crate) fn check_placed(f: &PackFile) -> Result<()> {
 }
 
 /// The pack's uid and its tombstone, from the archive's own bytes (`entry` names it in the
-/// release zip): its `animpack.toml`, at the archive's root or in its one top-level folder, as
-/// the engine's importer finds it, says `[animpack] uid = "<id>/<tail>"` with a tail the engine
-/// reads. The archive is first held to what the release zip around it is
+/// release zip, a content-typed `.astrapack`): its `animpack.toml`, at the archive's root or in
+/// its one top-level folder, as the engine's importer finds it (in no other letter case), says
+/// `[animpack] uid = "<id>/<tail>"` with a tail the engine reads. The archive is first held to what the release zip around it is
 /// ([`crate::zip_consistency::check_nested`]: one archive to every reader, no entry no reader may
 /// read), within the release's one `budget`.
 pub(crate) fn read_uid(
@@ -258,6 +261,14 @@ pub(crate) fn read_uid(
     budget: &mut crate::zip_consistency::Budget,
 ) -> Result<(String, String)> {
     let bad = |reason: &str| invalid(reason).with("file", entry);
+    // What the companion imports is a file the release's content check sees: the release's own
+    // entry a content-typed `.astrapack` (that name, a zip's magic at offset 0), never bytes
+    // renamed into one by the destination or behind a prefix.
+    if crate::content::extension(entry) != ARCHIVE_EXT
+        || !crate::content::is_content_typed(entry, bytes)
+    {
+        return Err(bad("not-content-typed"));
+    }
     let mut ar = ZipArchive::new(Cursor::new(bytes))
         .map_err(|e| bad("not-a-zip").with("detail", e.to_string()))?;
     crate::zip_consistency::check_nested(&mut ar, bytes, budget)
@@ -274,8 +285,27 @@ pub(crate) fn read_uid(
             .replace('\\', "/");
         names.push((i, name, f.size()));
     }
-    let at_root = names.iter().find(|(_, n, _)| n == PACK_FILE);
-    let found = match at_root {
+    // `animpack.toml` at `want`, as every engine finds it: the engine asks the file system, which
+    // on Windows and macOS matches any letter case. So a case variant there is refused, never
+    // passed over: an engine there would read it where this reads another (or none).
+    let pack_file = |want: &str| -> Result<Option<&(usize, String, u64)>> {
+        let like: Vec<&(usize, String, u64)> = names
+            .iter()
+            .filter(|(_, n, _)| n.eq_ignore_ascii_case(want))
+            .collect();
+        match like.as_slice() {
+            [] => Ok(None),
+            [one] if one.1 == want => Ok(Some(*one)),
+            _ => Err(bad("animpack-toml-case").with(
+                "names",
+                like.iter()
+                    .map(|(_, n, _)| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )),
+        }
+    };
+    let found = match pack_file(PACK_FILE)? {
         Some(x) => Some(x),
         None => {
             // The engine's `find_pack_root`: the one top-level folder, when there is exactly one.
@@ -285,10 +315,7 @@ pub(crate) fn read_uid(
                 .filter(|top| !top.is_empty())
                 .collect();
             match tops.into_iter().collect::<Vec<_>>().as_slice() {
-                [one] => {
-                    let want = format!("{one}/{PACK_FILE}");
-                    names.iter().find(|(_, n, _)| *n == want)
-                }
+                [one] => pack_file(&format!("{one}/{PACK_FILE}"))?,
                 _ => None,
             }
         }

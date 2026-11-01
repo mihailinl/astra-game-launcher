@@ -638,7 +638,11 @@ fn the_pack_says_a_uid_of_this_integration() {
     assert_eq!(reason(one(astrapack("test.unity/.climb"))), "uid");
     assert_eq!(reason(one(astrapack("test.unity"))), "uid");
     assert_eq!(reason(one(astrapack(""))), "uid");
-    assert_eq!(reason(one(b"not a zip".to_vec())), "not-a-zip");
+    assert_eq!(reason(one(b"not a zip".to_vec())), "not-content-typed");
+    assert_eq!(
+        reason(one(b"PK\x03\x04 and then no zip".to_vec())),
+        "not-a-zip"
+    );
     assert_eq!(
         reason(one(zip(&[E::File("clips/climb.vrma", b"x")]))),
         "no-animpack-toml"
@@ -655,6 +659,64 @@ fn the_pack_says_a_uid_of_this_integration() {
         reason(one(zip(&[E::File("animpack.toml", b"[animpack\nuid=")]))),
         "unreadable"
     );
+    // `animpack.toml` in another letter case, where the engine looks: on Windows and macOS the
+    // engine reads it (the file system matches any case), so it is refused, never passed over
+    // for the folder's (whose uid would name the tombstone of a pack no engine installed).
+    let toml = |uid: &str| format!("[animpack]\nuid = \"{uid}\"\n").into_bytes();
+    for (why, entries) in [
+        (
+            "a case variant at the root, and a folder's",
+            vec![
+                ("ANIMPACK.TOML", toml("test.unity/a")),
+                ("p/animpack.toml", toml("test.unity/b")),
+            ],
+        ),
+        (
+            "a case variant at the root alone",
+            vec![
+                ("AnimPack.toml", toml(UID)),
+                ("clips/climb.vrma", b"x".to_vec()),
+            ],
+        ),
+        (
+            "two spellings at the root",
+            vec![
+                ("animpack.toml", toml("test.unity/a")),
+                ("ANIMPACK.toml", toml("test.unity/b")),
+            ],
+        ),
+        (
+            "a case variant in the one folder",
+            vec![
+                ("PEAK/AnimPack.toml", toml(UID)),
+                ("PEAK/x.vrma", b"x".to_vec()),
+            ],
+        ),
+    ] {
+        let files: Vec<E> = entries.iter().map(|(n, b)| E::File(n, b)).collect();
+        assert_eq!(reason(one(zip(&files))), "animpack-toml-case", "{why}");
+    }
+    // A content-typed pack is what the content check sees: an entry of another name, or a pack
+    // behind a prefix, is never handed the companion (`tests/common/content_fixtures.rs` holds
+    // the same through `content()` and `gi-probe check`).
+    let exact =
+        "\n[[files]]\nfrom = \"data/climb.bin\"\nto = \"${astra_pack_inbox}/climb.astrapack\"\n";
+    let e = refusal(&with_packs(
+        exact,
+        "1.0.0",
+        &[("data/climb.bin", astrapack(UID))],
+    ));
+    assert_eq!(
+        (e.code, e.param("reason"), e.param("file")),
+        (
+            codes::PACK_INBOX_INVALID,
+            Some("not-content-typed"),
+            Some("data/climb.bin")
+        )
+    );
+    let mut prefixed = b"MZ\x90\0\x03\0\0\0\x04\0\0\0\xff\xff\0".to_vec();
+    prefixed.extend(astrapack(UID));
+    assert_eq!(reason(one(prefixed)), "not-content-typed");
     let twice = with_packs(
         INTO_INBOX,
         "1.0.0",

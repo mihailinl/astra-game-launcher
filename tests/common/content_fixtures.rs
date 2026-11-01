@@ -12,9 +12,9 @@
 //!   `character` part). Each must get the verdict and the code `vectors.json` gives.
 //! - Ours ([`hostile`]): one release per refusal, each beside its near miss that passes.
 //!
-//! An answer is `(code, key)` per refusal in order: `key` is `content-format`'s `reason`,
-//! `content-licence-refused`'s `meta`, a parse refusal's `field` or `key`, and the `path`
-//! otherwise; flags are answered the same way, `content-astrachar-unreadable` by its `reason`.
+//! An answer is `(code, key)` per refusal in order: `key` is `content-format`'s and
+//! `pack-inbox-invalid`'s `reason`, `content-licence-refused`'s `meta`, a parse refusal's `field`
+//! or `key`, and the `path` otherwise; flags are answered the same way, `content-astrachar-unreadable` by its `reason`.
 
 #![allow(dead_code)]
 
@@ -43,6 +43,7 @@ pub fn key_of(code: &str, params: &BTreeMap<String, String>) -> (String, String)
         c if c == astra_game_launcher::codes::CONTENT_FORMAT => get("reason"),
         c if c == astra_game_launcher::codes::CONTENT_LICENCE_REFUSED => get("meta"),
         c if c == content::FLAG_ASTRACHAR_UNREADABLE => get("reason"),
+        c if c == astra_game_launcher::codes::PACK_INBOX_INVALID => get("reason"),
         _ => params
             .get("path")
             .or_else(|| params.get("field"))
@@ -306,6 +307,22 @@ pub fn astrachar(json: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
         .collect();
     all.push(("astrachar.json".to_owned(), json.as_bytes().to_vec()));
     zip_of(&all)
+}
+
+/// A `[[files]]` rule (TOML), for a destination such as `${astra_pack_inbox}/`.
+pub fn inbox_rule(from: &str, to: &str) -> String {
+    format!("[[files]]\nfrom = \"{from}\"\nto = \"{to}\"\n\n")
+}
+
+/// An animation pack of this fixture's integration, `<id>/<tail>`, holding one `.vrma`.
+pub fn animpack(tail: &str) -> Vec<u8> {
+    zip_of(&[
+        (
+            "animpack.toml".to_owned(),
+            format!("[animpack]\nuid = \"someone.content-fixture/{tail}\"\n").into_bytes(),
+        ),
+        ("clips/climb.vrma".to_owned(), vrma()),
+    ])
 }
 
 /// An `.astrachar` bundle written byte by byte: `astrachar.json` and an allowed VRM 1.0 body, and
@@ -727,6 +744,62 @@ pub fn hostile() -> Vec<Fixture> {
             Some(rel(
                 &part("characters/mira.astrachar", "character", cc),
                 &[("characters/mira.astrachar", raw_bundle(None, None))],
+            )),
+        ),
+        fx(
+            "a pack for the companion read from a file of another name",
+            rel(
+                &inbox_rule("data/climb.bin", "${astra_pack_inbox}/climb.astrapack"),
+                &[("data/climb.bin", animpack("climb"))],
+            ),
+            vec![(PACK_INBOX_INVALID, "not-content-typed")],
+            Some(rel(
+                &format!(
+                    "{}{}",
+                    part("packs/climb.astrapack", "animations", cc),
+                    inbox_rule("packs/climb.astrapack", "${astra_pack_inbox}/")
+                ),
+                &[("packs/climb.astrapack", animpack("climb"))],
+            )),
+        ),
+        fx(
+            "a pack for the companion behind a prefix",
+            rel(
+                &format!(
+                    "{}{}",
+                    part("packs/climb.astrapack", "animations", cc),
+                    inbox_rule("packs/**", "${astra_pack_inbox}/")
+                ),
+                &[("packs/climb.astrapack", {
+                    let mut p = b"MZ\x90\0\x03\0\0\0\x04\0\0\0\xff\xff\0".to_vec();
+                    p.extend(animpack("climb"));
+                    p
+                })],
+            ),
+            vec![(PACK_INBOX_INVALID, "not-content-typed")],
+            Some(rel(
+                &format!(
+                    "{}{}",
+                    part("packs/climb.astrapack", "animations", cc),
+                    inbox_rule("packs/**", "${astra_pack_inbox}/")
+                ),
+                &[("packs/climb.astrapack", animpack("climb"))],
+            )),
+        ),
+        fx(
+            "a pack for the companion no entry declares",
+            rel(
+                &inbox_rule("packs/**", "${astra_pack_inbox}/"),
+                &[("packs/climb.astrapack", animpack("climb"))],
+            ),
+            vec![(CONTENT_UNDECLARED, "packs/climb.astrapack")],
+            Some(rel(
+                &format!(
+                    "{}{}",
+                    part("packs/climb.astrapack", "animations", cc),
+                    inbox_rule("packs/**", "${astra_pack_inbox}/")
+                ),
+                &[("packs/climb.astrapack", animpack("climb"))],
             )),
         ),
         fx(

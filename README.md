@@ -555,10 +555,12 @@ from = "packs/**"                  # packs/peak-climb.astrapack
 to = "${astra_pack_inbox}/"
 ```
 
-- Only `.astrapack` files, straight in that folder; each one's `animpack.toml` says
-  `[animpack] uid = "<integration id>/<name>"`, and the integration id is one the companion reads
-  as a folder (`[a-z0-9._-]`, not dot-led). Otherwise `pack-inbox-invalid{reason}`, when the
-  package is opened.
+- Only `.astrapack` files, straight in that folder, each read from an entry of the release that
+  is itself a content-typed `.astrapack` (that name and a zip at offset 0, so the content check
+  sees every pack the companion imports: declare it in `[[integration.content]]`); each one's
+  `animpack.toml` (in exactly that letter case) says `[animpack] uid = "<integration id>/<name>"`,
+  and the integration id is one the companion reads as a folder (`[a-z0-9._-]`, not dot-led).
+  Otherwise `pack-inbox-invalid{reason}`, when the package is opened.
 - The companion imports each pack and deletes its file, so Play never asks for one, and the
   ledger records them apart from the profile's files (`pack_inbox`; a ledger with packs is
   schema 5, which launchers 0.3.1 and 0.4.1 refuse).

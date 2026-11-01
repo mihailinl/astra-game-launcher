@@ -188,8 +188,10 @@ pub mod codes {
     /// user root, with `files`; `not-a-directory`, with `path`). Never a guessed folder.
     pub const PACK_INBOX_UNAVAILABLE: &str = "pack-inbox-unavailable";
     /// A file it would place is not a pack the companion's inbox reads (`reason` =
-    /// `integration-id`, `in-a-folder`, `not-a-pack`, `not-a-zip`, `no-animpack-toml`,
-    /// `unreadable`, `uid` (with `uid`, and `want` or `detail`), `uid-twice`; `key` or `file`).
+    /// `integration-id`, `in-a-folder`, `not-a-pack`, `not-content-typed` (the release's entry is
+    /// not itself a content-typed `.astrapack`), `not-a-zip`, `no-animpack-toml`,
+    /// `animpack-toml-case` (with `names`), `unreadable`, `uid` (with `uid`, and `want` or
+    /// `detail`), `uid-twice`; `key` or `file`).
     pub const PACK_INBOX_INVALID: &str = "pack-inbox-invalid";
     // Other.
     pub const MISSING_VARIABLE: &str = "missing-variable";
