@@ -6,8 +6,9 @@
 # Writes this folder's zips: one small game integration (an astra-gi.toml and a payload/ folder)
 # packed by each common ZIP writer, the ways a release script runs them — Info-ZIP to a file and to
 # a pipe (deflated, and stored with -0), Python's zipfile to a file and to a pipe (deflated and
-# stored), bsdtar, 7-Zip and jar. To a pipe, Info-ZIP and Python write every entry with a data
-# descriptor (general-purpose bit 3): what `src/zip_consistency.rs` must still accept.
+# stored, and both again with a ZIP64 field in every local header), bsdtar, 7-Zip and jar. To a
+# pipe, Info-ZIP and Python write every entry with a data descriptor (general-purpose bit 3): what
+# `src/zip_consistency.rs` must still accept, its 64-bit form included.
 #
 #   tests/fixtures/zip-writers/make.sh
 #
@@ -78,10 +79,25 @@ def pack(target, method):
         for n in names:
             z.write(n)
 
+def pack_zip64(target, method):
+    """Each entry through ZipFile.open(..., force_zip64=True): the local header carries a ZIP64
+    field and, to a pipe, the descriptor 64-bit sizes (what a writer that cannot know a size
+    writes, Info-ZIP reading stdin among them)."""
+    with zipfile.ZipFile(target, "w", method) as z:
+        for n in names:
+            info = zipfile.ZipInfo.from_file(n)
+            info.compress_type = method
+            with open(n, "rb") as src, z.open(info, "w", force_zip64=True) as dst:
+                dst.write(src.read())
+
 pack(f"{out}/python.zip", zipfile.ZIP_DEFLATED)
 for name, method in [("python-stream.zip", zipfile.ZIP_DEFLATED), ("python-stream-stored.zip", zipfile.ZIP_STORED)]:
     p = Pipe()
     pack(p, method)
+    open(f"{out}/{name}", "wb").write(p.b)
+for name, method in [("python-stream-zip64.zip", zipfile.ZIP_DEFLATED), ("python-stream-zip64-stored.zip", zipfile.ZIP_STORED)]:
+    p = Pipe()
+    pack_zip64(p, method)
     open(f"{out}/{name}", "wb").write(p.b)
 EOF
 bsdtar --format zip -cf "$here/bsdtar.zip" "${files[@]}"

@@ -83,6 +83,16 @@ pub fn descriptor(crc: u32, compressed: u32, size: u32) -> Vec<u8> {
     d
 }
 
+/// A signed descriptor with 64-bit sizes (an entry whose local header carries a ZIP64 field).
+pub fn descriptor64(crc: u32, compressed: u32, size: u32) -> Vec<u8> {
+    let mut d = DESCRIPTOR_SIGNATURE.to_vec();
+    d.extend_from_slice(&crc.to_le_bytes());
+    for v in [compressed, size] {
+        d.extend_from_slice(&u64::from(v).to_le_bytes());
+    }
+    d
+}
+
 fn le(out: &mut Vec<u8>, v16: &[u16], v32: &[u32]) {
     for v in v16 {
         out.extend_from_slice(&v.to_le_bytes());

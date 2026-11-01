@@ -130,11 +130,30 @@ fn every_vector_is_refused_as_two_archives_for_its_own_reason() {
     }
 }
 
-/// The writers' zips, with their descriptors counted: (deflated with bit 3, stored with bit 3).
-fn writers() -> (Vec<(String, Vec<u8>)>, usize, usize) {
+/// Whether the local header at `at` carries a ZIP64 extra field (0x0001).
+fn local_zip64(zip: &[u8], at: usize) -> bool {
+    let u16_at = |i: usize| u16::from_le_bytes([zip[i], zip[i + 1]]);
+    let (name, extra) = (usize::from(u16_at(at + 26)), usize::from(u16_at(at + 28)));
+    let block = &zip[at + 30 + name..at + 30 + name + extra];
+    let mut i = 0;
+    while i + 4 <= block.len() {
+        if u16::from_le_bytes([block[i], block[i + 1]]) == 0x0001 {
+            return true;
+        }
+        i += 4 + usize::from(u16::from_le_bytes([block[i + 2], block[i + 3]]));
+    }
+    false
+}
+
+/// Each writer's zip: (its file name, its bytes).
+type Zips = Vec<(String, Vec<u8>)>;
+
+/// The writers' zips, with their descriptors counted: (deflated with bit 3, stored with bit 3),
+/// each as [32-bit, 64-bit] (an entry whose local header carries a ZIP64 field).
+fn writers() -> (Zips, [usize; 2], [usize; 2]) {
     let listed = sums("tests/fixtures/zip-writers");
     let mut zips = Vec::new();
-    let (mut deflated, mut stored) = (0, 0);
+    let (mut deflated, mut stored) = ([0, 0], [0, 0]);
     for entry in fs::read_dir(dir("tests/fixtures/zip-writers")).unwrap() {
         let p = entry.unwrap().path();
         if p.extension().is_none_or(|x| x != "zip") {
@@ -147,9 +166,10 @@ fn writers() -> (Vec<(String, Vec<u8>)>, usize, usize) {
         for i in 0..ar.len() {
             let f = ar.by_index_raw(i).unwrap();
             if f.flags().is_using_data_descriptor() {
+                let wide = usize::from(local_zip64(&bytes, f.header_start() as usize));
                 match f.compression() {
-                    zip::CompressionMethod::Deflated => deflated += 1,
-                    zip::CompressionMethod::Stored => stored += 1,
+                    zip::CompressionMethod::Deflated => deflated[wide] += 1,
+                    zip::CompressionMethod::Stored => stored[wide] += 1,
                     _ => {}
                 }
             }
@@ -167,13 +187,13 @@ fn writers() -> (Vec<(String, Vec<u8>)>, usize, usize) {
 fn every_common_writers_package_opens() {
     let (zips, deflated, stored) = writers();
     assert!(
-        zips.len() >= 9,
+        zips.len() >= 11,
         "{:?}",
         zips.iter().map(|z| &z.0).collect::<Vec<_>>()
     );
     assert!(
-        deflated > 0 && stored > 0,
-        "the writers must reach both descriptor checks (deflated {deflated}, stored {stored}), or this passes them unread"
+        deflated.iter().chain(&stored).all(|n| *n > 0),
+        "the writers must reach both descriptor checks, 32- and 64-bit (deflated {deflated:?}, stored {stored:?}), or this passes them unread"
     );
     for (name, bytes) in &zips {
         let pkg = open(bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -441,6 +461,8 @@ fn a_stored_entry_needs_its_signed_descriptor_at_its_end() {
         ("unsigned", descriptor(crc, n, n)[4..].to_vec()),
         ("another CRC", descriptor(crc ^ 1, n, n)),
         ("other sizes", descriptor(crc, n + 1, n + 1)),
+        ("another size", descriptor(crc, n, n + 1)),
+        ("another compressed size", descriptor(crc, n + 1, n)),
         ("none", Vec::new()),
     ] {
         let zip = with(d);
@@ -480,6 +502,9 @@ fn a_deflated_entry_with_bit_3_needs_its_signed_descriptor_at_its_end() {
         ("none", Vec::new()),
         ("unsigned", descriptor(crc, c, n)[4..].to_vec()),
         ("another CRC", descriptor(crc ^ 1, c, n)),
+        ("another size", descriptor(crc, c, n + 1)),
+        ("another compressed size", descriptor(crc, c + 1, n)),
+        ("64-bit sizes, no ZIP64 field", descriptor64(crc, c, n)),
     ] {
         let zip = package(vec![entry(after)]);
         zip_9_reads(&zip);
@@ -494,6 +519,136 @@ fn a_deflated_entry_with_bit_3_needs_its_signed_descriptor_at_its_end() {
             "{why}: {e}"
         );
     }
+}
+
+/// Check (5)'s width: an entry whose local header carries a ZIP64 field (what a writer that
+/// cannot know a size writes: `tests/fixtures/zip-writers/python-stream-zip64*.zip`) ends on a
+/// descriptor with 64-bit sizes, and one with 32-bit sizes is refused — Stored and Deflated.
+#[test]
+fn a_zip64_local_header_takes_a_64_bit_descriptor() {
+    let data = b"#!/bin/sh\necho hello\n";
+    let deflated = deflate(data, 6);
+    let mut zip64 = vec![0x01, 0x00, 16, 0];
+    zip64.extend_from_slice(&[0u8; 16]);
+    let (crc, n) = (crc32fast::hash(data), data.len() as u32);
+    let c = deflated.len() as u32;
+    let stored = |after: Vec<u8>| Raw {
+        local_extra: zip64.clone(),
+        ..Raw::stored_with_descriptor("payload/run.sh", data, after)
+    };
+    let deflated_entry = |after: Vec<u8>| Raw {
+        flags: 1 << 3,
+        after,
+        local_extra: zip64.clone(),
+        ..Raw::deflated("payload/run.sh", &deflated, data)
+    };
+    for (why, wide, narrow) in [
+        (
+            "stored",
+            stored(descriptor64(crc, n, n)),
+            stored(descriptor(crc, n, n)),
+        ),
+        (
+            "deflated",
+            deflated_entry(descriptor64(crc, c, n)),
+            deflated_entry(descriptor(crc, c, n)),
+        ),
+    ] {
+        let zip = package(vec![wide]);
+        zip_9_reads(&zip);
+        open(&zip).unwrap_or_else(|e| panic!("{why}, 64-bit: {e}"));
+        let zip = package(vec![narrow]);
+        zip_9_reads(&zip);
+        let e = refusal(&zip);
+        assert_eq!(
+            said(&e),
+            (
+                codes::ZIP_INCONSISTENT,
+                Some("payload/run.sh"),
+                Some("descriptor-missing")
+            ),
+            "{why}, 32-bit: {e}"
+        );
+    }
+}
+
+/// Check (4)'s guard against a stream that never ends: a Deflated entry recording only the first
+/// half of a valid stream (both headers agree, so zip 9 opens the archive) inflates until its
+/// bytes run out and is refused there, within a deadline — never a loop that waits for input
+/// that is not coming. Unplaced, so nothing but the check reads it.
+#[test]
+fn a_deflate_stream_that_runs_out_is_refused_and_does_not_hang() {
+    let data: Vec<u8> = (0..64 * 1024u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+        .collect();
+    let whole = deflate(&data, 6);
+    let half = whole[..whole.len() / 2].to_vec();
+    let opened = |stream: Vec<u8>| {
+        let zip = package(vec![
+            Raw::stored("payload/readme.txt", b"read me\n"),
+            Raw::deflated("other/half.bin", &stream, &data),
+        ]);
+        let mut ar = zip::ZipArchive::new(Cursor::new(&zip)).unwrap();
+        ar.validate_header_consistency().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(open(&zip).map(|_| ()));
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(30))
+            .expect("open() did not return within 30 s")
+    };
+    let e = opened(half).unwrap_err();
+    assert_eq!(
+        said(&e),
+        (
+            codes::ZIP_INCONSISTENT,
+            Some("other/half.bin"),
+            Some("deflate-unended")
+        ),
+        "{e}"
+    );
+    opened(whole).expect("the whole stream");
+}
+
+/// Check (5) for a Stored entry with bit 3, past its descriptor: the data's own CRC is the
+/// record's (zip 9 never reads an entry nothing places, so this check alone sees it), and a
+/// Stored entry's two sizes are one.
+#[test]
+fn a_stored_entry_with_bit_3_has_its_records_crc_and_one_size() {
+    let data = b"harmless notes\n";
+    let (crc, n) = (crc32fast::hash(data), data.len() as u32);
+    let entry = |crc: u32, compressed: u32, size: u32| Raw {
+        crc,
+        compressed,
+        size,
+        ..Raw::stored_with_descriptor("other/notes.txt", data, descriptor(crc, compressed, size))
+    };
+    let consistent = |zip: &[u8]| {
+        let mut ar = zip::ZipArchive::new(Cursor::new(zip)).unwrap();
+        ar.validate_header_consistency().unwrap();
+    };
+    let package = |e: Raw| package(vec![Raw::stored("payload/readme.txt", b"read me\n"), e]);
+    open(&package(entry(crc, n, n))).expect("the record's CRC, one size");
+    let zip = package(entry(crc ^ 1, n, n));
+    consistent(&zip);
+    assert_eq!(
+        said(&refusal(&zip)),
+        (
+            codes::ZIP_INCONSISTENT,
+            Some("other/notes.txt"),
+            Some("crc")
+        )
+    );
+    let zip = package(entry(crc, n, n + 1));
+    consistent(&zip);
+    assert_eq!(
+        said(&refusal(&zip)),
+        (
+            codes::ZIP_INCONSISTENT,
+            Some("other/notes.txt"),
+            Some("stored-size")
+        )
+    );
 }
 
 /// Check (5) is one pass: 4 MiB of near-signatures (three of the four bytes, over and over) is

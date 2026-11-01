@@ -19,6 +19,8 @@ refuses is a descriptor or a stream that lies, never one that is there.
 | `python.zip` | Python `zipfile` to a file, deflated | none |
 | `python-stream.zip` | Python `zipfile` to a pipe, deflated | on every entry |
 | `python-stream-stored.zip` | Python `zipfile` to a pipe, stored | on every entry |
+| `python-stream-zip64.zip` | Python `zipfile` to a pipe, deflated, each entry opened with `force_zip64=True` | on every entry, 64-bit: a ZIP64 field in every local header |
+| `python-stream-zip64-stored.zip` | the same, stored | on every entry, 64-bit |
 | `bsdtar.zip` | `bsdtar --format zip` | on every entry |
 | `7zip.zip` | 7-Zip | none |
 | `jar.zip` | `jar --create` | on every deflated entry |
@@ -26,6 +28,8 @@ refuses is a descriptor or a stream that lies, never one that is there.
 Written 2026-11-01 with Info-ZIP Zip 3.0, Python 3.14.8, bsdtar 3.8.10 (libarchive 3.8.10),
 7-Zip 26.05 and jar 27. Every non-ASCII name is flagged UTF-8 (general-purpose bit 11) by each.
 `SHA256SUMS` is the digests `make.sh` wrote; a new run with other tool versions writes other bytes.
+The two ZIP64 zips were added by a later run the same day with the same tools; that run wrote
+`bsdtar.zip` with other bytes, and the committed one was kept (every other zip came out the same).
 
 Info-ZIP's first-party releases (`zip -qr - . > astra-gi.zip`) write to a FILE through the shell's
 redirection, which is seekable, so they carry no descriptors: `infozip.zip`'s shape.

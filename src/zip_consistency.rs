@@ -379,3 +379,76 @@ fn stored_holds_no_descriptor(zip: &[u8], e: &Entry, budget: &mut Budget) -> Res
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `extra-field` is behind zip 9's own parse (it refuses a field that runs past its block
+    /// first: "Extra field content truncated"), so the release tests never reach it: the helper
+    /// is held here.
+    #[test]
+    fn a_field_past_its_block_is_no_block() {
+        assert_eq!(extra_ids(&[]), Some(vec![]));
+        assert_eq!(extra_ids(&[1, 0, 0, 0]), Some(vec![1]));
+        assert_eq!(
+            extra_ids(&[0x75, 0x70, 2, 0, 9, 9, 1, 0, 0, 0]),
+            Some(vec![UNICODE_PATH_FIELD, ZIP64_FIELD])
+        );
+        assert_eq!(extra_ids(&[0xfe, 0xca, 8, 0, 1, 2]), None);
+        assert_eq!(extra_ids(&[1, 0, 0]), None);
+    }
+
+    /// `truncated` is behind zip 9 too (it reads both headers before `check` does, and refuses
+    /// data past the directory as overlapping): a header that runs past the file, or carries
+    /// another signature, is no header.
+    #[test]
+    fn a_header_past_the_file_is_no_header() {
+        let local = |name: &[u8], extra: &[u8]| {
+            let mut h = LOCAL_SIGNATURE.to_le_bytes().to_vec();
+            h.extend_from_slice(&[0u8; 22]);
+            h.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            h.extend_from_slice(&(extra.len() as u16).to_le_bytes());
+            h.extend_from_slice(name);
+            h.extend_from_slice(extra);
+            h
+        };
+        let h = local(b"a.txt", &[1, 0, 0, 0]);
+        let (_, name, extra) = header(&h, 0, false).unwrap();
+        assert_eq!((name, extra), (&b"a.txt"[..], &[1u8, 0, 0, 0][..]));
+        assert!(
+            header(&h[..h.len() - 1], 0, false).is_none(),
+            "extra past the end"
+        );
+        assert!(header(&h[..33], 0, false).is_none(), "name past the end");
+        assert!(
+            header(&h[..29], 0, false).is_none(),
+            "fixed part past the end"
+        );
+        assert!(header(&h, 0, true).is_none(), "not a central header");
+        assert!(header(&h, 1, false).is_none(), "no signature there");
+    }
+
+    /// Check (7) over offsets alone: the first header at 0, each next at the previous end, the
+    /// directory at the last end; a byte before, between or after is `gap`.
+    #[test]
+    fn a_tight_layout_leaves_no_byte_out() {
+        let e = |start: usize, end: usize, name: &str| (start, end, name.to_owned());
+        assert!(tight(vec![e(10, 20, "b"), e(0, 10, "a")], 20).is_ok());
+        assert!(tight(Vec::new(), 0).is_ok());
+        for (why, layout, directory, entry) in [
+            ("a prefix", vec![e(1, 10, "a")], 10, "a"),
+            ("a gap", vec![e(0, 10, "a"), e(11, 20, "b")], 20, "b"),
+            ("an overlap", vec![e(0, 10, "a"), e(9, 20, "b")], 20, "b"),
+            ("before the directory", vec![e(0, 10, "a")], 11, ""),
+            ("an empty archive's prefix", Vec::new(), 1, ""),
+        ] {
+            let err = tight(layout, directory).unwrap_err();
+            assert_eq!(
+                (err.code, err.param("entry"), err.param("reason")),
+                (codes::ZIP_INCONSISTENT, Some(entry), Some("gap")),
+                "{why}"
+            );
+        }
+    }
+}
