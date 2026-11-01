@@ -976,6 +976,26 @@ fn a_pack_is_held_to_what_the_release_is() {
             "{why}: {e}"
         );
     }
+    // Nothing is read out of a pack before it is one archive to every reader: a cloaked pack
+    // whose `animpack.toml` would not even parse is refused for the cloak, never for the toml.
+    let cloaked = archive(&[
+        Raw::stored("animpack.toml", b"[animpack\nuid="),
+        Raw {
+            local_extra: upath.clone(),
+            central_extra: upath,
+            ..clip()
+        },
+    ]);
+    let e = refusal(&one(cloaked));
+    assert_eq!(
+        (e.code, e.param("reason"), e.param("pack")),
+        (
+            codes::ZIP_INCONSISTENT,
+            Some("unicode-path"),
+            Some(PACK_ENTRY)
+        ),
+        "{e}"
+    );
 }
 
 /// Every pack of a release is read within the ONE budget of the limits it is opened with: two
