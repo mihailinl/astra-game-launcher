@@ -85,6 +85,25 @@ pub struct LoaderBaseline {
     pub bepinex_core: Vec<String>,
 }
 
+/// What sat in the folder of a hijack-named file (`crate::plan`'s `HIJACK_NAMES`, or the
+/// manifest's `[integration.loader] proxies`) before Astra first added it to this game: the
+/// yardstick for "someone else's loader may run through ours now" (plan B §3, merged plan R42;
+/// `crate::plan`'s `proxy_folder_gained`). Recorded by the install that first adds the file and
+/// carried, unchanged, by every update.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxyFolder {
+    /// The file, below the exe's folder, `/`-separated.
+    pub proxy: String,
+    /// The names in its folder then, sorted, without the replaced integration's additions. Empty
+    /// when `capped`.
+    #[serde(default)]
+    pub names: Vec<String>,
+    /// The folder held more than 5,000 names: none are kept, and the uninstall always leaves the
+    /// file.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub capped: bool,
+}
+
 /// The Wine DLL override written into a Proton prefix's `user.reg`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtonRecord {
@@ -133,6 +152,11 @@ pub struct Ledger {
     /// ledger written before 0.5.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub descriptor_sha256: Option<String>,
+    /// One per hijack-named file this integration added. Absent when there is none, and from
+    /// every ledger written before 0.5.0 (whose uninstall then never keeps a file for its folder):
+    /// a launcher before it ignores the key (no schema change).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proxy_folders: Vec<ProxyFolder>,
 }
 
 /// `proton` is an object when there is one record (every ledger written before several overrides

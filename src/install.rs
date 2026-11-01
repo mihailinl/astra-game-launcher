@@ -6,6 +6,7 @@
 //! under the profile lock and refuses with `plan-stale` when the result differs, writes the
 //! ledger before placing the first file, and rolls back what it placed when it fails.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -30,7 +31,7 @@ use crate::paths::{
 };
 use crate::plan::{
     Accept, FormerFile, GameAction, GameFileAction, InstallPlan, Planning, kept_for_their_loader,
-    loader_baselines, plan_install_in, plan_install_with,
+    loader_baselines, plan_install_in, plan_install_with, proxy_folder_gained, proxy_folders,
 };
 use crate::proton;
 use crate::running::refuse_if_running;
@@ -63,7 +64,17 @@ pub struct UninstallReport {
     /// by `uninstall`. Absent before 0.4.0.
     #[serde(default)]
     pub former_removed: Vec<String>,
+    /// Why a file in `kept` was left, where it is not that it changed: `folder-gained-files` for
+    /// a hijack-named file we added whose folder holds a name now that was not there before Astra
+    /// first added it and is not ours (someone else's loader may run through it; a game update
+    /// that added a file there reads the same). Its Proton override stays too
+    /// (`proton_overrides_kept`). Absent when empty, and before 0.5.0.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub kept_reasons: BTreeMap<String, String>,
 }
+
+/// [`UninstallReport::kept_reasons`]: the folder of a file we added gained a name since.
+pub const KEPT_FOLDER_GAINED_FILES: &str = "folder-gained-files";
 
 fn stale(detail: &str) -> LauncherError {
     LauncherError::new(codes::PLAN_STALE).with("detail", detail)
@@ -122,8 +133,9 @@ pub fn install(
     let old = ledger::read(&profile)?;
     // Measured before the replaced integration is undone, which may take files from that folder.
     let loader_baseline = loader_baselines(&game_root, &plan.game_files, old.as_ref())?;
-    if let Some(old) = old {
-        uninstall_ledger(&profile, &game_root, &old, &plan.game_files)?;
+    let proxy_folders = proxy_folders(&game_root, &plan.game_files, pkg.manifest(), old.as_ref())?;
+    if let Some(old) = &old {
+        uninstall_ledger(&profile, &game_root, old, &plan.game_files)?;
         // The game folder as the plan expected it once the old integration is gone. The plan's
         // refusals were judged with that integration in place, as the person will find the game.
         let how = Planning {
@@ -131,7 +143,7 @@ pub fn install(
             provenance: plan.provenance,
             engine_pick: pick.as_ref(),
         };
-        let again = plan_install_with(pkg, game, &plan.profile_dir, how, false)?;
+        let again = plan_install_with(pkg, game, &plan.profile_dir, how, Some(old))?;
         if again.game_files != plan.game_files {
             return Err(stale("after-removing-the-previous-integration"));
         }
@@ -184,6 +196,7 @@ pub fn install(
         loader_baseline,
         provenance: plan.provenance,
         descriptor_sha256: plan.engine_descriptor.as_ref().map(|d| d.sha256.clone()),
+        proxy_folders,
     };
     ledger::write(&profile, &ledger)?;
 
@@ -286,8 +299,9 @@ fn place(
 /// Doorstop someone else's loader now runs through stays too ([`kept_for_their_loader`]), and so
 /// does the Proton override that loads it — unless `readd`, the plan of the integration replacing
 /// this one, adds it again right away. A shared proxy (`share-loader`) still there keeps its
-/// override as well. A rollback passes none: with the baseline the failed install recorded, only
-/// what arrived since keeps a proxy, and nothing did.
+/// override as well. So does a hijack-named file we added whose folder gained a name since
+/// ([`proxy_folder_gained`], reported in `kept_reasons`). A rollback passes none: with the
+/// baselines the failed install recorded, only what arrived since keeps a proxy, and nothing did.
 pub(crate) fn uninstall_ledger(
     profile: &Path,
     game_root: &Path,
@@ -309,6 +323,7 @@ pub(crate) fn uninstall_ledger(
         proton_overrides_kept: Vec::new(),
         not_restored: Vec::new(),
         former_removed: Vec::new(),
+        kept_reasons: BTreeMap::new(),
     };
     let readded = |rel: &str| {
         readd
@@ -342,6 +357,21 @@ pub(crate) fn uninstall_ledger(
                         && kept_for_their_loader(game_root, &g.rel, &target, ledger)? =>
                 {
                     report.kept.push(g.rel.clone());
+                    if let Some(stem) = Path::new(&g.rel).file_stem() {
+                        kept_dlls.push(stem.to_string_lossy().into_owned());
+                    }
+                }
+                // Its folder gained a name since Astra first added it: someone else's loader may
+                // run through it now (theirs can be byte for byte ours).
+                FileState::File { sha256 }
+                    if sha256 == g.sha256
+                        && !readded(&g.rel)
+                        && proxy_folder_gained(game_root, &g.rel, ledger)? =>
+                {
+                    report.kept.push(g.rel.clone());
+                    report
+                        .kept_reasons
+                        .insert(g.rel.clone(), KEPT_FOLDER_GAINED_FILES.to_owned());
                     if let Some(stem) = Path::new(&g.rel).file_stem() {
                         kept_dlls.push(stem.to_string_lossy().into_owned());
                     }

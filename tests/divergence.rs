@@ -287,7 +287,195 @@ fn fixtures() -> BTreeSet<&'static str> {
         );
         pinned.insert("refused-name");
     }
+
+    // foreign-dwmapi (step 10a)
+    {
+        foreign_dwmapi();
+        pinned.insert("foreign-dwmapi");
+    }
+
+    // proxy-folder-gained-files (merged plan R42)
+    {
+        proxy_folder_gained_files();
+        pinned.insert("proxy-folder-gained-files");
+    }
     pinned
+}
+
+/// A first-party manifest placing `name` (our bytes `ours`) beside any program, its launch
+/// passing nothing: the shape of GTA III's and the Unreal runners' `dwmapi.dll`.
+fn placing(name: &str, ours: &[u8]) -> Vec<u8> {
+    let manifest = format!(
+        "schema = 1\n\n[integration]\nid = \"astra.probe\"\nname = \"Probe\"\nversion = \"1.0.0\"\n\n[target]\nexe = \"*\"\nplatforms = [\"linux-proton\"]\nanti_cheat = \"none\"\n\n[[files]]\nfrom = \"p.txt\"\nto = \"${{profile}}/p.txt\"\n\n[[game_files]]\nfrom = \"{name}\"\nto = \"${{game}}/{name}\"\nsha256 = \"{}\"\n",
+        sha(ours)
+    );
+    zip(&[
+        E::File("astra-gi.toml", manifest.as_bytes()),
+        E::File("p.txt", b"p"),
+        E::File(name, ours),
+    ])
+}
+
+/// Each launcher's public path, in its own types, each outcome as text (the plan's JSON, or a
+/// refusal's code and params), on `dir` with its program `Game.exe` under Proton.
+macro_rules! launcher {
+    ($m:ident, $krate:ident) => {
+        mod $m {
+            use std::path::Path;
+
+            use $krate::{Accept, Ctx, GameTarget, GiPackage, Platform};
+
+            use super::sha;
+
+            pub fn game(dir: &Path) -> GameTarget {
+                GameTarget {
+                    dir: dir.to_path_buf(),
+                    exe: "Game.exe".into(),
+                    steam_appid: None,
+                    platform: Platform::LinuxProton { prefix: None },
+                    steam_appinfo: Some(dir.join("no-appinfo.vdf")),
+                }
+            }
+
+            pub fn plan(dir: &Path, profile: &Path, zip: &[u8]) -> Result<String, String> {
+                let pkg = GiPackage::open(zip, &sha(zip)).unwrap();
+                $krate::plan_install(&pkg, &game(dir), profile)
+                    .map(|p| serde_json::to_string(&p).unwrap())
+                    .map_err(|e| format!("{} {:?}", e.code, e.params))
+            }
+
+            pub fn install(dir: &Path, profile: &Path, zip: &[u8]) {
+                let pkg = GiPackage::open(zip, &sha(zip)).unwrap();
+                let plan = $krate::plan_install(&pkg, &game(dir), profile).unwrap();
+                let accept = Accept {
+                    vac_unchecked: true,
+                };
+                $krate::install(&pkg, &plan, &game(dir), accept, &Ctx::silent()).unwrap();
+            }
+
+            pub fn uninstall(dir: &Path, profile: &Path) -> String {
+                serde_json::to_string(&$krate::uninstall(profile, &game(dir)).unwrap()).unwrap()
+            }
+        }
+    };
+}
+launcher!(ours, astra_game_launcher);
+launcher!(legacy, launcher_legacy);
+
+/// Row `foreign-dwmapi`: a player's UE4SS (its `dwmapi.dll` and `ue4ss/UE4SS.dll`) beside the
+/// program, and Astra's own manifest placing its `dwmapi.dll` there. 0.4.1 replaces theirs;
+/// 0.5.0 refuses `foreign-loader`. Over the ledger 0.4.1's install wrote, 0.5.0 keeps that
+/// `replace`, warns `foreign-loader-in-backup`, installs the update, and its uninstall puts
+/// theirs back.
+fn foreign_dwmapi() {
+    let ours_bytes: &[u8] = b"MZ astra_loader: an inert dwmapi forwarder";
+    let theirs: &[u8] = b"MZ a UE4SS of the player's";
+    let z = placing("dwmapi.dll", ours_bytes);
+    let lay = |d: &Path| {
+        write(&d.join("Game.exe"), b"MZ game");
+        write(&d.join("dwmapi.dll"), theirs);
+        write(&d.join("ue4ss/UE4SS.dll"), b"MZ UE4SS");
+    };
+    let t = Tmp::new("div-dwmapi");
+    let game = t.join("game");
+    lay(&game);
+    let profile = t.join("profile/p");
+    let old = legacy::plan(&game, &profile, &z).unwrap();
+    assert!(
+        old.contains("\"rel_path\":\"dwmapi.dll\",\"action\":\"replace\""),
+        "0.4.1 replaces it: {old}"
+    );
+    assert_eq!(
+        ours::plan(&game, &profile, &z).unwrap_err(),
+        "foreign-loader {\"file\": \"dwmapi.dll\"}"
+    );
+    // 0.4.1 installed it: 0.5.0 updates over that ledger, its backup kept.
+    legacy::install(&game, &profile, &z);
+    let pkg = astra_game_launcher::GiPackage::open(&z, &sha(&z)).unwrap();
+    let plan = astra_game_launcher::plan_install(&pkg, &ours::game(&game), &profile).unwrap();
+    assert_eq!(
+        (
+            plan.game_files[0].action,
+            plan.game_files[0].existing_sha256.clone()
+        ),
+        (astra_game_launcher::GameAction::Replace, Some(sha(theirs)))
+    );
+    assert!(
+        plan.warnings
+            .contains(&astra_game_launcher::codes::FOREIGN_LOADER_IN_BACKUP.to_owned()),
+        "{:?}",
+        plan.warnings
+    );
+    // The same plan but for that warning is 0.4.1's over its own ledger.
+    let again_old = legacy::plan(&game, &profile, &z).unwrap();
+    let mut without: serde_json::Value = serde_json::to_value(&plan).unwrap();
+    without["warnings"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|w| w != "foreign-loader-in-backup");
+    assert_eq!(
+        without,
+        serde_json::from_str::<serde_json::Value>(&again_old).unwrap()
+    );
+    astra_game_launcher::install(
+        &pkg,
+        &plan,
+        &ours::game(&game),
+        astra_game_launcher::Accept {
+            vac_unchecked: true,
+        },
+        &astra_game_launcher::Ctx::silent(),
+    )
+    .unwrap();
+    let gone = ours::uninstall(&game, &profile);
+    assert!(gone.contains("\"restored\":[\"dwmapi.dll\"]"), "{gone}");
+    assert_eq!(std::fs::read(game.join("dwmapi.dll")).unwrap(), theirs);
+}
+
+/// Row `proxy-folder-gained-files`: Astra's own manifest adds `winhttp.dll` (no Doorstop: no
+/// BepInEx rule keeps it); a `Mods/` folder arrives beside it. 0.4.1's uninstall removes ours;
+/// 0.5.0's keeps it, saying why. With nothing arrived, both remove it alike.
+fn proxy_folder_gained_files() {
+    let ours_bytes: &[u8] = b"MZ a proxy of ours";
+    let z = placing("winhttp.dll", ours_bytes);
+    for gained in [false, true] {
+        let mut gone = Vec::new();
+        for (who, install, uninstall) in [
+            (
+                "legacy",
+                legacy::install as fn(&Path, &Path, &[u8]),
+                legacy::uninstall as fn(&Path, &Path) -> String,
+            ),
+            ("ours", ours::install, ours::uninstall),
+        ] {
+            let t = Tmp::new(&format!("div-proxy-folder-{who}-{gained}"));
+            let game = t.join("game");
+            write(&game.join("Game.exe"), b"MZ game");
+            let profile = t.join("profile/p");
+            install(&game, &profile, &z);
+            if gained {
+                write(&game.join("Mods/their_mod.lua"), b"-- theirs");
+            }
+            gone.push((
+                uninstall(&game, &profile),
+                game.join("winhttp.dll").exists(),
+            ));
+        }
+        let (old, new) = (&gone[0], &gone[1]);
+        assert!(!old.1, "0.4.1 removes ours");
+        assert!(old.0.contains("\"removed\":[\"winhttp.dll\"]"), "{}", old.0);
+        if gained {
+            assert!(new.1, "0.5.0 keeps ours");
+            let r: astra_game_launcher::UninstallReport = serde_json::from_str(&new.0).unwrap();
+            assert_eq!(r.kept, ["winhttp.dll"]);
+            assert_eq!(
+                r.kept_reasons.get("winhttp.dll").map(String::as_str),
+                Some(astra_game_launcher::KEPT_FOLDER_GAINED_FILES)
+            );
+        } else {
+            assert_eq!(new, old, "nothing arrived: 0.5.0 uninstalls as 0.4.1");
+        }
+    }
 }
 
 #[test]

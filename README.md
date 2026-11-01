@@ -323,8 +323,32 @@ let plan = plan_install_in(&pkg, &game, &profile_dir, &engines, Provenance::Comm
   anyone else's), and `install` plans again with the pin alone, its digest checked
   (`plan-stale` otherwise); the ledger records both (`provenance`, `descriptor_sha256`).
   `plan_install` is `plan_install_in` with no descriptors, first-party and no pick: 0.4.1's
-  planning, and a first-party plan of a built-in engine's manifest serialises exactly as
-  0.4.1's.
+  planning but for step 10a below, and a first-party plan of a built-in engine's manifest
+  serialises exactly as 0.4.1's.
+- **Mod loaders, for every game and every integration.** A file beside the game by a name mod
+  loaders hijack-load by (`HIJACK_NAMES`: `winhttp`, `version`, `dwmapi`, `dxgi`, `d3d11`,
+  `dinput8`, the XInput DLLs, `winmm`, Ultimate ASI Loader's system-DLL names, `opengl32`; or a
+  name the manifest's `[integration.loader] proxies` declare) that Astra did not place is never
+  replaced: `share-loader` where a Doorstop of ours can run through it, `foreign-loader`
+  otherwise. So a player's UE4SS `dwmapi.dll` beside a GTA III or Unreal-runner game is
+  `foreign-loader` where 0.4.1 backed it up and replaced it (step 10a); a ledger that already
+  holds it as `replace` keeps that on update, with the plan warning `foreign-loader-in-backup`.
+  `[integration.loader] keep_if_present` adds config names left alone, for that install only.
+  Play, the Doorstop sharing and the BepInEx keep at uninstall still read the four Doorstop
+  names alone.
+- **What a community integration may do** (`Provenance::Community`, plan B §3): no `replace`
+  arm (`foreign-file`); a loader's name only when `[integration.loader] proxies` declares it
+  (`loader-undeclared`); game files only beside the program or below a folder named after its
+  id, never below `BepInEx/`, `MelonLoader/`, `ue4ss/`, `Mods/`, `~mods/`; a program the built-in
+  walk lists; no `[launch] env`; Proton overrides only for DLLs it places, `native,builtin` or
+  `n,b`; path arguments only under `${profile}/` or `${game}/` (`community-limit{rule}`); and an
+  id and name that are not Astra's (`reserved-id`, `reserved-name`).
+- **A loader's identical bytes survive the uninstall.** The install records the listing of the
+  folder of each hijack-named file it adds (`Ledger::proxy_folders`, at most 5,000 names);
+  the uninstall leaves such a file of ours when its folder gained a name since that the ledger
+  does not place (a UE4SS installed by hand after us ships the very same `dwmapi.dll`), with its
+  Proton override, and says why: `UninstallReport::kept_reasons` = `folder-gained-files`. A game
+  update that adds a file there keeps it too.
 
 ## `gi-probe`: checking a release before anybody installs it (0.5.0)
 
@@ -336,7 +360,7 @@ cargo build --features gi-probe --bin gi-probe
 gi-probe compat --zip astra-gi.zip --source astra.unreal --tag v0.2.1 [--asset NAME]
                 [--prerelease] [--sha256 HEX] [--previous PREV.zip] [--notes NOTES.md]
 gi-probe check astra-gi.zip [--provenance first-party|community] [--foundation F.zip]
-               [--previous PREV.zip]
+               [--previous PREV.zip] [--loaders LOADERS.json]
 gi-probe validate-descriptor engine.toml [--first-party]
 gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
 ```
@@ -367,11 +391,12 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
   listing; `tools/fetch-first-party-manifests.sh` uses it to keep
   `tests/fixtures/first-party/` (each source's manifest as 0.2.7 would install it today) fresh.
 - **`check`** is what a catalogue's ingest asks of a release before it is listed (AstraPlugins
-  `spec/games/manifest.md` §4), with this launcher's own parser. Its six steps:
+  `spec/games/manifest.md` §4), with this launcher's own parser. Its seven steps:
   1. the launcher opens the zip (its hygiene, the manifest, every file it names, no reserved
      profile name placed — `src/reserved.rs`, the one list, canary K13);
   2. `Manifest::lint`: a community release's id and name are not Astra's own (`reserved-id`,
-     `reserved-name`; `--provenance first-party` skips it), `${bridge_token}` only with
+     `reserved-name`) and what it may place and launch (`loader-undeclared`, K18;
+     `community-limit`) — `--provenance first-party` skips these —, `${bridge_token}` only with
      `[integration.capabilities] companion = ["presentation"]` (`capability-undeclared`), Astra
      Link v1's counts, names and lengths (`link-invalid`), and `[integration.engine]` a
      descriptor Pass B admits;
@@ -381,9 +406,14 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
   5. with `--foundation`: `built_on{id, version, verified}`, verified only when every file the
      foundation places this release places alike (destination and digest);
   6. with `--previous`: `code_changed`, every placed code file (`.dll .so .dylib .jar .lua .py
-     .js .exe .asi .pyd .pyc`) new or changed.
+     .js .exe .asi .pyd .pyc`) new or changed;
+  7. `loaders`: each game file `none`, `allowlisted` (a loader's name whose digest `--loaders`,
+     the catalogue's `loaders[]`, lists as off by default) or `other` (a notice,
+     `loader-other`). Labels only: the allowlist never permits what the manifest does not
+     declare.
 
-  Given a bare `astra-gi.toml` instead of a zip, it makes steps 1 and 2 only and says so.
+  Given a bare `astra-gi.toml` instead of a zip, it makes the steps that need no zip and says
+  so.
   `tests/goldens/astraplugins/` holds the spec's goldens at the pinned commit (`PIN`,
   `SHA256SUMS`; re-pin with `tools/vendor-astraplugins-goldens.sh`), and `tests/goldens.rs` and
   `tests/gi_probe.rs` hold the launcher and `check` to them (K17), every known disagreement in

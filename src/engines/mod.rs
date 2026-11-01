@@ -38,7 +38,7 @@ use std::sync::LazyLock;
 use serde::{Deserialize, Serialize};
 
 pub use descriptor::{Descriptor, is_reserved_code, is_valid_engine_code};
-pub(crate) use eval::{NamedEngine, engine_of_program, pass_a, pass_b};
+pub(crate) use eval::{NamedEngine, engine_of_program, is_walked_program, pass_a, pass_b};
 
 /// The built-in descriptors, as text, in the order Pass A asks them: 0.4.1's `passes()` asked
 /// Unity, then Godot, then Unreal of each program.

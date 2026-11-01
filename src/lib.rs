@@ -55,7 +55,7 @@ pub use fetch::UreqFetch;
 pub use fetch::{Fetch, MAX_DOWNLOAD_BYTES, fetch_verified};
 pub use former::FormerKind;
 pub use game::{GameTarget, Platform, proton_prefix_for, steam_appid_of_dir, steam_appids_of_dir};
-pub use install::{UninstallReport, install, installed, uninstall};
+pub use install::{KEPT_FOLDER_GAINED_FILES, UninstallReport, install, installed, uninstall};
 pub use launch::{
     MODS_CHOICE_UNREADABLE, MODS_PACK_PATH_REFUSED, ProcessPlan, STEAM_LAUNCH_OPTIONS_DOORSTOP,
     Spawn, StdSpawn, find_steam, launch, prepare_launch, prepare_launch_with,
@@ -63,7 +63,7 @@ pub use launch::{
 };
 pub use ledger::{
     LEDGER_SCHEMA, Ledger, LedgerBackup, LedgerFile, LedgerGame, LedgerGameFile, LedgerSource,
-    LedgerState, LoaderBaseline, ProtonRecord,
+    LedgerState, LoaderBaseline, ProtonRecord, ProxyFolder,
 };
 pub use manifest::{
     BRIDGE_TOKEN_VARIABLE, COMPANION_PRESENTATION, ConfigWrite, FileRule, FoundationClaim,
@@ -80,8 +80,8 @@ pub use package::{
     GiPackage, Limits, PackageSummary, PlacedFile, SummaryConfigWrite, SummaryGameFile,
 };
 pub use plan::{
-    Accept, FormerFile, GameAction, GameFileAction, InstallPlan, PinnedDescriptor, Provenance,
-    VALVE_ANTI_CHEAT, plan_install, plan_install_in, vac_verdict,
+    Accept, FormerFile, GameAction, GameFileAction, HIJACK_NAMES, InstallPlan, PinnedDescriptor,
+    Provenance, VALVE_ANTI_CHEAT, is_hijack_name, plan_install, plan_install_in, vac_verdict,
 };
 pub use running::is_running;
 pub use steam_appinfo::{

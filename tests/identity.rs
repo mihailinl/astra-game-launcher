@@ -25,7 +25,12 @@
 //! of ours changed; files named as an older Astra left them laid beside), both are planned again
 //! from the ledger the install wrote, and now and then that plan is installed as the update;
 //! then both are uninstalled. Plans, refusals, ledgers, `UninstallReport`s and the trees left
-//! must be equal. For a share of those, a third copy is installed by launcher 0.3.1 — what
+//! must be equal — but for C1b's two declared rows (`tests/corpus/divergence.txt`), applied to
+//! 0.4.1's answer and counted: `foreign-dwmapi` (step 10a: a foreign `dwmapi.dll` where Astra's
+//! own manifest places one is `foreign-loader`, never replaced; neither launcher then installs
+//! the update) and `proxy-folder-gained-files` (merged plan R42: an added hijack-named file whose
+//! folder gained a name since is left by the uninstall, `kept_reasons`, and the ledger keeps the
+//! folder's listing the test took before the install). For a share of those, a third copy is installed by launcher 0.3.1 — what
 //! Astra 0.2.7 ships, so what wrote every 0.2.7 user's ledger — whose ledger must be 0.4.1's on
 //! every field 0.3.1's has; it is changed alike and planned again by this crate, which must plan
 //! as 0.4.1 does over its own install. The older Astra's files are look-alikes (the
@@ -60,9 +65,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
 use astra_game_launcher::{
-    Detection, Engine, EngineSet, ExePick, GameTarget, GiPackage, InstallPlan, LauncherError,
-    Platform, Provenance, codes, detect_with_engines, launch_executable, plan_install_in,
-    valve_anti_cheat,
+    Detection, Engine, EngineSet, ExePick, GameAction, GameTarget, GiPackage, InstallPlan,
+    KEPT_FOLDER_GAINED_FILES, LEDGER_FILE_NAME, LauncherError, Platform, Provenance, codes,
+    detect_with_engines, launch_executable, plan_install_in, valve_anti_cheat,
 };
 use common::identity::{
     checked_with_hostile, hostile_lower_set, hostile_set, moderated_hostile_set, narrowed,
@@ -186,6 +191,12 @@ struct Counts {
     c1b_installed: Mutex<BTreeMap<String, usize>>,
     /// C1c for planning: C1b's plans made again with a hostile set (each in turn), held equal.
     c1b_hostile: AtomicUsize,
+    /// C1b's declared exceptions (`tests/corpus/divergence.txt`), applied: plans where Astra's
+    /// own manifest places `dwmapi.dll` over a foreign one (`foreign-dwmapi`: 0.4.1 replaces it,
+    /// this crate refuses `foreign-loader`), fresh and from a ledger; and uninstalls that left a
+    /// file we added because its folder gained a name (`proxy-folder-gained-files`).
+    c1b_row_dwmapi: AtomicUsize,
+    c1b_row_proxy_folder: AtomicUsize,
     /// The planning canary ([`planning_canary`]): Pass B named the game with a program, and
     /// planning that program pinned the same descriptor — with the whole hostile set, and with
     /// its lower standings.
@@ -317,6 +328,106 @@ const PROXIES: &[&str] = &["winhttp.dll", "version.dll", "dxgi.dll", "d3d11.dll"
 const KEEP: &[&str] = &["doorstop_config.ini", "reshade.ini"];
 /// The files the Unreal runner 0.2.x left beside a game's program (src/former.rs).
 const FORMER_NAMES: &[&str] = &["dwmapi.dll", "dxgi.dll", "astra.addon64"];
+/// The names planning treats as a mod loader's (src/plan.rs `HIJACK_NAMES`; Astra's own
+/// manifests place three of them: `winhttp.dll`, `dwmapi.dll`, `dxgi.dll`).
+const HIJACK: &[&str] = &[
+    "winhttp.dll",
+    "version.dll",
+    "dwmapi.dll",
+    "dxgi.dll",
+    "d3d11.dll",
+    "dinput8.dll",
+    "xinput1_1.dll",
+    "xinput1_2.dll",
+    "xinput1_3.dll",
+    "xinput1_4.dll",
+    "xinput9_1_0.dll",
+    "xinputuap.dll",
+    "winmm.dll",
+    "dinput.dll",
+    "dsound.dll",
+    "d3d8.dll",
+    "d3d9.dll",
+    "d3d10.dll",
+    "d3d12.dll",
+    "ddraw.dll",
+    "msacm32.dll",
+    "msvfw32.dll",
+    "wininet.dll",
+    "xlive.dll",
+    "opengl32.dll",
+];
+/// How many names of a proxy's folder the ledger keeps (src/plan.rs `PROXY_FOLDER_NAMES`).
+const PROXY_FOLDER_NAMES: usize = 5_000;
+
+/// Row `foreign-dwmapi` of `tests/corpus/divergence.txt` (step 10a): where Astra's own
+/// manifest `f` places `dwmapi.dll` directly beside the program in `game` and a file that is not
+/// ours is there, its name as it is spelled there.
+fn foreign_dwmapi(game: &Path, f: &Fixture) -> Option<String> {
+    let (leaf, ours) = f
+        .beside
+        .iter()
+        .find(|(leaf, _)| leaf.eq_ignore_ascii_case("dwmapi.dll"))?;
+    let at = game.join(leaf);
+    if !fs::symlink_metadata(&at).is_ok_and(|m| m.is_file()) {
+        return None;
+    }
+    (fs::read(&at).ok()? != *ours).then(|| leaf.clone())
+}
+
+/// Row `foreign-dwmapi` applied to 0.4.1's answer `old` for a game where `foreign` is that
+/// foreign `dwmapi.dll`: what this crate answers instead, when the row applies. It applies where
+/// 0.4.1 reached the game files — its plan replaces the file, or it refused `foreign-loader` for
+/// a later one (`dwmapi.dll` is the first game file of every manifest that places it) — and
+/// there this crate refuses `foreign-loader` for `dwmapi.dll`. A refusal before the game files
+/// is the same refusal.
+fn foreign_dwmapi_row(old: &str, foreign: Option<&str>) -> Option<String> {
+    let rel = foreign?;
+    if old.starts_with('{') {
+        assert!(
+            old.contains(&format!("\"rel_path\":\"{rel}\",\"action\":\"replace\"")),
+            "foreign-dwmapi: 0.4.1 planned a foreign {rel} as something other than replace: {old}"
+        );
+    } else if !old.starts_with("foreign-loader ") {
+        return None;
+    }
+    Some(format!("foreign-loader {{\"file\": \"{rel}\"}}"))
+}
+
+/// What C1b holds this crate's answer to: 0.4.1's, with row `foreign-dwmapi` applied (counted).
+fn want_with_rows(old: &str, foreign: Option<&str>, counts: &Counts) -> String {
+    match foreign_dwmapi_row(old, foreign) {
+        Some(new) => {
+            bump(&counts.c1b_row_dwmapi);
+            new
+        }
+        None => old.to_owned(),
+    }
+}
+
+/// The names in `dir`, lower case, and whether there were more than [`PROXY_FOLDER_NAMES`]:
+/// the folder's listing a ledger keeps for a hijack-named file it adds there (src/plan.rs
+/// `proxy_folders`).
+fn listing(dir: &Path) -> (Vec<String>, bool) {
+    let names = names_in(dir);
+    if names.len() > PROXY_FOLDER_NAMES {
+        return (Vec::new(), true);
+    }
+    (names, false)
+}
+
+/// Every name in `dir`, lower case, sorted.
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .map(|r| {
+            r.flatten()
+                .map(|e| e.file_name().to_string_lossy().to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
 
 /// The last component of a `/`-separated path, in ASCII lower case.
 fn leaf(rel: &str) -> String {
@@ -1125,12 +1236,16 @@ fn c1b_plan(
         proton: true,
         ..*p
     };
+    let foreign = foreign_dwmapi(game, f);
     let new = plan_new(&p, &f.zip);
     let old = plan_legacy(&p, &f.zip);
     assert_eq!(
-        new, old,
-        "C1b: Astra's own manifest {} plans and refuses exactly as with 0.4.1 (seed {seed:#x}, exe {:?}, appid {:?})",
-        f.name, p.exe, p.appid
+        new,
+        want_with_rows(&old, foreign.as_deref(), counts),
+        "C1b: Astra's own manifest {} plans and refuses exactly as with 0.4.1, but for the declared rows (seed {seed:#x}, exe {:?}, appid {:?})",
+        f.name,
+        p.exe,
+        p.appid
     );
     bump(&counts.c1b_plans);
     // C1c for planning: no engine set changes a plan of Astra's own (a built-in engine). One
@@ -1383,9 +1498,16 @@ fn make(
     laid
 }
 
-/// The two trees, file for file and byte for byte, relative to each copy.
-fn same_tree(a: &GameCopy, b: &GameCopy, at: &str) {
-    let (sa, sb) = (snapshot(a.tmp.path()), snapshot(b.tmp.path()));
+/// The two trees, file for file and byte for byte, relative to each copy — but for `extra`, files
+/// only `b` holds (row `proxy-folder-gained-files`: what this crate's uninstall left).
+fn same_tree_but(a: &GameCopy, b: &GameCopy, extra: &[String], at: &str) {
+    let (sa, mut sb) = (snapshot(a.tmp.path()), snapshot(b.tmp.path()));
+    for rel in extra {
+        assert!(
+            !sa.contains_key(rel) && sb.remove(rel).is_some(),
+            "C1b: {rel} is left by this crate's uninstall alone ({at})"
+        );
+    }
     if sa != sb {
         let only = |x: &BTreeMap<String, Vec<u8>>, y: &BTreeMap<String, Vec<u8>>| {
             x.iter()
@@ -1399,6 +1521,87 @@ fn same_tree(a: &GameCopy, b: &GameCopy, at: &str) {
             only(&sb, &sa)
         );
     }
+}
+
+/// That the ledger this crate wrote (`done`, its text) keeps, for every hijack-named file it
+/// added beside the program, the listing the test took there before the install (`before`).
+fn proxy_folders_are(done: &str, before: &(Vec<String>, bool), at: &str) {
+    let l: astra_game_launcher::Ledger = serde_json::from_str(done).unwrap();
+    let added: Vec<&str> = l
+        .game_files
+        .iter()
+        .filter(|g| g.action == GameAction::Add && HIJACK.contains(&leaf(&g.rel).as_str()))
+        .map(|g| g.rel.as_str())
+        .collect();
+    let got: Vec<(&str, Vec<String>, bool)> = l
+        .proxy_folders
+        .iter()
+        .map(|b| {
+            let mut names: Vec<String> = b.names.iter().map(|n| n.to_ascii_lowercase()).collect();
+            names.sort();
+            (b.proxy.as_str(), names, b.capped)
+        })
+        .collect();
+    let want: Vec<(&str, Vec<String>, bool)> = added
+        .iter()
+        .map(|rel| (*rel, before.0.clone(), before.1))
+        .collect();
+    assert_eq!(got, want, "C1b: the proxy folders the ledger keeps ({at})");
+}
+
+/// Row `proxy-folder-gained-files` of `tests/corpus/divergence.txt` applied to 0.4.1's uninstall
+/// report `gone`: every file `ledger` added beside the program by a hijack name that 0.4.1
+/// removes is left instead, with the reason, when the folder (`now`, before the uninstall) holds
+/// a name the baseline (`before`) does not and `ledger` does not place, or the baseline is
+/// capped. Returns what this crate reports, and those files.
+fn proxy_folder_row(
+    gone: &str,
+    ledger: &astra_game_launcher::Ledger,
+    before: &(Vec<String>, bool),
+    now: &[String],
+) -> (String, Vec<String>) {
+    let Ok(mut r) = serde_json::from_str::<astra_game_launcher::UninstallReport>(gone) else {
+        return (gone.to_owned(), Vec::new());
+    };
+    assert!(ledger.proton.is_empty(), "C1b never launches");
+    let placed: Vec<String> = ledger
+        .game_files
+        .iter()
+        .map(|g| g.rel.split('/').next().unwrap_or("").to_ascii_lowercase())
+        .collect();
+    let gained = before.1
+        || now
+            .iter()
+            .any(|n| !before.0.contains(n) && !placed.contains(n));
+    let moved: Vec<String> = ledger
+        .game_files
+        .iter()
+        .filter(|g| {
+            g.action == GameAction::Add
+                && !g.rel.contains('/')
+                && HIJACK.contains(&leaf(&g.rel).as_str())
+                && r.removed.contains(&g.rel)
+        })
+        .filter(|_| gained)
+        .map(|g| g.rel.clone())
+        .collect();
+    if moved.is_empty() {
+        return (gone.to_owned(), moved);
+    }
+    r.removed.retain(|rel| !moved.contains(rel));
+    let kept: Vec<String> = ledger
+        .game_files
+        .iter()
+        .rev()
+        .map(|g| g.rel.clone())
+        .filter(|rel| r.kept.contains(rel) || moved.contains(rel))
+        .collect();
+    r.kept = kept;
+    for rel in &moved {
+        r.kept_reasons
+            .insert(rel.clone(), KEPT_FOLDER_GAINED_FILES.to_owned());
+    }
+    (serde_json::to_string(&r).unwrap(), moved)
 }
 
 /// One [`c1b_install`]: the program and the appid C1b planned it with, the fixture, the turn's
@@ -1521,14 +1724,22 @@ fn c1b_install(job: Job, fixtures: &[Fixture], appinfo: &Path, counts: &Counts) 
         proton: true,
     };
     let (pa, pb) = (a.at(p), b.at(p));
+    let root = |copy: &GameCopy| copy.game.join(p.exe).parent().unwrap().to_path_buf();
+    // What sits beside the program before the install: the baseline a file we add there keeps.
+    let before = listing(&root(&b));
 
+    let foreign = foreign_dwmapi(&root(&b), f);
     let (plan_a, done_a) = legacy::install(&pa, &f.zip);
     let (plan_b, done_b) = ours::install(&pb, &f.zip);
     assert_eq!(
         b.norm(&plan_b),
-        a.norm(&plan_a),
+        a.norm(&want_with_rows(&plan_a, foreign.as_deref(), counts)),
         "C1b: the install's plan ({at})"
     );
+    if foreign_dwmapi_row(&plan_a, foreign.as_deref()).is_some() {
+        bump(&counts.c1b_install_refused);
+        return;
+    }
     let (Some(done_a), Some(done_b)) = (done_a, done_b) else {
         bump(&counts.c1b_install_refused);
         return;
@@ -1548,6 +1759,7 @@ fn c1b_install(job: Job, fixtures: &[Fixture], appinfo: &Path, counts: &Counts) 
         ledger,
         "C1b: the ledger the install wrote, on every field 0.4.1's has ({at})"
     );
+    proxy_folders_are(&done_b, &before, &at);
     bump(&counts.c1b_installs);
     *counts
         .c1b_installed
@@ -1572,7 +1784,6 @@ fn c1b_install(job: Job, fixtures: &[Fixture], appinfo: &Path, counts: &Counts) 
         );
     }
 
-    let root = |copy: &GameCopy| copy.game.join(p.exe).parent().unwrap().to_path_buf();
     let laid = make(past.change, &root(&a), &ledger, f, past.pick);
     for copy in [Some(&b), c.as_ref()].into_iter().flatten() {
         assert_eq!(make(past.change, &root(copy), &ledger, f, past.pick), laid);
@@ -1597,7 +1808,11 @@ fn c1b_install(job: Job, fixtures: &[Fixture], appinfo: &Path, counts: &Counts) 
     }
 
     // From the ledger: 0.4.1 over its own install, this crate over its own and over 0.3.1's.
-    let (re_a, update_a, re_b, update_b) = if past.update {
+    // Where row `foreign-dwmapi` applies (a file of ours there changed), this crate refuses, and
+    // neither launcher installs the update.
+    let foreign = foreign_dwmapi(&root(&b), f);
+    let row = foreign_dwmapi_row(&legacy::plan(&pa, &f.zip), foreign.as_deref()).is_some();
+    let (re_a, update_a, re_b, update_b) = if past.update && !row {
         let (ra, ua) = legacy::install(&pa, &f.zip);
         let (rb, ub) = ours::install(&pb, &f.zip);
         (ra, ua, rb, ub)
@@ -1612,14 +1827,18 @@ fn c1b_install(job: Job, fixtures: &[Fixture], appinfo: &Path, counts: &Counts) 
     if let Some(c) = &c {
         assert_eq!(
             c.norm(&ours::plan(&c.at(p), &f.zip)),
-            a.norm(&re_a),
+            a.norm(&want_with_rows(
+                &re_a,
+                foreign_dwmapi(&root(c), f).as_deref(),
+                counts
+            )),
             "C1b: over the ledger launcher 0.3.1 wrote, this crate plans as 0.4.1 over its own ({at})"
         );
         bump(&counts.c1b_cross);
     }
     assert_eq!(
         b.norm(&re_b),
-        a.norm(&re_a),
+        a.norm(&want_with_rows(&re_a, foreign.as_deref(), counts)),
         "C1b: the plan from the ledger ({at})"
     );
     bump(&counts.c1b_replans);
@@ -1641,10 +1860,24 @@ fn c1b_install(job: Job, fixtures: &[Fixture], appinfo: &Path, counts: &Counts) 
         bump(&counts.c1b_updates);
     }
 
+    // The ledger the uninstall reads (the update's, when there was one), and what row
+    // `proxy-folder-gained-files` keeps: an added hijack-named file 0.4.1 removes, whose folder
+    // holds a name now that the baseline (`before`) does not and the ledger does not place.
+    let ledger_b: astra_game_launcher::Ledger = serde_json::from_str(
+        &b.norm(&fs::read_to_string(b.profile.join(LEDGER_FILE_NAME)).unwrap()),
+    )
+    .unwrap();
+    let now = names_in(&root(&b));
     let (gone_a, gone_b) = (legacy::uninstall(&pa), ours::uninstall(&pb));
+    let (want_b, kept_for_folder) = proxy_folder_row(&gone_a, &ledger_b, &before, &now);
+    if !kept_for_folder.is_empty() {
+        counts
+            .c1b_row_proxy_folder
+            .fetch_add(kept_for_folder.len(), Ordering::Relaxed);
+    }
     assert_eq!(
         b.norm(&gone_b),
-        a.norm(&gone_a),
+        a.norm(&want_b),
         "C1b: the uninstall's report ({at})"
     );
     bump(&counts.c1b_uninstalls);
@@ -1654,7 +1887,16 @@ fn c1b_install(job: Job, fixtures: &[Fixture], appinfo: &Path, counts: &Counts) 
             Ordering::Relaxed,
         );
     }
-    same_tree(&a, &b, &at);
+    let rel_root = root(&b)
+        .strip_prefix(b.tmp.path())
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/");
+    let extra: Vec<String> = kept_for_folder
+        .iter()
+        .map(|rel| format!("{rel_root}/{rel}"))
+        .collect();
+    same_tree_but(&a, &b, &extra, &at);
     if kind == Change::OlderAstra {
         for (rel, bytes) in &laid {
             assert_eq!(
@@ -1843,6 +2085,9 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
         ("game-mismatch", refusal("game-mismatch"), 9_000),
         ("anti-cheat", refusal("anti-cheat"), 6_000),
         ("foreign-loader", refusal("foreign-loader"), 700),
+        // tests/corpus/divergence.txt `foreign-dwmapi`, applied (fresh plans, plans from a
+        // ledger, and 0.3.1's ledgers).
+        ("row foreign-dwmapi", get(&c.c1b_row_dwmapi), 800),
     ];
     for (k, got, per_20k) in c1b_floors {
         let floor = (per_20k * trees as usize / 20_000).max(1);
@@ -1868,6 +2113,11 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
         get(&c.c1b_changed_replaced),
         get(&c.c1b_lookalikes_kept),
         get(&c.c1b_former_removed),
+    );
+    eprintln!(
+        "C1b's declared rows applied: foreign-dwmapi {}, proxy-folder-gained-files {}",
+        get(&c.c1b_row_dwmapi),
+        get(&c.c1b_row_proxy_folder)
     );
     assert_eq!(get(&c.c1b_replans), get(&c.c1b_installs));
     assert_eq!(get(&c.c1b_uninstalls), get(&c.c1b_installs));
@@ -1906,6 +2156,12 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
             13,
         ),
         ("look-alikes kept", get(&c.c1b_lookalikes_kept), 38),
+        // tests/corpus/divergence.txt `proxy-folder-gained-files`, applied.
+        (
+            "row proxy-folder-gained-files",
+            get(&c.c1b_row_proxy_folder),
+            9,
+        ),
     ];
     for (k, got, per_20k) in past_floors {
         let floor = (per_20k * trees as usize / 20_000).max(1);
@@ -1976,6 +2232,11 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
 /// planning at least once.
 #[test]
 fn c1b_every_manifest_plans_as_0_4_1_on_the_games_it_is_for() {
+    assert_eq!(
+        HIJACK,
+        astra_game_launcher::HIJACK_NAMES,
+        "the hijack names C1b's rows read are the launcher's (src/plan.rs HIJACK_NAMES)"
+    );
     let fixtures: Vec<Fixture> = MANIFESTS.iter().map(|(n, m)| fixture(n, m)).collect();
     let world = Tmp::new("c1b-appinfo");
     let appinfo = world.join("appinfo.vdf");
@@ -2069,10 +2330,12 @@ fn c1b_every_manifest_plans_as_0_4_1_on_the_games_it_is_for() {
                         profile: &profile.join("p"),
                         proton: true,
                     };
+                    let foreign = foreign_dwmapi(game, f);
                     let new = plan_new(&p, &f.zip);
                     let old = plan_legacy(&p, &f.zip);
                     assert_eq!(
-                        new, old,
+                        new,
+                        want_with_rows(&old, foreign.as_deref(), &counts),
                         "C1b: {} on shape {i} ({exe}), variant {variant}",
                         f.name
                     );
@@ -2130,6 +2393,18 @@ fn c1b_every_manifest_plans_as_0_4_1_on_the_games_it_is_for() {
             "C1b: no plan from a ledger holds {a} on the games the manifests are for"
         );
     }
+    // Both declared rows, applied on the games the manifests are for.
+    let rows = (
+        counts.c1b_row_dwmapi.load(Ordering::Relaxed),
+        counts.c1b_row_proxy_folder.load(Ordering::Relaxed),
+    );
+    eprintln!(
+        "C1b on its own games: rows applied (foreign-dwmapi, proxy-folder-gained-files) {rows:?}"
+    );
+    assert!(
+        rows.0 >= 1 && rows.1 >= 1,
+        "C1b: a declared row never applied: {rows:?}"
+    );
 }
 
 /// The generator is what C1 was proven on: the same seed, the same tree.

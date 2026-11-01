@@ -379,6 +379,13 @@ fn read_loader(v: &toml::Value) -> Result<LoaderDecl> {
         if !proxies.insert(name.to_ascii_lowercase()) {
             return Err(invalid(&key, "named twice (Windows ignores letter case)"));
         }
+        // A name every install keeps (`doorstop_config.ini`, `ReShade.ini`) is never one this
+        // install loads: planning keeps before it asks about loaders.
+        if crate::plan::keep_if_present(name) {
+            return Err(LauncherError::new(codes::LOADER_POLICY_CONFLICT)
+                .with("name", name.clone())
+                .with("reason", "proxy"));
+        }
     }
     let mut keeps = BTreeSet::new();
     for (i, name) in decl.keep_if_present.iter().enumerate() {
@@ -991,7 +998,9 @@ impl Manifest {
     /// In this order, every one found:
     ///
     /// 1. a community integration's identity (`reserved-id`, `reserved-name`;
-    ///    [`crate::reserved::check_identity`]) — Astra's own (`first_party`) are not asked;
+    ///    [`crate::reserved::check_identity`]), then what a community integration may not place
+    ///    or launch (`loader-undeclared`, `community-limit`; plan B §3, `crate::plan`'s
+    ///    `community_limits`) — Astra's own (`first_party`) are not asked;
     /// 2. `capability-undeclared` ([`Manifest::check_capabilities_used`]);
     /// 3. `[integration.link]`: its shape, Astra Link v1's counts, names (`^[a-z][a-z0-9_]{0,31}$`,
     ///    once each per list), description and label lengths, and relative file paths
@@ -1005,8 +1014,11 @@ impl Manifest {
     /// this on text.
     pub fn lint(&self, first_party: bool) -> Vec<LauncherError> {
         let mut out = Vec::new();
-        if !first_party && let Err(e) = crate::reserved::check_identity(&self.integration) {
-            out.push(e);
+        if !first_party {
+            if let Err(e) = crate::reserved::check_identity(&self.integration) {
+                out.push(e);
+            }
+            out.extend(crate::plan::community_limits(self));
         }
         if let Err(e) = self.check_capabilities_used() {
             out.push(e);

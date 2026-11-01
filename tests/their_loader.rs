@@ -352,15 +352,41 @@ fn a_ledger_from_before_the_baseline_keeps_the_proxy_beside_any_bepinex() {
 #[test]
 fn a_proxy_that_is_not_a_doorstop_is_never_kept_for_a_bepinex() {
     // `runner()` ships a proxy of another kind (think ReShade's dxgi.dll): no BepInEx runs
-    // through it, so a BepInEx beside it is no reason to leave it.
+    // through it, so a BepInEx beside it is no reason to leave it — as a BepInEx's. Since 0.5.0
+    // a folder that gained names since we added a hijack-named file keeps it for whatever loader
+    // came (merged plan R42; theirs may be our very bytes), with the reason; a ledger from before
+    // 0.5.0 has no such baseline, and the BepInEx rule alone decides, as it did.
     let w = World::new();
     plan_and_install(&runner(), &w.target(), &w.profile());
+    w.bepinex_folder();
+    let report = uninstall(&w.profile(), &w.target()).unwrap();
+    assert_eq!(report.kept, ["winhttp.dll"], "{report:?}");
+    assert_eq!(
+        report.kept_reasons.get("winhttp.dll").map(String::as_str),
+        Some(astra_game_launcher::KEPT_FOLDER_GAINED_FILES)
+    );
+    assert!(w.game.join("winhttp.dll").exists());
+
+    let w = World::new();
+    plan_and_install(&runner(), &w.target(), &w.profile());
+    let path = w.profile().join(astra_game_launcher::LEDGER_FILE_NAME);
+    let mut ledger: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(
+        ledger
+            .as_object_mut()
+            .unwrap()
+            .remove("proxy_folders")
+            .is_some()
+    );
+    fs::write(&path, serde_json::to_string(&ledger).unwrap()).unwrap();
     w.bepinex_folder();
     let report = uninstall(&w.profile(), &w.target()).unwrap();
     assert!(
         report.removed.iter().any(|r| r == "winhttp.dll"),
         "{report:?}"
     );
+    assert!(report.kept_reasons.is_empty());
     assert!(!w.game.join("winhttp.dll").exists());
 }
 

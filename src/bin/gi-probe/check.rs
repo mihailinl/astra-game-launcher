@@ -27,7 +27,20 @@
 //!    foundation is a notice;
 //! 6. `code_changed`: every placed file that is code ([`is_code`]), from `[[files]]` or
 //!    `[[game_files]]`, new or changed against the previous release (`--previous`) — A§4.2's rule
-//!    read the stricter way, game files included. A report: what the update sheet shows.
+//!    read the stricter way, game files included. A report: what the update sheet shows;
+//! 7. `loaders`: each `[[game_files]]` entry classified against the catalogue's `loaders[]`
+//!    allowlist (`--loaders LOADERS.json`, `[{name, sha256, default_enabled}]`; spec
+//!    `games-index-v1.md` §2.4) — `none` (no name a loader hijack-loads by: neither
+//!    [`HIJACK_NAMES`] nor the manifest's `[integration.loader] proxies`), `allowlisted` (such a
+//!    name whose digest the allowlist lists with `default_enabled` false), or `other` (a notice,
+//!    `loader-other`: the red sheet line and the red moderator line). Labels only (merged plan
+//!    §2.5): the allowlist never permits what the manifest does not declare, and an undeclared
+//!    loader is step 2's `loader-undeclared` (K18).
+//!
+//! Step 2 holds a community release to what a community integration may place and launch
+//! ([`Manifest::lint`]: `loader-undeclared`, `community-limit` for a `[[game_files]]` folder, `[launch]
+//! env`, overrides and path arguments); the limit that needs a game folder (the program a walked
+//! one) is planning's alone.
 //!
 //! Exit 0: no findings; 1: findings. `--provenance` defaults to `community`.
 
@@ -36,7 +49,8 @@ use std::io::{Cursor, Read as _};
 use std::path::{Path, PathBuf};
 
 use astra_game_launcher::{
-    GiPackage, LauncherError, Limits, MANIFEST_FILE, Manifest, PlacedFile, codes, link_limits,
+    GiPackage, HIJACK_NAMES, LauncherError, Limits, MANIFEST_FILE, Manifest, PlacedFile, codes,
+    is_hijack_name, link_limits,
 };
 use serde_json::{Value, json};
 use zip::ZipArchive;
@@ -45,13 +59,14 @@ use crate::compat::sha256_hex;
 use crate::descriptor::{negative_folders, summary};
 use crate::{Fatal, Finding, Probe, report};
 
-const STEPS: [&str; 6] = [
+const STEPS: [&str; 7] = [
     "the launcher opens the zip and parses its manifest",
-    "identity, capabilities, Astra Link's limits, the foundation claim and the engine descriptor",
+    "identity, capabilities, what a community release may place and launch, Astra Link's limits, the foundation claim and the engine descriptor",
     "every file [integration.link] names is in the zip, within its size",
     "the engine descriptor claims none of the spec's negative folders",
     "built on the foundation: every file it places, placed alike",
     "code changed since the previous release",
+    "the loader each game file is: none, allowlisted or other",
 ];
 
 /// What a file holding code ends in: A§4.2's `.dll .so .dylib .jar .lua .py .js .exe`, and what
@@ -72,6 +87,34 @@ pub struct CheckArgs {
     pub first_party: bool,
     pub foundation: Option<PathBuf>,
     pub previous: Option<PathBuf>,
+    /// The catalogue's `loaders[]` (`games-index-v1.md` §2.4), as a JSON array.
+    pub loaders: Option<PathBuf>,
+}
+
+/// One `loaders[]` entry: a known loader build, by digest.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AllowedLoader {
+    name: String,
+    sha256: String,
+    default_enabled: bool,
+}
+
+/// `--loaders`: a JSON array of `{name, sha256, default_enabled}`; anything else is a wrong input
+/// (exit 2), never an empty allowlist.
+fn read_loaders(path: &Path) -> Result<Vec<AllowedLoader>, Fatal> {
+    let bytes = read(path)?;
+    let list: Vec<AllowedLoader> =
+        serde_json::from_slice(&bytes).map_err(|e| Fatal::io(path, format!("loaders[]: {e}")))?;
+    for l in &list {
+        if l.sha256.len() != 64 || !l.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Fatal::io(
+                path,
+                format!("loaders[] {:?}: sha256 is not 64 hex digits", l.name),
+            ));
+        }
+    }
+    Ok(list)
 }
 
 fn read(path: &Path) -> Result<Vec<u8>, Fatal> {
@@ -363,6 +406,80 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
         }
     }
 
+    // 7. Loaders.
+    let allowlist = a.loaders.as_deref().map(read_loaders).transpose()?;
+    let mut loaders = Value::Null;
+    match &manifest {
+        None => p.skip(7, "the manifest does not parse"),
+        Some(m) => {
+            let (f0, n0) = (p.findings.len(), p.notices.len());
+            // Each game file and the digest it is known by: the zip's, else the manifest's pin.
+            let files: Vec<(String, Option<String>)> = match &pkg {
+                Some(pkg) => pkg
+                    .placed_files()
+                    .into_iter()
+                    .filter(|f| f.dest.starts_with("${game}/"))
+                    .map(|f| (f.dest, Some(f.sha256)))
+                    .collect(),
+                None => m
+                    .game_files
+                    .iter()
+                    .map(|g| {
+                        (
+                            g.to.clone(),
+                            g.sha256.as_ref().map(|h| h.to_ascii_lowercase()),
+                        )
+                    })
+                    .collect(),
+            };
+            let declared = |name: &str| {
+                m.loader()
+                    .is_some_and(|l| l.proxies.iter().any(|p| p.eq_ignore_ascii_case(name)))
+            };
+            let mut rows = Vec::new();
+            for (dest, sha256) in files {
+                let name = dest.rsplit('/').next().unwrap_or(&dest).to_owned();
+                let listed = allowlist.iter().flatten().find(|l| {
+                    sha256
+                        .as_deref()
+                        .is_some_and(|h| l.sha256.eq_ignore_ascii_case(h))
+                });
+                let class = if !is_hijack_name(&name) && !declared(&name) {
+                    "none"
+                } else if listed.is_some_and(|l| !l.default_enabled) {
+                    "allowlisted"
+                } else {
+                    "other"
+                };
+                if class == "other" {
+                    p.notice(
+                        7,
+                        Finding::new(
+                            "loader-other",
+                            format!(
+                                "{dest} is a name mod loaders hijack-load by, and no loader the allowlist knows as off by default: it runs every time the game starts, even without Astra"
+                            ),
+                        )
+                        .field(dest.clone()),
+                    );
+                }
+                rows.push(json!({
+                    "dest": dest,
+                    "sha256": sha256,
+                    "class": class,
+                    "allowlisted_as": listed.filter(|_| class == "allowlisted").map(|l| l.name.clone()),
+                }));
+            }
+            loaders = json!({
+                "allowlist": a.loaders.as_ref().map(|p| p.display().to_string()),
+                "allowlist_entries": allowlist.as_ref().map(Vec::len),
+                "hijack_names": HIJACK_NAMES,
+                "files": rows,
+            });
+            p.close(7, f0, n0, Value::Null);
+        }
+    }
+
     let integration = manifest.as_ref().map_or(Value::Null, |m| {
         json!({
             "id": m.integration.id,
@@ -382,6 +499,7 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
             "provenance": if a.first_party { "first-party" } else { "community" },
             "foundation": a.foundation.as_ref().map(|p| p.display().to_string()),
             "previous": a.previous.as_ref().map(|p| p.display().to_string()),
+            "loaders": a.loaders.as_ref().map(|p| p.display().to_string()),
         },
         "spec": {
             "repo": "mihailinl/AstraPlugins",
@@ -394,6 +512,7 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
         "link": link,
         "built_on": built_on,
         "code_changed": code_changed,
+        "loaders": loaders,
         "steps": p.steps,
         "notices": p.notices,
     });

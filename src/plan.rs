@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::detect::{anti_cheat_scan, engine_of_exe_with};
+use crate::detect::{anti_cheat_scan, engine_of_exe_with, is_walked_program};
 use crate::digest::sha256_hex;
 use crate::doorstop;
 use crate::engines::{Descriptor, EngineCode, EngineSet, Moderation, Origin};
@@ -17,8 +17,8 @@ use crate::error::{LauncherError, Result, codes};
 use crate::former::{self, FormerKind};
 use crate::game::{GameTarget, Platform};
 use crate::game::{several_apps, steam_appids_of_dir};
-use crate::ledger::{self, Ledger, LoaderBaseline};
-use crate::manifest::{IntegrationInfo, Manifest};
+use crate::ledger::{self, Ledger, LoaderBaseline, ProxyFolder};
+use crate::manifest::{IntegrationInfo, LoaderDecl, Manifest};
 use crate::package::{GiPackage, PackFile};
 use crate::paths::{
     FileState, absolute, canonical_dir, checked_rel, existing_target, file_state, find_any_case,
@@ -117,7 +117,9 @@ pub struct InstallPlan {
     pub former_files: Vec<FormerFile>,
     /// Codes: "experimental", "not-reviewed", "replaces-integration", "no-license",
     /// "vac-unchecked" (the same fact as `vac_checked == false`, for a sheet that lists codes),
-    /// "former-astra-files" (`former_files` is not empty).
+    /// "former-astra-files" (`former_files` is not empty), "foreign-loader-in-backup" (a
+    /// `replace` of a loader's file the current install already made, kept: the player's loader
+    /// is in Astra's backup, and comes back at uninstall).
     pub warnings: Vec<String>,
     /// Steam's Valve Anti-Cheat flag was READ for this app and is clear. `false`: no TRUSTED Steam
     /// appid (the caller's, or the one the folder's appmanifest proves; never the integration
@@ -144,7 +146,9 @@ pub struct InstallPlan {
 /// **First-party** is an integration whose `[integration] id` AND repository are both in
 /// Astra's compiled seed of its own integrations; every other one — from the catalogue,
 /// moderated or not, or a developer's local folder — is **community**. Recorded in the plan and
-/// the ledger; the community limits come with launcher 0.5.0's L3 step 5.
+/// the ledger. A community plan has no `replace` arm (`foreign-file`), keeps to the community
+/// limits on `[[game_files]]` and `[launch]`, and plans only on a program the built-in walk lists
+/// (`community-limit{rule=exe-not-a-program}`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Provenance {
@@ -217,14 +221,235 @@ pub(crate) struct Planning<'a> {
     pub(crate) engine_pick: Option<&'a EngineCode>,
 }
 
-/// Names a mod loader's proxy DLL goes by. A foreign one is another loader: never replaced. It is
-/// shared when it can do our proxy's job ([`GameAction::ShareLoader`]), and refused otherwise.
+/// Names a Doorstop proxy of ours goes by that Play, uninstall and the loader baselines treat as
+/// one another mod manager may share: relinked by it, kept for its BepInEx
+/// ([`kept_for_their_loader`]), measured at install ([`loader_baselines`]). Planning reads the
+/// wider [`HIJACK_NAMES`]; this set is what every launcher since 0.1.0 has had, and it does not
+/// change.
 const LOADER_PROXIES: &[&str] = &["winhttp.dll", "version.dll", "dxgi.dll", "d3d11.dll"];
 
-/// Whether the file at `rel` (`/`-separated) goes by a loader proxy's name, in any letter case.
+/// Whether the file at `rel` (`/`-separated) goes by a [`LOADER_PROXIES`] name, in any letter
+/// case.
 pub(crate) fn is_loader_proxy(rel: &str) -> bool {
     let name = rel.rsplit('/').next().unwrap_or(rel);
     LOADER_PROXIES.iter().any(|p| p.eq_ignore_ascii_case(name))
+}
+
+/// The DLL names a mod loader hijack-loads by: Windows (and Wine, with a `native` override) looks
+/// for each in the game program's own folder before the system's, so a file by one of them there
+/// runs in every start of the game, through Astra or not. Planning never replaces such a file it
+/// did not place, for any game and any integration: it is shared where a Doorstop of ours can run
+/// through it ([`GameAction::ShareLoader`], [`doorstop::stands_in`]), and `foreign-loader`
+/// otherwise. A manifest's `[integration.loader] proxies` add to it for that install only.
+/// Matched by the last path component, in any letter case.
+///
+/// The one list; each name's source:
+/// - merged plan §2.5 / plan A §4.5 "Loaders (M1)": `winhttp`, `version`, `dwmapi`, `dxgi`,
+///   `d3d11`, `dinput8`, and `xinput*` — `xinput1_1` … `xinput1_4`, `xinput9_1_0` and
+///   `xinputuap`, the XInput names the ASI loader below takes;
+/// - [`doorstop::PROXY_NAMES`], the names a Doorstop build goes by: the above, and `winmm`;
+/// - the system-DLL names Ultimate ASI Loader may be renamed to (ThirteenAG/Ultimate-ASI-Loader
+///   `readme.md`, read 2026-10-31, its x86 and x64 lists): `dinput`, `dsound`, `d3d8`, `d3d9`,
+///   `d3d10`, `d3d12`, `ddraw`, `msacm32`, `msvfw32`, `wininet`, `xlive`. Its game-library names
+///   (`binkw32`, `binkw64`, `bink2w32`, `bink2w64`, `vorbisFile`) are a game's own files, not
+///   hijacks of a system DLL: they are not here;
+/// - ReShade's OpenGL proxy, `opengl32` (its setup's choice for an OpenGL game).
+///
+/// A unit test below holds [`LOADER_PROXIES`] and [`doorstop::PROXY_NAMES`] inside it, and
+/// [`KEEP_IF_PRESENT`] outside.
+pub const HIJACK_NAMES: &[&str] = &[
+    // Plan A §4.5.
+    "winhttp.dll",
+    "version.dll",
+    "dwmapi.dll",
+    "dxgi.dll",
+    "d3d11.dll",
+    "dinput8.dll",
+    "xinput1_1.dll",
+    "xinput1_2.dll",
+    "xinput1_3.dll",
+    "xinput1_4.dll",
+    "xinput9_1_0.dll",
+    "xinputuap.dll",
+    // doorstop::PROXY_NAMES (the rest of it is above).
+    "winmm.dll",
+    // Ultimate ASI Loader's system-DLL names.
+    "dinput.dll",
+    "dsound.dll",
+    "d3d8.dll",
+    "d3d9.dll",
+    "d3d10.dll",
+    "d3d12.dll",
+    "ddraw.dll",
+    "msacm32.dll",
+    "msvfw32.dll",
+    "wininet.dll",
+    "xlive.dll",
+    // ReShade for OpenGL.
+    "opengl32.dll",
+];
+
+/// Whether the file at `rel` (`/`-separated) goes by a [`HIJACK_NAMES`] name, in any letter case.
+pub fn is_hijack_name(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    HIJACK_NAMES.iter().any(|p| p.eq_ignore_ascii_case(name))
+}
+
+/// What planning reads a game file's name against, for one install: the compiled lists and the
+/// manifest's own `[integration.loader]` (merged plan §2.5: the manifest decides, the catalogue's
+/// `loaders[]` only labels). The two are disjoint: [`crate::Manifest::parse`] refuses a manifest
+/// that keeps a name it loads, or loads a name the compiled list keeps
+/// (`loader-policy-conflict{reason=proxy}`), and no compiled keep name is a hijack name.
+pub(crate) struct LoaderPolicy<'m> {
+    decl: Option<&'m LoaderDecl>,
+}
+
+impl<'m> LoaderPolicy<'m> {
+    pub(crate) fn of(m: &'m Manifest) -> LoaderPolicy<'m> {
+        LoaderPolicy { decl: m.loader() }
+    }
+
+    fn leaf(rel: &str) -> &str {
+        rel.rsplit('/').next().unwrap_or(rel)
+    }
+
+    /// The name is one the manifest declares in `proxies`.
+    pub(crate) fn declared(&self, rel: &str) -> bool {
+        let name = Self::leaf(rel);
+        self.decl
+            .is_some_and(|l| l.proxies.iter().any(|p| p.eq_ignore_ascii_case(name)))
+    }
+
+    /// A hijack-loaded name for this install: [`HIJACK_NAMES`] or the manifest's `proxies`.
+    pub(crate) fn hijack(&self, rel: &str) -> bool {
+        is_hijack_name(rel) || self.declared(rel)
+    }
+
+    /// A name left alone when present and not ours, for this install: [`KEEP_IF_PRESENT`] or the
+    /// manifest's `keep_if_present`.
+    pub(crate) fn keep(&self, rel: &str) -> bool {
+        let name = Self::leaf(rel);
+        keep_if_present(rel)
+            || self.decl.is_some_and(|l| {
+                l.keep_if_present
+                    .iter()
+                    .any(|k| k.eq_ignore_ascii_case(name))
+            })
+    }
+}
+
+/// Folders another mod loader owns beside a game, by name, in any letter case: a community
+/// integration places no game file below one (plan B §3, "Plant code in another loader's
+/// folder").
+const OTHER_LOADERS_FOLDERS: &[&str] = &["BepInEx", "MelonLoader", "ue4ss", "Mods", "~mods"];
+
+/// The rule a `community-limit` names (its `rule` param).
+mod limit {
+    /// A game file goes neither directly beside the program nor below a folder named after the
+    /// integration's id, or below a folder of another loader's.
+    pub(super) const GAME_FILE_FOLDER: &str = "game-file-folder";
+    /// The planned program is not one the built-in walk lists as a program.
+    pub(super) const EXE_NOT_A_PROGRAM: &str = "exe-not-a-program";
+    /// `[launch] env`: refused.
+    pub(super) const LAUNCH_ENV: &str = "launch-env";
+    /// A Proton DLL override for a DLL the integration does not place, or with a value other than
+    /// `native,builtin` / `n,b`.
+    pub(super) const LAUNCH_OVERRIDE: &str = "launch-override";
+    /// A launch argument that is (or holds) a path not under `${profile}/` or `${game}/`.
+    pub(super) const LAUNCH_ARG_PATH: &str = "launch-arg-path";
+}
+
+fn community_limit(rule: &str) -> LauncherError {
+    LauncherError::new(codes::COMMUNITY_LIMIT).with("rule", rule)
+}
+
+/// The override values a community integration may ask Proton for.
+const COMMUNITY_OVERRIDE_VALUES: &[&str] = &["native,builtin", "n,b"];
+
+/// Whether a launch argument of a community integration stays under the profile or the game:
+/// one holding `/`, `\` or a placeholder starts with `${profile}/` or `${game}/`, and what
+/// follows is a relative path — no `..`, no other placeholder. Any other argument is a word, and
+/// passes.
+fn arg_stays_inside(arg: &str) -> bool {
+    if !arg.contains(['/', '\\']) && !arg.contains("${") {
+        return true;
+    }
+    let Some(rest) = ["${profile}/", "${game}/"]
+        .iter()
+        .find_map(|p| arg.strip_prefix(p))
+    else {
+        return false;
+    };
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    rest.is_empty() || (!rest.contains("${") && crate::paths::relative_components(rest).is_some())
+}
+
+/// What a community integration's manifest may not do, said by the manifest alone (plan B §3; no
+/// game folder needed), every one found, in this order:
+///
+/// 1. per `[[game_files]]` entry: `loader-undeclared{file}` for a [`HIJACK_NAMES`] name its
+///    `[integration.loader] proxies` do not declare (merged plan §2.5, K18), and
+///    `community-limit{rule=game-file-folder, file}` unless it goes directly beside the program
+///    (`${game}/<name>`) or below a folder named after the integration's id
+///    (`${game}/<id>/…`), with no folder of another loader's ([`OTHER_LOADERS_FOLDERS`]) on its
+///    way;
+/// 2. `community-limit{rule=launch-env}` for any `[launch] env`;
+/// 3. `community-limit{rule=launch-override, field}` for a Proton override of a DLL its own
+///    `[[game_files]]` do not place, or with a value other than `native,builtin` / `n,b`;
+/// 4. `community-limit{rule=launch-arg-path, field}` for an argument holding a path that is not
+///    under `${profile}/` or `${game}/` ([`arg_stays_inside`]).
+///
+/// [`plan_install_in`] refuses a community plan with the first; [`crate::Manifest::lint`]
+/// reports them all (`gi-probe check`). Astra's own integrations are not asked.
+pub(crate) fn community_limits(m: &Manifest) -> Vec<LauncherError> {
+    let policy = LoaderPolicy::of(m);
+    let mut out = Vec::new();
+    let dests: Vec<Vec<String>> = (0..m.game_files.len())
+        .map(|n| m.game_file_dest(n).rel)
+        .collect();
+    for rel in &dests {
+        let file = rel.join("/");
+        if is_hijack_name(&file) && !policy.declared(&file) {
+            out.push(LauncherError::new(codes::LOADER_UNDECLARED).with("file", file.clone()));
+        }
+        let beside = rel.len() == 1 || rel[0].eq_ignore_ascii_case(&m.integration.id);
+        let theirs = rel.iter().any(|c| {
+            OTHER_LOADERS_FOLDERS
+                .iter()
+                .any(|f| f.eq_ignore_ascii_case(c))
+        });
+        if !beside || theirs {
+            out.push(community_limit(limit::GAME_FILE_FOLDER).with("file", file));
+        }
+    }
+    if let Some(k) = m.launch.env.keys().next() {
+        out.push(community_limit(limit::LAUNCH_ENV).with("field", format!("launch.env.{k}")));
+    }
+    for (dll, value) in &m.launch.proton_dll_overrides {
+        // Wine names a DLL by its stem (`dwmapi`) or its file name (`dwmapi.dll`).
+        let dll_lower = dll.to_ascii_lowercase();
+        let placed = dests.iter().any(|rel| {
+            let name = rel
+                .last()
+                .map(|n| n.to_ascii_lowercase())
+                .unwrap_or_default();
+            name == dll_lower || name == format!("{dll_lower}.dll")
+        });
+        if !placed || !COMMUNITY_OVERRIDE_VALUES.contains(&value.as_str()) {
+            out.push(
+                community_limit(limit::LAUNCH_OVERRIDE)
+                    .with("field", format!("launch.proton_dll_overrides.{dll}")),
+            );
+        }
+    }
+    for (i, a) in m.launch.args.iter().enumerate() {
+        if !arg_stays_inside(a) {
+            out.push(
+                community_limit(limit::LAUNCH_ARG_PATH).with("field", format!("launch.args[{i}]")),
+            );
+        }
+    }
+    out
 }
 
 /// Files that, when present and not ours, are left alone. Matched case-insensitively: Wine and
@@ -334,17 +559,30 @@ pub fn vac_verdict(
 /// added Doorstop someone else's loader now runs through is no exception here: replacing the
 /// integration removes it and places the new one's (`uninstall_ledger`'s `readd`), so it stays
 /// ours (`add`) for the uninstall that may one day find nobody else needs it.
-fn state_before(path: &Path, rel: &str, existing: Option<&Ledger>) -> Result<FileState> {
+///
+/// Also whether the file that state names is one a ledger holds in its backup: the current
+/// ledger's `replace` with ours still in place (the state is the backup's), or — in install's
+/// look once `replaced` is undone — the file the uninstall just put back from `replaced`'s
+/// backup. Step 10a keeps such a `replace` of a foreign loader for Astra's own integrations.
+fn state_before(
+    path: &Path,
+    rel: &str,
+    existing: Option<&Ledger>,
+    replaced: Option<&Ledger>,
+) -> Result<(FileState, bool)> {
     let actual = file_state(path)?;
-    if let (Some(l), FileState::File { sha256 }) = (existing, &actual)
-        && let Some(e) = l
-            .game_files
+    let recorded = |l: &Ledger| {
+        l.game_files
             .iter()
             .find(|g| g.rel.eq_ignore_ascii_case(rel))
+            .cloned()
+    };
+    if let (Some(l), FileState::File { sha256 }) = (existing, &actual)
+        && let Some(e) = recorded(l)
         && *sha256 == e.sha256
     {
         match e.action {
-            GameAction::Add => return Ok(FileState::Absent),
+            GameAction::Add => return Ok((FileState::Absent, false)),
             GameAction::Replace => {
                 if let Some(b) = &e.backup {
                     // A backup an uninstall never puts back: a file an older Astra left there
@@ -354,17 +592,26 @@ fn state_before(path: &Path, rel: &str, existing: Option<&Ledger>) -> Result<Fil
                         .parent()
                         .is_some_and(|d| former::former_kind(d, name, &b.sha256).is_some())
                     {
-                        return Ok(FileState::Absent);
+                        return Ok((FileState::Absent, false));
                     }
-                    return Ok(FileState::File {
-                        sha256: b.sha256.clone(),
-                    });
+                    return Ok((
+                        FileState::File {
+                            sha256: b.sha256.clone(),
+                        },
+                        true,
+                    ));
                 }
             }
             GameAction::ReuseKnownProxy | GameAction::KeepExisting | GameAction::ShareLoader => {}
         }
     }
-    Ok(actual)
+    let put_back = match (replaced, &actual) {
+        (Some(old), FileState::File { sha256 }) => recorded(old).is_some_and(|e| {
+            e.action == GameAction::Replace && e.backup.is_some_and(|b| b.sha256 == *sha256)
+        }),
+        _ => false,
+    };
+    Ok((actual, put_back))
 }
 
 /// The digest of the foreign loader proxy at `path` when our launch can run through it instead
@@ -551,6 +798,125 @@ pub(crate) fn kept_for_their_loader(
         .any(|n| !placed_by(ledger, &dir, n) && !before(n)))
 }
 
+/// How many names of a proxy's folder a [`ProxyFolder`] holds. Past that it is `capped`, holds
+/// none, and the uninstall keeps the proxy whatever the folder holds then.
+pub(crate) const PROXY_FOLDER_NAMES: usize = 5_000;
+
+/// Whether `ledger` places `name` in the folder `dir` (below the exe's folder): one of its game
+/// files is that name there, or lies below it. `added`: only what it added (what undoing it
+/// takes away).
+fn places(ledger: &Ledger, dir: &[String], name: &str, added: bool) -> bool {
+    ledger
+        .game_files
+        .iter()
+        .filter(|g| !added || g.action == GameAction::Add)
+        .any(|g| {
+            let comps: Vec<&str> = g.rel.split('/').collect();
+            comps.len() > dir.len()
+                && comps
+                    .iter()
+                    .zip(dir)
+                    .all(|(a, b)| a.eq_ignore_ascii_case(b))
+                && comps[dir.len()].eq_ignore_ascii_case(name)
+        })
+}
+
+/// What sits beside each hijack-named file `planned` adds (plan B §3, "Uninstall deletes their
+/// identical loader"; merged plan R42): the [`ProxyFolder`] the ledger keeps, so the uninstall
+/// can tell a folder that gained someone else's files since. A proxy the replaced integration
+/// (`old`) had added already keeps that install's baseline, carried unchanged, so that what
+/// arrived since stays someone else's (as [`loader_baselines`] carries its own). A proxy added
+/// now for the first time is measured now, before `old` is undone: the folder's names that are
+/// not `old`'s additions, at most [`PROXY_FOLDER_NAMES`].
+pub(crate) fn proxy_folders(
+    game_root: &Path,
+    planned: &[GameFileAction],
+    m: &Manifest,
+    old: Option<&Ledger>,
+) -> Result<Vec<ProxyFolder>> {
+    let policy = LoaderPolicy::of(m);
+    let mut out = Vec::new();
+    for a in planned
+        .iter()
+        .filter(|a| a.action == GameAction::Add && policy.hijack(&a.rel_path))
+    {
+        if let Some(old) = old
+            && old
+                .game_files
+                .iter()
+                .any(|g| g.rel.eq_ignore_ascii_case(&a.rel_path) && g.action == GameAction::Add)
+            && let Some(carried) = old
+                .proxy_folders
+                .iter()
+                .find(|b| b.proxy.eq_ignore_ascii_case(&a.rel_path))
+        {
+            out.push(carried.clone());
+            continue;
+        }
+        let (dir, dir_path) = folder_of(game_root, &a.rel_path)?;
+        let mut names = Vec::new();
+        let mut capped = false;
+        match std::fs::read_dir(&dir_path) {
+            Ok(entries) => {
+                for e in entries {
+                    let e = e.map_err(|e| LauncherError::io_at(&e, &dir_path))?;
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    if old.is_some_and(|l| places(l, &dir, &name, true)) {
+                        continue;
+                    }
+                    if names.len() == PROXY_FOLDER_NAMES {
+                        capped = true;
+                        names.clear();
+                        break;
+                    }
+                    names.push(name);
+                }
+            }
+            // A folder the install creates for it: nothing was there.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(LauncherError::io_at(&e, &dir_path)),
+        }
+        names.sort();
+        out.push(ProxyFolder {
+            proxy: a.rel_path.clone(),
+            names,
+            capped,
+        });
+    }
+    Ok(out)
+}
+
+/// Whether the folder of `rel`, a hijack-named file `ledger`'s install added, holds a name now
+/// that its [`ProxyFolder`] does not and `ledger` does not place, or its baseline is `capped`:
+/// someone else's loader may run through our proxy now (theirs is byte for byte ours: UE4SS's
+/// `dwmapi.dll`, a hand-made BepInEx's `winhttp.dll`), so the uninstall leaves it. The
+/// trade-off, as R42 binds it: a game update that adds a file there keeps the proxy too, and the
+/// uninstall says why (`kept_reasons`). No baseline (a ledger from before 0.5.0): never.
+pub(crate) fn proxy_folder_gained(game_root: &Path, rel: &str, ledger: &Ledger) -> Result<bool> {
+    let Some(b) = ledger
+        .proxy_folders
+        .iter()
+        .find(|b| b.proxy.eq_ignore_ascii_case(rel))
+    else {
+        return Ok(false);
+    };
+    if b.capped {
+        return Ok(true);
+    }
+    let (dir, dir_path) = folder_of(game_root, rel)?;
+    let entries = std::fs::read_dir(&dir_path).map_err(|e| LauncherError::io_at(&e, &dir_path))?;
+    for e in entries {
+        let e = e.map_err(|e| LauncherError::io_at(&e, &dir_path))?;
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !b.names.iter().any(|n| n.eq_ignore_ascii_case(&name))
+            && !places(ledger, &dir, &name, false)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Another Doorstop in `dir_path`, under another proxy name than `ours` (their BepInEx as
 /// `version.dll` or `winmm.dll`), judged by its bytes; links followed, as Windows follows them.
 fn other_doorstop(dir_path: &Path, ours: &str) -> Option<String> {
@@ -725,19 +1091,22 @@ pub fn plan_install_in(
         provenance,
         engine_pick,
     };
-    plan_install_with(pkg, game, profile_root, how, true)
+    plan_install_with(pkg, game, profile_root, how, None)
 }
 
-/// [`plan_install_in`]; without `loader_checks`, the refusals about a mod loader of the person's
-/// beside the game are not made again — for install's look at the game folder once the
-/// integration it replaces is undone, which removes our own proxy for a moment.
+/// [`plan_install_in`]; with `after` (the ledger install has just undone), install's look at the
+/// game folder once the integration it replaces is undone: the refusals about a mod loader of
+/// the person's beside the game are not made again (undoing it removes our own proxy for a
+/// moment), and a file the undoing put back from `after`'s backup is still the one held there
+/// (step 10a).
 pub(crate) fn plan_install_with(
     pkg: &GiPackage,
     game: &GameTarget,
     profile_root: &Path,
     how: Planning,
-    loader_checks: bool,
+    after: Option<&Ledger>,
 ) -> Result<InstallPlan> {
+    let loader_checks = after.is_none();
     let m = pkg.manifest();
     if m.target.anti_cheat != "none" {
         return Err(LauncherError::new(codes::ANTI_CHEAT).with("kind", m.target.anti_cheat.clone()));
@@ -776,6 +1145,27 @@ pub(crate) fn plan_install_with(
     // only add a refusal. No trusted appid is UNCHECKED, never clear.
     let vac = vac_check(game, trusted, m.target.steam_appid)?;
     let engine_descriptor = engine_check(m, how, game, trusted, &game_dir, &exe)?;
+    // What a community integration may not do (plan B §3). After the engine check, so a game
+    // made with another engine is told so first.
+    if how.provenance == Provenance::Community {
+        crate::reserved::check_identity(&m.integration)?;
+        if let Some(e) = community_limits(m).into_iter().next() {
+            return Err(e);
+        }
+        // The program its files go beside: one Pass B took for the descriptor that named the
+        // engine (by that descriptor's own tests), else one the built-in walk or Steam's launch
+        // entry gives — and never inside another loader's folder.
+        let theirs = exe.iter().any(|c| {
+            OTHER_LOADERS_FOLDERS
+                .iter()
+                .any(|f| f.eq_ignore_ascii_case(c))
+        });
+        let program = engine_descriptor.is_some()
+            || is_walked_program(&game_dir, &exe, planning_hint(game, trusted).as_deref())?;
+        if theirs || !program {
+            return Err(community_limit(limit::EXE_NOT_A_PROGRAM).with("exe", exe_rel.clone()));
+        }
+    }
 
     let profile_dir = absolute(profile_root)?;
     let profile_resolved = resolve_lenient(&profile_dir)?;
@@ -791,14 +1181,18 @@ pub(crate) fn plan_install_with(
     };
 
     let exe_path = game_root.join(game.exe_file_name()?);
+    let policy = LoaderPolicy::of(m);
+    let community = how.provenance == Provenance::Community;
+    // A foreign loader a ledger of Astra's own holds in its backup, kept as `replace` (10a).
+    let mut loader_in_backup = false;
     let mut game_files = Vec::new();
     for f in &pkg.game_files {
         let real = real_case(&game_root, &f.rel)?;
         let rel = real.join("/");
         let path = existing_target(&game_root, &real)?;
-        let state = match &path {
-            Some(path) => state_before(path, &rel, existing.as_ref())?,
-            None => FileState::Absent,
+        let (state, in_backup) = match &path {
+            Some(path) => state_before(path, &rel, existing.as_ref(), after)?,
+            None => (FileState::Absent, false),
         };
         let name = f
             .rel
@@ -821,14 +1215,23 @@ pub(crate) fn plan_install_with(
             }
             _ => None,
         };
+        // In this order: an older Astra's file first, then ours, then a name this install keeps,
+        // then a loader's name, then anything else.
         let (action, existing_sha256) = match state {
             FileState::Absent => (GameAction::Add, None),
             FileState::File { sha256 } if former.is_some() => (GameAction::Add, Some(sha256)),
             FileState::File { sha256 } if sha256 == f.sha256 => (GameAction::ReuseKnownProxy, None),
-            FileState::File { sha256 } if keep_if_present(&name) => {
+            FileState::File { sha256 } if policy.keep(&name) => {
                 (GameAction::KeepExisting, Some(sha256))
             }
-            FileState::File { .. } if is_loader_proxy(&name) => {
+            // A foreign loader in the backup of a `replace` an earlier launcher made (a UE4SS
+            // `dwmapi.dll` before step 10a): ours stays its stand-in, and the uninstall puts theirs
+            // back. Never for a community integration, which has no `replace` arm at all.
+            FileState::File { sha256 } if policy.hijack(&name) && in_backup && !community => {
+                loader_in_backup = true;
+                (GameAction::Replace, Some(sha256))
+            }
+            FileState::File { .. } if policy.hijack(&name) => {
                 let shared = match &path {
                     Some(path) => shared_loader(pkg, f, path, &exe_path)?,
                     None => None,
@@ -839,6 +1242,10 @@ pub(crate) fn plan_install_with(
                         return Err(LauncherError::new(codes::FOREIGN_LOADER).with("file", rel));
                     }
                 }
+            }
+            // A player's file: a community integration never replaces one (plan B §3).
+            FileState::File { .. } if community => {
+                return Err(LauncherError::new(codes::FOREIGN_FILE).with("file", rel));
             }
             FileState::File { sha256 } => (GameAction::Replace, Some(sha256)),
         };
@@ -900,6 +1307,9 @@ pub(crate) fn plan_install_with(
     }
     if !former_files.is_empty() {
         warnings.push("former-astra-files".to_owned());
+    }
+    if loader_in_backup {
+        warnings.push(codes::FOREIGN_LOADER_IN_BACKUP.to_owned());
     }
 
     Ok(InstallPlan {
@@ -997,4 +1407,58 @@ fn planning_hint(game: &GameTarget, trusted: Option<u32>) -> Option<String> {
     appinfo_files(game)
         .iter()
         .find_map(|p| launch_executable(p, appid, os))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The one list holds the Doorstop-sharing names and every name a Doorstop goes by, and no
+    /// name every install keeps: so `keep` (which planning asks first) never shadows a loader.
+    #[test]
+    fn hijack_names_hold_the_doorstop_names_and_no_keep_name() {
+        for n in LOADER_PROXIES.iter().chain(doorstop::PROXY_NAMES) {
+            assert!(is_hijack_name(n), "{n}");
+        }
+        for k in KEEP_IF_PRESENT {
+            assert!(!is_hijack_name(k), "{k}");
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for n in HIJACK_NAMES {
+            assert!(seen.insert(n.to_ascii_lowercase()), "{n} twice");
+            assert!(n.ends_with(".dll") && *n == n.to_ascii_lowercase(), "{n}");
+        }
+        assert!(is_hijack_name("Some/Folder/DWMAPI.DLL"));
+        assert!(!is_hijack_name("dwmapi.dll.bak"));
+    }
+
+    #[test]
+    fn a_path_argument_stays_under_the_profile_or_the_game() {
+        for ok in [
+            "-windowed",
+            "--doorstop-enabled",
+            "true",
+            "${profile}/BepInEx/core/BepInEx.Preloader.dll",
+            "${game}/someone.example/",
+            "${game}/",
+            "${profile}/a b/c.ini",
+        ] {
+            assert!(arg_stays_inside(ok), "{ok}");
+        }
+        for refused in [
+            "/etc/passwd",
+            "C:\\Windows\\x.dll",
+            "..\\x",
+            "${game}",
+            "${game}/../x",
+            "${profile}/a/../../x",
+            "${profile}/${bridge_token}",
+            "${bridge_token}",
+            "-x=${profile}/a",
+            "${game}//x",
+            "https://example.com/x",
+        ] {
+            assert!(!arg_stays_inside(refused), "{refused}");
+        }
+    }
 }

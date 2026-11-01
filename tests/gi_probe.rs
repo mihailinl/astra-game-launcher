@@ -1879,8 +1879,12 @@ fn check_passes_a_well_formed_community_release_and_says_what_it_did_not_check()
     assert_eq!(r["link"]["schemas_validated"], false);
     assert_eq!(
         statuses(&r),
-        ["pass", "pass", "notice", "skipped", "skipped", "skipped"]
+        [
+            "pass", "pass", "notice", "skipped", "skipped", "skipped", "pass"
+        ]
     );
+    assert_eq!(r["loaders"]["files"][0]["dest"], "${game}/astra-probe.dll");
+    assert_eq!(r["loaders"]["files"][0]["class"], "none");
     assert_eq!(r["notices"][0]["code"], "link-schemas-unvalidated");
     assert!(r["built_on"].is_null() && r["code_changed"].is_null());
 }
@@ -2154,5 +2158,254 @@ fn check_names_every_fault_of_a_release_that_does_not_open() {
             (1, "engine-undeclared".to_owned()),
             (2, "descriptor-invalid".to_owned()),
         ]
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// `gi-probe check`: loaders (K18) and what a community release may place and launch.
+// ---------------------------------------------------------------------------------------------
+
+/// A release placing `name` (bytes `bytes`) at `${game}/<to>`, with `extra` TOML after it.
+fn placing_release(to: &str, bytes: &[u8], extra: &str) -> Vec<u8> {
+    let name = to.rsplit('/').next().unwrap();
+    let manifest = format!(
+        "schema = 1\n\n[integration]\nid = \"someone.example\"\nname = \"Astra in Example\"\nversion = \"1.0.0\"\nlicense = \"MIT\"\n\n[target]\nsteam_appid = 4000\nexe = \"Example.exe\"\nplatforms = [\"windows-x64\", \"linux-proton\"]\nanti_cheat = \"none\"\n\n[[game_files]]\nfrom = \"{name}\"\nto = \"${{game}}/{to}\"\n\n{extra}"
+    );
+    zip(&[
+        E::File("astra-gi.toml", manifest.as_bytes()),
+        E::File(name, bytes),
+    ])
+}
+
+fn codes_of(r: &Value) -> Vec<(u64, String, Value)> {
+    r["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                f["step"].as_u64().unwrap(),
+                f["code"].as_str().unwrap().to_owned(),
+                f["params"].clone(),
+            )
+        })
+        .collect()
+}
+
+/// **K18**: a hijack-named `[[game_files]]` entry that `[integration.loader] proxies` does not
+/// declare fails a community release's check (`loader-undeclared`, step 2); declared, it passes,
+/// and step 7 labels it — `other`, or `allowlisted` when `--loaders` lists its digest as off by
+/// default. Astra's own releases from before `[integration.loader]` are not asked.
+#[test]
+fn k18_check_refuses_a_loader_a_community_release_does_not_declare() {
+    let tmp = Tmp::new("check-k18");
+    let proxy: &[u8] = b"MZ a Doorstop build, off by default";
+    let undeclared = put(
+        &tmp,
+        "u",
+        "astra-gi.zip",
+        &placing_release("winhttp.dll", proxy, ""),
+    );
+    let (exit, r) = check(&undeclared, &[]);
+    assert_eq!(exit, 1, "{r:#}");
+    assert_eq!(
+        codes_of(&r),
+        [(
+            2,
+            "loader-undeclared".to_owned(),
+            json!({ "file": "winhttp.dll" })
+        )]
+    );
+    // Astra's own: not asked (labelled all the same).
+    let (exit, r) = check(&undeclared, &["--provenance", "first-party"]);
+    assert_eq!(exit, 0, "{r:#}");
+    assert_eq!(r["loaders"]["files"][0]["class"], "other");
+
+    let declared = put(
+        &tmp,
+        "d",
+        "astra-gi.zip",
+        &placing_release(
+            "winhttp.dll",
+            proxy,
+            "[integration.loader]\nproxies = [\"winhttp.dll\"]\n",
+        ),
+    );
+    let (exit, r) = check(&declared, &[]);
+    assert_eq!(exit, 0, "{r:#}");
+    assert_eq!(r["loaders"]["files"][0]["class"], "other");
+    assert_eq!(r["notices"][0]["code"], "loader-other");
+    assert_eq!(statuses(&r)[6], "notice");
+    // The catalogue's allowlist: off by default labels it; on by default does not.
+    for (enabled, class) in [(false, "allowlisted"), (true, "other")] {
+        let list = tmp.join(&format!("loaders-{enabled}.json"));
+        fs::write(
+            &list,
+            serde_json::to_vec(&json!([{ "name": "doorstop-winhttp", "sha256": sha(proxy), "default_enabled": enabled }]))
+                .unwrap(),
+        )
+        .unwrap();
+        let (exit, r) = check(&declared, &["--loaders", list.to_str().unwrap()]);
+        assert_eq!(exit, 0, "{r:#}");
+        assert_eq!(r["loaders"]["files"][0]["class"], class, "{r:#}");
+        assert_eq!(r["loaders"]["allowlist_entries"], 1);
+        assert_eq!(
+            r["loaders"]["files"][0]["allowlisted_as"],
+            if enabled {
+                Value::Null
+            } else {
+                json!("doorstop-winhttp")
+            }
+        );
+    }
+    // The allowlist never permits what the manifest does not declare.
+    let list = tmp.join("loaders-false.json");
+    let (exit, r) = check(&undeclared, &["--loaders", list.to_str().unwrap()]);
+    assert_eq!(exit, 1, "{r:#}");
+    assert_eq!(codes_of(&r)[0].1, "loader-undeclared");
+    // A name that is no loader's: none.
+    let plain = put(
+        &tmp,
+        "p",
+        "astra-gi.zip",
+        &placing_release("astra.dat", b"data", ""),
+    );
+    let (exit, r) = check(&plain, &[]);
+    assert_eq!(exit, 0, "{r:#}");
+    assert_eq!(r["loaders"]["files"][0]["class"], "none");
+    // An allowlist that is not one is a wrong input, never an empty allowlist.
+    let bad = tmp.join("bad.json");
+    fs::write(
+        &bad,
+        br#"[{"name": "x", "sha256": "abc", "default_enabled": false}]"#,
+    )
+    .unwrap();
+    let out = Command::new(PROBE)
+        .args(["check", &declared, "--loaders", bad.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+/// The community limits that need no game folder are `gi-probe check` findings, step 2.
+#[test]
+fn check_holds_a_community_release_to_what_it_may_place_and_launch() {
+    let tmp = Tmp::new("check-limits");
+    let cases = [
+        (
+            "BepInEx/plugins/astra.dll",
+            "",
+            vec![(
+                "community-limit",
+                json!({ "rule": "game-file-folder", "file": "BepInEx/plugins/astra.dll" }),
+            )],
+        ),
+        (
+            "astra.dll",
+            "[launch]\nenv = { DOTNET_STARTUP_HOOKS = \"${game}/astra.dll\" }\n",
+            vec![(
+                "community-limit",
+                json!({ "rule": "launch-env", "field": "launch.env.DOTNET_STARTUP_HOOKS" }),
+            )],
+        ),
+        (
+            "astra.dll",
+            "[launch]\nproton_dll_overrides = { winmm = \"native\" }\n",
+            vec![(
+                "community-limit",
+                json!({ "rule": "launch-override", "field": "launch.proton_dll_overrides.winmm" }),
+            )],
+        ),
+        (
+            "astra.dll",
+            "[launch]\nargs = [\"-plugin\", \"../../astra.dll\"]\n",
+            vec![(
+                "community-limit",
+                json!({ "rule": "launch-arg-path", "field": "launch.args[1]" }),
+            )],
+        ),
+        (
+            "Mods/dinput8.dll",
+            "",
+            vec![
+                ("loader-undeclared", json!({ "file": "Mods/dinput8.dll" })),
+                (
+                    "community-limit",
+                    json!({ "rule": "game-file-folder", "file": "Mods/dinput8.dll" }),
+                ),
+            ],
+        ),
+    ];
+    for (i, (to, extra, want)) in cases.iter().enumerate() {
+        let z = put(
+            &tmp,
+            &i.to_string(),
+            "astra-gi.zip",
+            &placing_release(to, b"MZ x", extra),
+        );
+        let (exit, r) = check(&z, &[]);
+        assert_eq!(exit, 1, "{to} {extra}: {r:#}");
+        let got: Vec<(String, Value)> = codes_of(&r)
+            .into_iter()
+            .map(|(step, code, params)| {
+                assert_eq!(step, 2);
+                (code, params)
+            })
+            .collect();
+        let want: Vec<(String, Value)> = want
+            .iter()
+            .map(|(c, p)| ((*c).to_owned(), p.clone()))
+            .collect();
+        assert_eq!(got, want, "{to} {extra}");
+        // Astra's own: none of these.
+        let (exit, r) = check(&z, &["--provenance", "first-party"]);
+        assert_eq!(exit, 0, "{to} {extra}, first-party: {r:#}");
+    }
+}
+
+/// Every first-party release fixture (`tests/fixtures/first-party/`) passes K18 and the
+/// community limits as Astra's own: no `loader-undeclared`, no `community-limit`. (Their one
+/// finding, `capability-undeclared`, is L3-3's lint of a release from before 0.5.0, which hands
+/// `${bridge_token}` on without `[integration.capabilities]`.) As community releases, every one
+/// that places a loader's name beside the game would be `loader-undeclared`.
+#[test]
+fn the_first_party_fixtures_pass_k18_as_astras_own() {
+    let dir = path("tests/fixtures/first-party");
+    let mut files: Vec<PathBuf> = fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "toml"))
+        .collect();
+    files.sort();
+    assert!(files.len() >= 10, "{files:?}");
+    let mut undeclared = 0;
+    for f in &files {
+        let file = f.to_str().unwrap();
+        let (_, r) = check(file, &["--provenance", "first-party"]);
+        let found: BTreeSet<String> = codes_of(&r).into_iter().map(|(_, c, _)| c).collect();
+        assert!(
+            found.iter().all(|c| c == "capability-undeclared"),
+            "{file}: {found:?}"
+        );
+        let loaders: Vec<&str> = r["loaders"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["class"] != "none")
+            .map(|row| row["dest"].as_str().unwrap())
+            .collect();
+        let (_, as_community) = check(file, &["--provenance", "community"]);
+        let k18: Vec<String> = codes_of(&as_community)
+            .into_iter()
+            .filter(|(_, c, _)| c == "loader-undeclared")
+            .map(|(_, _, p)| format!("${{game}}/{}", p["file"].as_str().unwrap()))
+            .collect();
+        assert_eq!(k18, loaders, "{file}");
+        undeclared += k18.len();
+    }
+    assert!(
+        undeclared > 0,
+        "no first-party fixture places a loader's name"
     );
 }

@@ -3,7 +3,8 @@
 This lists what launcher 0.5.0's L1 (engine descriptors and Pass B), L2 (the built-in rules as
 descriptors, the 0.4.1 detector deleted) and the L3 steps committed so far (C1b over installs,
 `gi-probe compat` and `validate-descriptor`, the `[integration.*]` tables and `gi-probe check`,
-planning that asks the descriptors: `plan_install_in`) knowingly do not do yet. Each row gives the step that owes it and the test or line that pins it.
+planning that asks the descriptors: `plan_install_in`; the community limits, the loader policy,
+step 10a and the proxy-folder baseline) knowingly do not do yet. Each row gives the step that owes it and the test or line that pins it.
 A row comes off this file only in the commit that closes it.
 
 | # | What | Why it is not done | Owed by | Pinned by |
@@ -19,8 +20,10 @@ A row comes off this file only in the commit that closes it.
 | 13 | **`validate-descriptor` speaks the launcher's codes, not the spec's.** The spec (`engine-descriptor-v1.md` §5, AstraPlugins d46e44a) names `descriptor-anchor-invalid` for a missing or ubiquitous anchor and `E_DESCRIPTOR_TOO_BROAD` for a negative-folder claim; `gi-probe` reports what `Descriptor::check_pass_b` returns, `descriptor-too-broad` with `reason` = `no-anchor`, `ubiquitous-runtime`, `program`, … , and `descriptor-too-broad{reason=negative:<folder>}` (merged plan R32: kebab-case wire codes). The spec says the launcher wins until one of the two is fixed. | K17 (L3-3, `tests/goldens.rs`) holds the spec's goldens to the launcher's parser, and the spec says the launcher wins: the launcher's spelling stays. The disagreement is recorded where it shows, `grief-unknown-games-no-anchor` in `SPEC_DEFECTS_AT_PIN` (below, "For the specification"). | the spec | `tests/common/spec_goldens.rs` `SPEC_DEFECTS_AT_PIN`; `tests/gi_probe.rs` `validate_descriptor_refuses_the_anchorless_and_the_runtime_anchored` |
 | 14 | **`compat` launches on Windows only.** Steps 3 and 4 lay the synthetic game as `Platform::Windows` (the brief's choice), so launcher 0.3.1's Proton half of `prepare_launch` — the prefix check and `proton::apply_prefix` writing `[launch] proton_dll_overrides` into `user.reg` — is never run on a release. A release whose overrides 0.3.1 parses but cannot apply would pass. | Laying a Proton prefix (`steamapps/compatdata/<appid>/pfx/user.reg`) is a second synthetic game per release; no first-party release has needed it yet. | L3 (with `check`), or accepted | `src/bin/gi-probe/trees.rs` `lay` |
 | 15 | **`gi-probe check` does not validate a Link's schema files.** It checks that every `params`/`data` file and the `skill` `[integration.link]` names is in the zip and within 4 KiB / 16 KiB, and Link v1's counts, names and lengths (`Manifest::lint`). Whether a schema keeps to `link-v1.md` §6's restricted profile (flat, ≤8 properties, local `$ref`, linear-time patterns) is not checked; the report says so (`link.schemas_validated: false`, notice `link-schemas-unvalidated`). | `link-v1` is a draft and may freeze as late as 0.2.8.x; a validator written against a draft would hold authors to rules that may change. | L3 or later, once `link-v1` freezes | `src/bin/gi-probe/check.rs` step 3 |
-| 16 | **`gi-probe check` has no loader classification and no `loader-undeclared` yet.** A hijack-named `[[game_files]]` entry outside `[integration.loader] proxies` (K18) passes. | `HIJACK_NAMES` and the loader keep/proxy rules in planning are L3's step 5; `check` gets K18 with them. | L3 step 5 | `src/bin/gi-probe/check.rs` module doc |
 | 17 | **`reserved-name` folds less than NFKC.** `reserved::fold_name` reads full-width forms, mathematical letters and digits and circled letters as ASCII, then `fold_confusables`, and keeps only letters and digits; any other compatibility form (a superscript, a parenthesised letter) is not folded. The spec says "NFKC plus a Unicode confusables fold". | An `[integration] name` may hold any script, so `name_char_allowed` cannot close it as it does for a descriptor's display name; full NFKC needs a Unicode normalisation dependency this crate does not have. A catalogue entry's name is also read by a moderator. | the spec (whether NFKC is required), then L3 | `src/reserved.rs` `names_are_reserved_through_every_fold` |
+| 18 | **The CLI plans as first-party.** `astra-game-launcher plan`/`install` (`src/bin/astra-game-launcher.rs:469`) call `plan_install`, which is `plan_install_in` with no engine descriptors, `Provenance::FirstParty` and no pick: none of the community limits, and a descriptor's engine is `engine-mismatch`. | It is a developer's own tool on their own machine, kept with first-party semantics (0.4.1's, but for step 10a); the daemon is what plans for players, with the provenance its seed vouches for. A `--provenance` flag would make the tool a second place that decides provenance. | none (accepted), or whoever needs the CLI to plan a community release | `src/bin/astra-game-launcher.rs` `"plan" \| "install"` |
+| 19 | **Play keeps only the compiled keep names.** A config file a manifest's `[integration.loader] keep_if_present` names is kept at plan and install when it is there already, but one this install added that the game rewrites since is `needs-reinstall` at Play — Play relinks only `doorstop_config.ini` and `ReShade.ini` to `keep-existing` (`src/launch.rs` `keep_if_present`). | The step's rule: Play stays as it is. Reading the manifest's keep names at Play is a change to Play's semantics for every installed integration that declares them, which no first-party one does yet. | the first integration that declares a keep name it also places, or L3 | `src/launch.rs` `prepare_launch_with`, the relink of a rewritten config |
+| 20 | **The proxy-folder baseline sees names, one level deep.** `uninstall` keeps a hijack-named file we added when its folder holds a name now that was not there before (merged plan R42): a loader that only writes into a folder that was there already (their `Mods/` from before us), or replaces a file by a name that was there, is not seen. A ledger written before 0.5.0 has no baseline: its uninstall removes the file as 0.4.1 did, and an update over it measures the folder then, so what arrived between that install and the update counts as there before. | A deeper baseline (sizes, digests, a recursive listing) costs a walk of the game folder at every install and holds far more in the ledger; a game update that touches the folder would keep the proxy more often. The pre-0.5.0 ledgers hold nothing to measure against. | plan owner (accepted unless a deeper baseline is asked for) | `src/plan.rs` `proxy_folders`, `proxy_folder_gained` |
 
 ## For the daemon (D1)
 
@@ -74,6 +77,7 @@ refusals `(code, field)` in order; a reason's text is never pinned. Re-pin with
 | `manifests/invalid/engine-code-reserved.toml` | `descriptor-invalid` `rule[0].evidence` | its descriptor's `{project}` is never captured, so it refuses before `engine-code-reserved`. |
 | `manifests/invalid/engine-undeclared.toml` | `engine-undeclared`, then `descriptor-invalid` `rule[0].evidence` | refused for its rule, and its descriptor breaks a second one: `evidence = "{core}"` with no lookup `as = "core"` (`foundation-owns-engine` has it). One golden, one rule. |
 | `manifests/invalid/engine-undeclared-mismatch.toml` | `engine-undeclared`, then `descriptor-invalid` `rule[0].evidence` | the same `{core}`. |
+| `manifests/valid/game-specific-link.toml` | `loader-undeclared` (`file` = `winhttp.dll`) | it places `winhttp.dll`, a name mod loaders hijack-load by, with no `[integration.loader] proxies` naming it; a community release must declare it (merged plan §2.5, K18). Add `[integration.loader] proxies = ["winhttp.dll"]`. |
 | `manifests/valid/runner-builtin.toml` | accepted as first-party; as community, `reserved-id` | `vectors.json` has no field for provenance; add `"provenance": "first-party"` to its record (the tests read it once it is there). |
 | `spec/games/reserved.yaml` `profile_file_names` | the launcher also reserves `mods-choice.json` | the mods choice (0.4.x), which no manifest may place. Add it. |
 | `spec/games/reserved.yaml` `engine_codes` | the launcher reserves by rule | `engine_codes` lists five codes; `is_reserved_code` also refuses their look-alikes folded with digits read as letters (`un1ty-mono`, `g0dot`), the prefixes `unknown` and `astra`, every built-in family name as a prefix (`unity`, `unreal`, `godot`), and the infix `ambiguous`. State the rule. |
@@ -90,7 +94,21 @@ Also for the spec, not pinned by a golden:
   as an unknown id is.
 - **`keep_if_present`** names end in `.ini .cfg .json .toml .txt .xml .yml .yaml`; a `.dll`,
   `.asi` or `.exe` there is `loader-policy-conflict{reason=loader}`, as a name also in `proxies`
-  is `{reason=proxy}`.
+  is `{reason=proxy}` — and so is a `proxies` name every install keeps (`doorstop_config.ini`,
+  `ReShade.ini`).
+- **The hijack names.** "Any other DLL-hijack-named file" (`games-index-v1.md` §2.4, A§4.5) is
+  `HIJACK_NAMES` (`src/plan.rs`): A§4.5's names with `xinput*` as the six XInput DLLs, the
+  Doorstop names (`winmm`), Ultimate ASI Loader's system-DLL names (`dinput dsound d3d8 d3d9
+  d3d10 d3d12 ddraw msacm32 msvfw32 wininet xlive`), and `opengl32`. `gi-probe check`'s step 7
+  labels against it and the manifest's `proxies`; say the list in the spec, or point at it.
+- **What a community release may place and launch** (plan B §3, `loader-undeclared` and
+  `community-limit{rule}`): `[[game_files]]` only as `${game}/<name>` or `${game}/<id>/…`, no
+  component `BepInEx`, `MelonLoader`, `ue4ss`, `Mods`, `~mods` (ASCII case ignored); no `[launch]
+  env`; overrides only for a DLL its own `[[game_files]]` place, `native,builtin` or `n,b`; an
+  argument holding `/`, `\` or `${` only as `${profile}/…` or `${game}/…`, no `..` and no other
+  placeholder after it (so `${bridge_token}` is handed on through `[[config_writes]]`, never the
+  command line); and a planned program the built-in walk lists. Neither code is in
+  `manifest.md` yet; add them, and a golden each.
 - **Link names.** Every tool's, trigger's and event's `name` matches `^[a-z][a-z0-9_]{0,31}$`
   and is unique in its list (the schema patterns tools' names only); a trigger's `label`, like a
   tool's `description`, is at most 200 characters.

@@ -12,7 +12,8 @@
 //! the folder back byte for byte — while launchers 0.4.1 and 0.3.1 refuse the manifest outright,
 //! and planning refuses wherever the descriptor is not the one that named the game.
 //!
-//! Steps 5-7 of L3 extend this file (the community limits, the loader rules, the restore).
+//! Step 5 of L3 adds the loader rules on its game (a foreign `dinput8.dll`, a kept `s2bridge.ini`,
+//! the proxy-folder baseline); steps 6-7 extend it (the restore).
 
 mod common;
 #[path = "common/spec_goldens.rs"]
@@ -21,9 +22,10 @@ mod spec_goldens;
 use std::path::Path;
 
 use astra_game_launcher::{
-    Ctx, Descriptor, Engine, EngineSet, GiPackage, LEDGER_FILE_NAME, Ledger, Manifest, Moderation,
-    Origin, Platform, Provenance, codes, detect_with_engines, install, plan_install,
-    plan_install_in, prepare_launch, uninstall,
+    Ctx, Descriptor, Engine, EngineSet, GameAction, GiPackage, KEPT_FOLDER_GAINED_FILES,
+    LEDGER_FILE_NAME, Ledger, Manifest, Moderation, Origin, Platform, Provenance, codes,
+    detect_with_engines, install, installed, plan_install, plan_install_in, prepare_launch,
+    uninstall,
 };
 use common::*;
 
@@ -255,4 +257,82 @@ fn a_unity_game_with_engine2_beside_its_program_stays_unity() {
         (e.code, e.param("want"), e.param("got")),
         (codes::ENGINE_MISMATCH, Some("source2"), Some("unity-mono"))
     );
+}
+
+/// The foundation's own `[integration.loader]` (`proxies = ["dinput8.dll"]`, `keep_if_present =
+/// ["s2bridge.ini"]`) on its game, the golden placing both beside the program: a foreign
+/// `dinput8.dll` is another loader, never replaced; a foreign `s2bridge.ini` is the player's and
+/// stays; and a file that arrives beside our proxy after the install keeps it at uninstall
+/// (`folder-gained-files`), the player's `s2bridge.ini` untouched.
+#[test]
+fn the_source2_foundations_loader_rules_hold_on_its_game() {
+    let golden = manifest_text();
+    let d = descriptor_of(&golden);
+    let set = engines(&d);
+    let proxy: &[u8] = b"MZ the foundation's dinput8 proxy";
+    let ini: &[u8] = b"[bridge]\nport = 0\n";
+    let text = format!(
+        "{golden}\n[[game_files]]\nfrom = \"loader/dinput8.dll\"\nto = \"${{game}}/dinput8.dll\"\nsha256 = \"{}\"\n\n[[game_files]]\nfrom = \"loader/s2bridge.ini\"\nto = \"${{game}}/s2bridge.ini\"\nsha256 = \"{}\"\n",
+        sha(proxy),
+        sha(ini)
+    );
+    let pkg = open(&zip(&[
+        E::File("astra-gi.toml", text.as_bytes()),
+        E::File("bridge/s2bridge.dll", b"MZ bridge"),
+        E::File("loader/dinput8.dll", proxy),
+        E::File("loader/s2bridge.ini", ini),
+    ]))
+    .unwrap();
+    let dir = Tmp::new("s2-loader");
+    source2_game(dir.path());
+    let beside = dir.join("game/bin/win64");
+    let game = target(dir.path(), EXE, None, Platform::Windows);
+    let profiles = Tmp::new("s2-loader-profiles");
+    let profile = profiles.join("p");
+    let plan =
+        |pkg: &GiPackage| plan_install_in(pkg, &game, &profile, &set, Provenance::Community, None);
+
+    // A foreign dinput8.dll: another loader.
+    write(&beside.join("dinput8.dll"), b"MZ a loader of the player's");
+    let e = plan(&pkg).unwrap_err();
+    assert_eq!(
+        (e.code, e.param("file")),
+        (codes::FOREIGN_LOADER, Some("dinput8.dll"))
+    );
+    std::fs::remove_file(beside.join("dinput8.dll")).unwrap();
+
+    // A foreign s2bridge.ini: the player's, kept.
+    let theirs: &[u8] = b"[bridge]\nport = 4242\n";
+    write(&beside.join("s2bridge.ini"), theirs);
+    let p = plan(&pkg).unwrap();
+    let actions: Vec<(&str, GameAction)> = p
+        .game_files
+        .iter()
+        .map(|g| (g.rel_path.as_str(), g.action))
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            ("dinput8.dll", GameAction::Add),
+            ("s2bridge.ini", GameAction::KeepExisting)
+        ]
+    );
+    install(&pkg, &p, &game, ACCEPT, &Ctx::silent()).unwrap();
+    let ledger = installed(&profile).unwrap().unwrap();
+    assert_eq!(ledger.proxy_folders.len(), 1);
+    assert_eq!(
+        ledger.proxy_folders[0].names,
+        ["engine2.dll", "s2bridge.ini", "s2game.exe"]
+    );
+
+    // A file arrives beside our proxy: the uninstall leaves it, and says why.
+    write(&beside.join("scripts/their_plugin.asi"), b"MZ theirs");
+    let r = uninstall(&profile, &game).unwrap();
+    assert_eq!(r.kept, ["dinput8.dll"]);
+    assert_eq!(
+        r.kept_reasons.get("dinput8.dll").map(String::as_str),
+        Some(KEPT_FOLDER_GAINED_FILES)
+    );
+    assert_eq!(std::fs::read(beside.join("dinput8.dll")).unwrap(), proxy);
+    assert_eq!(std::fs::read(beside.join("s2bridge.ini")).unwrap(), theirs);
 }

@@ -1,9 +1,13 @@
-# Where launcher 0.5.0's detector and planning's engine check knowingly answer otherwise than
-# 0.4.1's (main 73bf11e, the `launcher_legacy` dev-dependency), canary C1's declared exceptions.
-# Each comes from one rule 0.5.0 holds everywhere: no read follows a link or waits on a FIFO, and
-# no hint is followed through a name the launcher refuses. A name only compared with a listing
-# already read is compared as 0.4.1 compared it, whatever it holds (`: ? " * | < > \`, a Windows
-# device's first segment). Everything else C1 holds byte for byte.
+# Where launcher 0.5.0's detector, planning and uninstall knowingly answer otherwise than 0.4.1's
+# (main 73bf11e, the `launcher_legacy` dev-dependency), canaries C1's and C1b's declared
+# exceptions. The detector's come from one rule 0.5.0 holds everywhere: no read follows a link or
+# waits on a FIFO, and no hint is followed through a name the launcher refuses. A name only
+# compared with a listing already read is compared as 0.4.1 compared it, whatever it holds
+# (`: ? " * | < > \`, a Windows device's first segment). The last two are Astra's own
+# integrations' (C1b, tests/identity.rs applies each, counted): a mod loader's file is never
+# replaced (step 10a, plan B §5; src/plan.rs HIJACK_NAMES), and a file we added by such a name
+# stays when its folder gained a name since (merged plan R42; src/plan.rs proxy_folder_gained).
+# Everything else C1 and C1b hold byte for byte.
 #
 # One row per line: id | where | 0.4.1 | 0.5.0
 # tests/divergence.rs lays a fixture per row, runs 0.4.1 in a child process with a timeout (it
@@ -15,3 +19,5 @@ link-version-header | a link where a Unity game's version header would be | read
 link-in-a-stat | a link on the way to a file a rule asks for by its exact path (Game_Data/Managed linked to a folder holding Assembly-CSharp.dll) | follows it: Mono | refuses it: the flavour as if the link were not there
 link-program-folder | planning a program named through a linked folder (LinkedDir/Game.exe, LinkedDir a link to the game's own folder) | follows it: the engine of the program behind the link | reads nothing through it: engine-mismatch, got unknown
 refused-name | Steam's hint naming a Windows device the launcher never follows (COM¹.exe, which Windows reads as COM1, beside a Unity game's player and data) | followed the hint: hint_used | follows none: the hint unused, the folder search finding the same game
+foreign-dwmapi | a first-party manifest placing dwmapi.dll over a foreign one (a player's UE4SS beside a GTA III or Unreal-runner game, or a file of ours changed since) | replace: backs theirs up and puts ours in its place | foreign-loader, file dwmapi.dll; over a ledger that already holds it as replace (0.4.1's install): replace kept, warning foreign-loader-in-backup, and the uninstall puts theirs back
+proxy-folder-gained-files | uninstalling a first-party integration's added winhttp.dll (a name loaders hijack) whose folder gained a name since the install (another loader's Mods/, a game update's file) | removes ours | keeps ours, kept_reasons folder-gained-files (a ledger from before 0.5.0 has no baseline: removed, as 0.4.1)

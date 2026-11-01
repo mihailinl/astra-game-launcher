@@ -295,8 +295,13 @@ fn only_a_community_or_descriptor_plan_carries_the_new_keys() {
         assert_eq!(serde_json::to_string(&new).unwrap(), old);
     }
     assert!(!old.contains("\"provenance\"") && !old.contains("\"engine_descriptor\""));
+    // A community runner declares the loader it places (`loader-undeclared` otherwise).
+    let declared = open(&runner_zip(&runner_manifest(
+        "\n[integration.loader]\nproxies = [\"winhttp.dll\"]\n",
+    )))
+    .unwrap();
     let community = plan_install_in(
-        &pkg,
+        &declared,
         &g,
         &profiles.join("p"),
         &set,

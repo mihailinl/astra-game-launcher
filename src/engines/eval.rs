@@ -1010,15 +1010,10 @@ impl<'a> Game<'a> {
         }
         self.lookup(spent)?;
         self.read_bytes(4)?;
-        let want: &[u8] = if detect::ext_lower(&prog.name) == "exe" {
-            b"MZ"
-        } else {
-            b"\x7fELF"
-        };
         let Some(p) = self.readable(&prog.rel) else {
             return Ok(false);
         };
-        Ok(reads::head(&p, 4).is_some_and(|b| b.starts_with(want)))
+        Ok(has_program_magic(&p, &prog.name))
     }
 
     fn check(&self, m: &Model, c: &Check, sc: &mut View, spent: &mut Spent) -> Step<bool> {
@@ -1972,6 +1967,46 @@ fn ext_of(lower: &str) -> &str {
 /// [`PASS_B_PROGRAM_EXTS`].
 fn program_like(lower: &str) -> bool {
     !lower.contains('.') || PASS_B_PROGRAM_EXTS.contains(&ext_of(lower))
+}
+
+/// Whether the regular file at `path`, named `name`, is what its name says: a PE image (`MZ`)
+/// for `.exe`, an ELF image for any other. Four bytes, never through a link.
+fn has_program_magic(path: &Path, name: &str) -> bool {
+    let want: &[u8] = if detect::ext_lower(name) == "exe" {
+        b"MZ"
+    } else {
+        b"\x7fELF"
+    };
+    reads::head(path, 4).is_some_and(|b| b.starts_with(want))
+}
+
+/// Whether `exe` (components below `root`) is a program Pass B could take under the built-in
+/// policy, by Pass B's own tests: the built-ins' walk of `root` (`entries`) lists it as a file
+/// and no folder on its way is a wrapper (the folder search), or it is `hint` — the program Steam
+/// launches, as [`Game`]'s hint takes it; either way its name is program-like
+/// ([`PASS_B_PROGRAM_EXTS`], or none) and no wrapper ([`detect::is_wrapper_name`]), and its first
+/// bytes are what its name says. What a community integration's planned program must be when no
+/// descriptor named it (plan B §3, "Plant code in another loader's folder"); one a descriptor
+/// named has passed that descriptor's own tests already.
+pub(crate) fn is_walked_program(
+    root: &Path,
+    entries: &[Entry],
+    exe: &[String],
+    hint: Option<&[String]>,
+) -> bool {
+    let Some(name) = exe.last() else {
+        return false;
+    };
+    let same = |rel: &[String]| {
+        rel.len() == exe.len() && rel.iter().zip(exe).all(|(a, b)| a.eq_ignore_ascii_case(b))
+    };
+    let walked = entries.iter().any(|e| !e.is_dir && same(&e.rel))
+        && !exe.iter().any(|c| detect::is_wrapper_name(c));
+    let hinted = hint.is_some_and(same);
+    (walked || hinted)
+        && program_like(&name.to_ascii_lowercase())
+        && !detect::is_wrapper_name(name)
+        && has_program_magic(&abs(root, exe), name)
 }
 
 /// Whether `p` selects the program whose name, lower case, is `lower`.

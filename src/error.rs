@@ -37,6 +37,13 @@ pub mod codes {
     /// `doorstop_config.ini` (`file`) still switches Doorstop on with a target that exists
     /// (`target`). Adding our proxy would bring its mods back on every plain start of the game.
     pub const SWITCHED_OFF_LOADER: &str = "switched-off-loader";
+    /// Plan: a community integration would place `file` over one of the player's, which only
+    /// Astra's own integrations may replace (backed up, put back at uninstall).
+    pub const FOREIGN_FILE: &str = "foreign-file";
+    /// A plan's warning, not a refusal: a file of a mod loader (`dwmapi.dll`, a UE4SS) that an
+    /// earlier launcher replaced with ours stays replaced on this update. The player's loader is
+    /// in Astra's backup, and the uninstall puts it back.
+    pub const FOREIGN_LOADER_IN_BACKUP: &str = "foreign-loader-in-backup";
     /// The manifest names a different game (`field` = "exe" or "steam_appid").
     pub const GAME_MISMATCH: &str = "game-mismatch";
     /// The game's platform is not in the manifest's `platforms`, or cannot be launched.
@@ -130,6 +137,13 @@ pub mod codes {
     /// `too-many`, `name`, `duplicate`, `too-long`, `missing`, `not-a-path`, `not-in-zip`,
     /// `too-large`; `limit` where there is one).
     pub const LINK_INVALID: &str = "link-invalid";
+    /// A community integration places `file`, a name mod loaders hijack-load by, that its
+    /// `[integration.loader] proxies` do not declare (K18).
+    pub const LOADER_UNDECLARED: &str = "loader-undeclared";
+    /// A community integration does what only Astra's own may (`rule` = `game-file-folder` with
+    /// `file`, `exe-not-a-program` with `exe`, `launch-env`, `launch-override` or
+    /// `launch-arg-path` with `field`).
+    pub const COMMUNITY_LIMIT: &str = "community-limit";
     // Other.
     pub const MISSING_VARIABLE: &str = "missing-variable";
     /// A variable's value holds a character it may not carry (a newline into an INI, a NUL).
@@ -161,6 +175,8 @@ pub mod codes {
         FOREIGN_LOADER,
         SHARED_LOADER_CHANGED,
         SWITCHED_OFF_LOADER,
+        FOREIGN_FILE,
+        FOREIGN_LOADER_IN_BACKUP,
         GAME_MISMATCH,
         PLATFORM_UNSUPPORTED,
         PATH_ESCAPES,
@@ -196,6 +212,8 @@ pub mod codes {
         RESERVED_ID,
         RESERVED_NAME,
         LINK_INVALID,
+        LOADER_UNDECLARED,
+        COMMUNITY_LIMIT,
         MISSING_VARIABLE,
         INVALID_VARIABLE,
         CANCELLED,
@@ -269,6 +287,12 @@ impl LauncherError {
             codes::SWITCHED_OFF_LOADER => {
                 "another mod loader in the game folder is switched off, but its doorstop_config.ini still switches it on; installing would bring its mods back on every start of the game. Set enabled = false in that file, or delete it, then try again"
             }
+            codes::FOREIGN_FILE => {
+                "a file of the game's is where this integration would place its own; only Astra's own integrations may replace one"
+            }
+            codes::FOREIGN_LOADER_IN_BACKUP => {
+                "another mod loader's file is kept in Astra's backup and comes back when this integration is uninstalled"
+            }
             codes::GAME_MISMATCH => "this integration is for a different game",
             codes::PLATFORM_UNSUPPORTED => "this integration does not support the game's platform",
             codes::PATH_ESCAPES => "a path leaves the folder it must stay in",
@@ -330,6 +354,12 @@ impl LauncherError {
                 "the integration's name is reserved for Astra's own integrations"
             }
             codes::LINK_INVALID => "astra-gi.toml's [integration.link] is past a limit",
+            codes::LOADER_UNDECLARED => {
+                "astra-gi.toml places a mod loader's file that its [integration.loader] proxies do not declare"
+            }
+            codes::COMMUNITY_LIMIT => {
+                "astra-gi.toml does something only Astra's own integrations may do"
+            }
             codes::MISSING_VARIABLE => "a variable the integration needs was not given",
             codes::INVALID_VARIABLE => "a variable's value holds a forbidden character",
             codes::CANCELLED => "cancelled",

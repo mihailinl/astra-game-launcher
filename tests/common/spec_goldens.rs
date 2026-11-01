@@ -306,6 +306,11 @@ pub const SPEC_DEFECTS_AT_PIN: &[SpecDefect] = &[
         why: "as engine-undeclared: its descriptor's evidence {core} is never captured",
     },
     SpecDefect {
+        golden: "testdata/games/manifests/valid/game-specific-link.toml",
+        seen: Seen::Answered(&[("loader-undeclared", "")]),
+        why: "places winhttp.dll, a name mod loaders hijack-load by, with no [integration.loader] proxies naming it: as a community release that is loader-undeclared (merged plan §2.5, K18). Add `[integration.loader] proxies = [\"winhttp.dll\"]`",
+    },
+    SpecDefect {
         golden: "testdata/games/manifests/valid/runner-builtin.toml",
         seen: Seen::FirstPartyOnly(&[("reserved-id", "")]),
         why: "accepted only from Astra's own publisher (its id is astra.unity), which vectors.json has no field to say",

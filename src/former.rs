@@ -529,17 +529,13 @@ mod tests {
             w.put("dwmapi.dll", UE4SS_PROXY);
             w.put(beside, b"MZ UE4SS");
             assert!(former_set(&w.game()).is_empty());
-            // The old arms, unchanged: replaced with a backup, put back on uninstall.
-            let plan = w.install(&unreal());
-            let g = &plan.game_files[0];
+            // A working loader of the player's, by a name loaders hijack (step 10a): never
+            // replaced. (A launcher before 0.5.0 replaced it with a backup.)
+            let e = plan_install(&unreal(), &w.target(), &w.profile()).unwrap_err();
             assert_eq!(
-                (g.action, g.existing_sha256.clone()),
-                (GameAction::Replace, Some(sha256_hex(UE4SS_PROXY)))
+                (e.code, e.param("file")),
+                (codes::FOREIGN_LOADER, Some("dwmapi.dll"))
             );
-            assert!(plan.former_files.is_empty());
-            let r = w.uninstall();
-            assert_eq!(r.restored, ["dwmapi.dll"]);
-            assert_eq!(fs::read(w.game().join("dwmapi.dll")).unwrap(), UE4SS_PROXY);
             // A package shipping the very same bytes reuses them.
             let same = package(&[("dwmapi.dll", UE4SS_PROXY)]);
             let plan = plan_install(&same, &w.target(), &w.profile()).unwrap();
@@ -585,22 +581,39 @@ mod tests {
         assert_eq!(w.names(), ["Game.exe", "winhttp.dll"]);
     }
 
+    /// What a launcher before 0.4.0 did over a lost ledger (and one before 0.5.0 over any UE4SS):
+    /// `theirs` at `dwmapi.dll`, replaced by ours and backed up. This launcher never makes that
+    /// `replace` (step 10a), so it is laid as that launcher left it: installed over nothing, then
+    /// the ledger and the backup made what a `replace` writes.
+    fn replaced_by_an_older_launcher(w: &World, theirs: &[u8]) {
+        let _ = fs::remove_file(w.game().join("dwmapi.dll"));
+        assert_eq!(w.install(&unreal()).game_files[0].action, GameAction::Add);
+        let profile = fs::canonicalize(w.profile()).unwrap();
+        let mut l = crate::ledger::read(&profile).unwrap().unwrap();
+        let rel = format!("{}/game/dwmapi.dll", crate::paths::BACKUP_DIR);
+        let backup = profile.join(&rel);
+        fs::create_dir_all(backup.parent().unwrap()).unwrap();
+        fs::write(&backup, theirs).unwrap();
+        l.game_files[0].action = GameAction::Replace;
+        l.game_files[0].backup = Some(crate::LedgerBackup {
+            rel,
+            sha256: sha256_hex(theirs),
+        });
+        crate::ledger::write(&profile, &l).unwrap();
+    }
+
     #[test]
     fn a_backup_of_ue4ss_s_proxy_is_put_back_only_with_ue4ss_beside_it() {
-        // What a launcher before 0.4.0 did over a lost ledger: replaced it, backed up.
         for ue4ss in [false, true] {
             no_stand_ins();
             let w = World::new(&format!("backup-{ue4ss}"));
-            w.put("dwmapi.dll", UE4SS_PROXY);
             if ue4ss {
                 w.put("ue4ss/UE4SS.dll", b"MZ UE4SS");
             }
-            assert_eq!(
-                w.install(&unreal()).game_files[0].action,
-                GameAction::Replace
-            );
+            replaced_by_an_older_launcher(&w, UE4SS_PROXY);
             stand_ins();
-            // An update plans for what an uninstall would leave.
+            // An update plans for what an uninstall would leave: with UE4SS beside it the
+            // player's loader, kept in the backup and said so (10a).
             let update = plan_install(&unreal(), &w.target(), &w.profile()).unwrap();
             let want = if ue4ss {
                 (GameAction::Replace, Some(sha256_hex(UE4SS_PROXY)))
@@ -613,6 +626,12 @@ mod tests {
                     update.game_files[0].existing_sha256.clone()
                 ),
                 want
+            );
+            assert_eq!(
+                update
+                    .warnings
+                    .contains(&codes::FOREIGN_LOADER_IN_BACKUP.to_owned()),
+                ue4ss
             );
             let r = w.uninstall();
             if ue4ss {
@@ -631,8 +650,7 @@ mod tests {
         // The same through the update itself.
         no_stand_ins();
         let w = World::new("backup-update");
-        w.put("dwmapi.dll", UE4SS_PROXY);
-        w.install(&unreal());
+        replaced_by_an_older_launcher(&w, UE4SS_PROXY);
         stand_ins();
         w.install(&unreal());
         let ledger = installed(&w.profile()).unwrap().unwrap();

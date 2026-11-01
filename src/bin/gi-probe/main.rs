@@ -48,6 +48,7 @@ USAGE
                   [--previous <previous release's zip>] [--notes <release notes file>]
   gi-probe check <astra-gi.zip | astra-gi.toml> [--provenance first-party|community]
                  [--foundation <foundation's zip>] [--previous <previous release's zip>]
+                 [--loaders <the catalogue's loaders[] as a JSON array>]
   gi-probe validate-descriptor <file> [--first-party]
   gi-probe pick --source <integration id> --listing <releases.json> [--prerelease]
   gi-probe --version
@@ -65,9 +66,14 @@ USAGE
                 ${bridge_token} only with the companion capability \"presentation\" declared;
                 [integration.link] within Astra Link v1's limits, its files in the zip;
                 [integration.engine] a descriptor Pass B admits, claiming no negative folder;
-                built_on (every file --foundation places, placed alike) and code_changed
-                (code new or changed since --previous) are reported. --provenance defaults to
-                community. A bare astra-gi.toml is checked without the zip's half.
+                a community release places a loader's name only when [integration.loader]
+                declares it, game files beside the program or below a folder named after its
+                id, and no [launch] env, foreign overrides or path arguments outside
+                ${profile}/ and ${game}/; built_on (every file --foundation places, placed
+                alike) and code_changed (code new or changed since --previous) are reported,
+                and each game file's loader (none, allowlisted by --loaders, or other).
+                --provenance defaults to community. A bare astra-gi.toml is checked without the
+                zip's half.
   validate-descriptor
                 an astra.engine/1 descriptor (TOML, JSON, or a manifest's [integration.engine]):
                 it parses, Pass B admits it, and it claims none of the spec's negative folders.
@@ -418,7 +424,11 @@ fn run(argv: &[String]) -> Result<(Value, bool), Fatal> {
             compat::run(&args)
         }
         "check" => {
-            let a = Args::parse(rest, &["provenance", "foundation", "previous"], &[])?;
+            let a = Args::parse(
+                rest,
+                &["provenance", "foundation", "previous", "loaders"],
+                &[],
+            )?;
             let [file] = a.positional.as_slice() else {
                 return Err(Fatal::usage("check takes one zip or astra-gi.toml"));
             };
@@ -436,6 +446,7 @@ fn run(argv: &[String]) -> Result<(Value, bool), Fatal> {
                 first_party,
                 foundation: a.opt("foundation").map(PathBuf::from),
                 previous: a.opt("previous").map(PathBuf::from),
+                loaders: a.opt("loaders").map(PathBuf::from),
             })
         }
         "validate-descriptor" => {

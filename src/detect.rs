@@ -338,6 +338,30 @@ pub(crate) fn anti_cheat_scan(game_dir: &Path) -> Result<Vec<String>> {
     Ok(anti_cheat_of(&builtin_walk(game_dir)?.entries))
 }
 
+/// Whether `exe` (components below `game_dir`) is a program the built-in walk lists, or Steam's
+/// `hint`, that Pass B's tests take ([`engines::is_walked_program`]): what a community
+/// integration may plan on when no descriptor named it.
+pub(crate) fn is_walked_program(
+    game_dir: &Path,
+    exe: &[String],
+    hint: Option<&str>,
+) -> Result<bool> {
+    let walked = builtin_walk(game_dir)?;
+    let hint = hint.and_then(|h| {
+        let mut h = h.trim();
+        while let Some(rest) = h.strip_prefix("./").or_else(|| h.strip_prefix(".\\")) {
+            h = rest;
+        }
+        crate::paths::relative_components(h)
+    });
+    Ok(engines::is_walked_program(
+        game_dir,
+        &walked.entries,
+        exe,
+        hint.as_deref(),
+    ))
+}
+
 fn is_file(p: &Path) -> bool {
     fs::symlink_metadata(p).is_ok_and(|m| m.is_file())
 }
