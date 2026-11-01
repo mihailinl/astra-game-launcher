@@ -12,19 +12,19 @@ use serde::{Deserialize, Serialize};
 use crate::detect::{anti_cheat_scan, engine_of_exe_with};
 use crate::digest::sha256_hex;
 use crate::doorstop;
-use crate::engines::EngineSet;
+use crate::engines::{Descriptor, EngineCode, EngineSet, Moderation, Origin};
 use crate::error::{LauncherError, Result, codes};
 use crate::former::{self, FormerKind};
 use crate::game::{GameTarget, Platform};
 use crate::game::{several_apps, steam_appids_of_dir};
 use crate::ledger::{self, Ledger, LoaderBaseline};
-use crate::manifest::IntegrationInfo;
+use crate::manifest::{IntegrationInfo, Manifest};
 use crate::package::{GiPackage, PackFile};
 use crate::paths::{
     FileState, absolute, canonical_dir, checked_rel, existing_target, file_state, find_any_case,
     real_case, resolve_lenient,
 };
-use crate::steam_appinfo::{steam_roots, valve_anti_cheat};
+use crate::steam_appinfo::{launch_executable, steam_roots, valve_anti_cheat};
 
 /// What happens to one file beside the game's exe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -127,6 +127,94 @@ pub struct InstallPlan {
     /// serialised plan: `false`.
     #[serde(default)]
     pub vac_checked: bool,
+    /// Who vouches for the integration, as the caller of [`plan_install_in`] said. Absent from
+    /// the JSON when first-party, so a first-party plan of a built-in engine's manifest
+    /// serialises exactly as launcher 0.4.1's.
+    #[serde(default, skip_serializing_if = "Provenance::is_first_party")]
+    pub provenance: Provenance,
+    /// The engine descriptor that named the game's engine (`[target] engine` a descriptor's
+    /// code): install plans again with it alone, so no plan is installed against another one.
+    /// `None` (and absent from the JSON) for a built-in engine, and for none asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_descriptor: Option<PinnedDescriptor>,
+}
+
+/// Who vouches for an integration — what its plan may do (plan B §3, "Overwrite a player's
+/// file"). The launcher cannot tell: the caller vouches for it, and the launcher takes its word.
+/// **First-party** is an integration whose `[integration] id` AND repository are both in
+/// Astra's compiled seed of its own integrations; every other one — from the catalogue,
+/// moderated or not, or a developer's local folder — is **community**. Recorded in the plan and
+/// the ledger; the community limits come with launcher 0.5.0's L3 step 5.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Provenance {
+    /// Astra's own: id and repository in the compiled seed.
+    #[default]
+    FirstParty,
+    /// Anyone else's.
+    Community,
+}
+
+impl Provenance {
+    pub fn is_first_party(&self) -> bool {
+        *self == Provenance::FirstParty
+    }
+}
+
+/// The engine descriptor a plan was made with, pinned: what named the game's engine, and where
+/// the caller said it came from. [`crate::install`] parses it again, checks its digest, and
+/// plans again with it alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinnedDescriptor {
+    /// `sha256(JCS(descriptor))`, lower-case hex ([`Descriptor::digest`]).
+    pub sha256: String,
+    /// The canonical JSON that digest is of ([`Descriptor::canonical_json`]).
+    pub canonical_json: String,
+    /// Its [`Origin`], as the caller vouched for it.
+    pub moderation: Moderation,
+    pub publisher: String,
+    pub first_party: bool,
+}
+
+impl PinnedDescriptor {
+    fn of(d: &Descriptor, origin: &Origin) -> PinnedDescriptor {
+        PinnedDescriptor {
+            sha256: d.digest().to_owned(),
+            canonical_json: d.canonical_json().to_owned(),
+            moderation: origin.moderation,
+            publisher: origin.publisher.clone(),
+            first_party: origin.first_party,
+        }
+    }
+
+    /// An [`EngineSet`] of this descriptor alone, parsed again from its canonical JSON:
+    /// `plan-stale` (`detail` = `engine-descriptor`) when it does not parse, has another digest
+    /// than the one pinned, or is not one Pass B admits.
+    pub(crate) fn engine_set(&self) -> Result<EngineSet> {
+        let stale = || LauncherError::new(codes::PLAN_STALE).with("detail", "engine-descriptor");
+        let d = Descriptor::from_json(self.canonical_json.as_bytes()).map_err(|_| stale())?;
+        if d.digest() != self.sha256 {
+            return Err(stale());
+        }
+        let origin = Origin {
+            moderation: self.moderation,
+            publisher: self.publisher.clone(),
+            first_party: self.first_party,
+        };
+        let set = EngineSet::build([(origin, Ok(d))]);
+        if set.len() != 1 {
+            return Err(stale());
+        }
+        Ok(set)
+    }
+}
+
+/// What [`plan_install_in`] is given beyond the package, the game and the profile.
+#[derive(Clone, Copy)]
+pub(crate) struct Planning<'a> {
+    pub(crate) engines: &'a EngineSet,
+    pub(crate) provenance: Provenance,
+    pub(crate) engine_pick: Option<&'a EngineCode>,
 }
 
 /// Names a mod loader's proxy DLL goes by. A foreign one is another loader: never replaced. It is
@@ -584,22 +672,70 @@ fn target_exists(dir: &Path, target: &str, platform: &Platform) -> bool {
     }
 }
 
-/// Checks the package against the game and says exactly what an install would do.
+/// Checks the package against the game and says exactly what an install would do: launcher
+/// 0.4.1's planning, exactly — [`plan_install_in`] with no engine descriptors, first-party, and
+/// no pick.
 pub fn plan_install(
     pkg: &GiPackage,
     game: &GameTarget,
     profile_root: &Path,
 ) -> Result<InstallPlan> {
-    plan_install_with(pkg, game, profile_root, true)
+    plan_install_in(
+        pkg,
+        game,
+        profile_root,
+        &EngineSet::empty(),
+        Provenance::FirstParty,
+        None,
+    )
 }
 
-/// [`plan_install`]; without `loader_checks`, the refusals about a mod loader of the person's
+/// [`plan_install`], asking the engine descriptors in `engines` (the set the daemon detects
+/// with) when `[target] engine` is a descriptor's code, for an integration `provenance` vouches
+/// for.
+///
+/// - **A built-in code** (`unity-mono`, `unreal`, …) is checked exactly as [`plan_install`]
+///   checks it, by the built-in rules alone, whatever `engines` holds.
+/// - **A descriptor's code** passes where the descriptor Pass B would choose among the game
+///   program's own matches names it — never in a folder the built-ins decided
+///   ([`Detection::open_to_descriptors`]), and never on a program a built-in rule names; both
+///   asked with the program Steam launches for the trusted appid as the hint, as the daemon
+///   detects. Where descriptors of one standing disagree about that program, it passes only
+///   when `engine_pick` (the player's choice among them) is the manifest's code and that code
+///   is among them: `engine-ambiguous{want, codes}` otherwise. Elsewhere it is
+///   `engine-mismatch{want, got}`.
+/// - **`[integration.engine]`**: the manifest's own descriptor must be the very one that named
+///   the engine, `descriptor-mismatch{want, got}` otherwise (`got` = `none` when no descriptor
+///   did) — and its own refusal when it is no descriptor at all.
+///
+/// The plan pins the descriptor that named the engine ([`InstallPlan::engine_descriptor`]) and
+/// records `provenance`; [`crate::install`] plans again with both.
+///
+/// [`Detection::open_to_descriptors`]: crate::Detection::open_to_descriptors
+pub fn plan_install_in(
+    pkg: &GiPackage,
+    game: &GameTarget,
+    profile_root: &Path,
+    engines: &EngineSet,
+    provenance: Provenance,
+    engine_pick: Option<&EngineCode>,
+) -> Result<InstallPlan> {
+    let how = Planning {
+        engines,
+        provenance,
+        engine_pick,
+    };
+    plan_install_with(pkg, game, profile_root, how, true)
+}
+
+/// [`plan_install_in`]; without `loader_checks`, the refusals about a mod loader of the person's
 /// beside the game are not made again — for install's look at the game folder once the
 /// integration it replaces is undone, which removes our own proxy for a moment.
 pub(crate) fn plan_install_with(
     pkg: &GiPackage,
     game: &GameTarget,
     profile_root: &Path,
+    how: Planning,
     loader_checks: bool,
 ) -> Result<InstallPlan> {
     let m = pkg.manifest();
@@ -639,18 +775,7 @@ pub(crate) fn plan_install_with(
     // Cleared only for an appid the caller gave or the folder proves; the manifest's appid can
     // only add a refusal. No trusted appid is UNCHECKED, never clear.
     let vac = vac_check(game, trusted, m.target.steam_appid)?;
-    // Every code `[target]` may name, a descriptor's included: a code no engine set here
-    // detects is `engine-mismatch`, never a check skipped. L3 passes the catalogue's descriptors
-    // here (`plan_install_in`); until then, the built-in ones alone, so a descriptor's code
-    // plans on no game.
-    if let Some(want) = m.engine_code() {
-        let got = engine_of_exe_with(&EngineSet::empty(), &game_dir, &exe);
-        if got != want {
-            return Err(LauncherError::new(codes::ENGINE_MISMATCH)
-                .with("want", want.as_str())
-                .with("got", got.as_str()));
-        }
-    }
+    let engine_descriptor = engine_check(m, how, game, trusted, &game_dir, &exe)?;
 
     let profile_dir = absolute(profile_root)?;
     let profile_resolved = resolve_lenient(&profile_dir)?;
@@ -794,5 +919,82 @@ pub(crate) fn plan_install_with(
         former_files,
         warnings,
         vac_checked: vac,
+        provenance: how.provenance,
+        engine_descriptor,
     })
+}
+
+/// Planning's engine check ([`plan_install_in`]'s list), for every code `[target]` may name:
+/// a code nothing here detects is a refusal, never a check skipped. Returns the descriptor that
+/// named the engine, pinned; `None` for a built-in engine, and when `[target]` names none.
+fn engine_check(
+    m: &Manifest,
+    how: Planning,
+    game: &GameTarget,
+    trusted: Option<u32>,
+    game_dir: &Path,
+    exe: &[String],
+) -> Result<Option<PinnedDescriptor>> {
+    let Some(want) = m.engine_code() else {
+        return Ok(None);
+    };
+    let named = if want.builtin().is_some() || how.engines.is_empty() {
+        // A built-in code: by the built-in rules alone, as launcher 0.4.1 checked it (C1b, and
+        // C1c for planning: no set changes such a plan).
+        engine_of_exe_with(&EngineSet::empty(), game_dir, exe, None)
+    } else {
+        engine_of_exe_with(
+            how.engines,
+            game_dir,
+            exe,
+            planning_hint(game, trusted).as_deref(),
+        )
+    };
+    let digest = if named.code == want {
+        named.descriptor_sha256
+    } else if let Some((_, d)) = named.candidates.iter().find(|(c, _)| *c == want) {
+        if how.engine_pick != Some(&want) {
+            let standing: Vec<&str> = named.candidates.iter().map(|(c, _)| c.as_str()).collect();
+            return Err(LauncherError::new(codes::ENGINE_AMBIGUOUS)
+                .with("want", want.as_str())
+                .with("codes", standing.join(",")));
+        }
+        Some(d.clone())
+    } else {
+        return Err(LauncherError::new(codes::ENGINE_MISMATCH)
+            .with("want", want.as_str())
+            .with("got", named.code.as_str()));
+    };
+    if let Some(own) = m.engine_descriptor() {
+        let own = own.map_err(Clone::clone)?;
+        let got = digest.as_deref().unwrap_or("none");
+        if own.digest() != got {
+            return Err(LauncherError::new(codes::DESCRIPTOR_MISMATCH)
+                .with("want", own.digest())
+                .with("got", got));
+        }
+    }
+    let Some(digest) = digest else {
+        return Ok(None);
+    };
+    how.engines
+        .descriptors()
+        .find(|(d, _)| d.digest() == digest)
+        .map(|(d, origin)| Some(PinnedDescriptor::of(d, origin)))
+        .ok_or_else(|| LauncherError::io("the descriptor that named the engine is not in the set"))
+}
+
+/// The program Steam launches for this game, as the daemon detects with: [`launch_executable`]
+/// for the trusted appid, from the first `appinfo.vdf` that answers ([`appinfo_files`]), for the
+/// OS the game runs as (`windows` for Windows and for a Windows game under Proton, `linux` for a
+/// native one). `None` without a trusted appid. A hint, never trusted: the evaluator jails it.
+fn planning_hint(game: &GameTarget, trusted: Option<u32>) -> Option<String> {
+    let appid = trusted?;
+    let os = match game.platform {
+        Platform::Windows | Platform::LinuxProton { .. } => "windows",
+        Platform::LinuxNative => "linux",
+    };
+    appinfo_files(game)
+        .iter()
+        .find_map(|p| launch_executable(p, appid, os))
 }

@@ -6,7 +6,8 @@
 //! Minimal, no UI: r2modman/Thunderstore in spirit, for one integration per game.
 //!
 //! The flow: [`GiPackage::open`] verifies an `astra-gi.zip` against its SHA-256 and reads its
-//! manifest; [`plan_install`] says exactly what would happen (the consent sheet, as data);
+//! manifest; [`plan_install`] says exactly what would happen (the consent sheet, as data;
+//! [`plan_install_in`] when the game's engine may be one an engine descriptor describes);
 //! [`install`] does that and writes a ledger; [`prepare_launch`] builds the command and
 //! [`launch`] starts it; [`uninstall`] puts everything back.
 //!
@@ -79,8 +80,8 @@ pub use package::{
     GiPackage, Limits, PackageSummary, PlacedFile, SummaryConfigWrite, SummaryGameFile,
 };
 pub use plan::{
-    Accept, FormerFile, GameAction, GameFileAction, InstallPlan, VALVE_ANTI_CHEAT, plan_install,
-    vac_verdict,
+    Accept, FormerFile, GameAction, GameFileAction, InstallPlan, PinnedDescriptor, Provenance,
+    VALVE_ANTI_CHEAT, plan_install, plan_install_in, vac_verdict,
 };
 pub use running::is_running;
 pub use steam_appinfo::{

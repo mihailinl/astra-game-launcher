@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ctx::Ctx;
 use crate::digest::sha256_hex;
+use crate::engines::EngineSet;
 use crate::error::{LauncherError, Result, codes};
 use crate::former;
 use crate::game::GameTarget;
@@ -28,8 +29,8 @@ use crate::paths::{
     plain, prepare_target, prune_empty_dirs, write_atomic,
 };
 use crate::plan::{
-    Accept, FormerFile, GameAction, GameFileAction, InstallPlan, kept_for_their_loader,
-    loader_baselines, plan_install, plan_install_with,
+    Accept, FormerFile, GameAction, GameFileAction, InstallPlan, Planning, kept_for_their_loader,
+    loader_baselines, plan_install_in, plan_install_with,
 };
 use crate::proton;
 use crate::running::refuse_if_running;
@@ -72,8 +73,11 @@ fn backup_rel(rel: &str) -> String {
     format!("{BACKUP_DIR}/game/{rel}")
 }
 
-/// Installs `plan`. The plan must be what [`plan_install`] returns for this package, game and
-/// profile right now; a changed game folder or profile gives `plan-stale`.
+/// Installs `plan`. The plan must be what [`crate::plan_install_in`] returns for this package,
+/// game and profile right now — planned again here with the plan's own provenance and with the
+/// engine descriptor it pinned alone ([`InstallPlan::engine_descriptor`], parsed again and its
+/// digest checked), so no plan is installed against another descriptor than the one it was
+/// made with. A changed game folder, profile or descriptor gives `plan-stale`.
 pub fn install(
     pkg: &GiPackage,
     plan: &InstallPlan,
@@ -91,7 +95,24 @@ pub fn install(
     let profile = canonical_dir(&plan.profile_dir)?;
     let _lock = ProfileLock::acquire(&profile)?;
 
-    let fresh = plan_install(pkg, game, &plan.profile_dir)?;
+    // The descriptor the plan pinned, alone; none for a built-in engine. A pinned descriptor
+    // named the manifest's own code, as the player's pick or as the only one: so it is the pick.
+    let engines = match &plan.engine_descriptor {
+        Some(pinned) => pinned.engine_set()?,
+        None => EngineSet::empty(),
+    };
+    let pick = plan
+        .engine_descriptor
+        .as_ref()
+        .and(pkg.manifest().engine_code());
+    let fresh = plan_install_in(
+        pkg,
+        game,
+        &plan.profile_dir,
+        &engines,
+        plan.provenance,
+        pick.as_ref(),
+    )?;
     if fresh != *plan {
         return Err(stale("plan"));
     }
@@ -105,7 +126,12 @@ pub fn install(
         uninstall_ledger(&profile, &game_root, &old, &plan.game_files)?;
         // The game folder as the plan expected it once the old integration is gone. The plan's
         // refusals were judged with that integration in place, as the person will find the game.
-        let again = plan_install_with(pkg, game, &plan.profile_dir, false)?;
+        let how = Planning {
+            engines: &engines,
+            provenance: plan.provenance,
+            engine_pick: pick.as_ref(),
+        };
+        let again = plan_install_with(pkg, game, &plan.profile_dir, how, false)?;
         if again.game_files != plan.game_files {
             return Err(stale("after-removing-the-previous-integration"));
         }
@@ -156,6 +182,8 @@ pub fn install(
         proton: Vec::new(),
         vac_unchecked_accepted: !plan.vac_checked && accept.vac_unchecked,
         loader_baseline,
+        provenance: plan.provenance,
+        descriptor_sha256: plan.engine_descriptor.as_ref().map(|d| d.sha256.clone()),
     };
     ledger::write(&profile, &ledger)?;
 

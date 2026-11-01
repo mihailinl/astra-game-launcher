@@ -29,11 +29,15 @@
 //! standing with any match decides: a lower one is never asked, so it can neither replace nor
 //! make ambiguous a match above it. Within a standing, Steam's launch hint first (a descriptor
 //! matching the hint wins over every folder-search match), then the folder search. A program
-//! must be what its name says (a PE or ELF image), and a `classify` ending at `unknown` names
-//! nothing. Among one standing's matches: those from the hint; then strong rules over weak ones
-//! (and the lowest `weak_order` among weak ones); the shallowest; one that `passes` over one
-//! that does not. If more than one engine code is still standing that is `engine-ambiguous`:
-//! nothing is preselected. One code: `best`.
+//! must be what its name says (a PE or ELF image), and one planning would refuse a
+//! descriptor's engine on is no match at all ([`Game::plannable`]): a program a built-in rule
+//! names when asked about it alone (planning asks the built-ins first: an Unreal shipping
+//! program below a launcher's folder, a program with a Godot pack embedded), or one whose path
+//! the launcher refuses on some platform (a Windows device name). A `classify` ending at
+//! `unknown` names nothing. Among one standing's matches: those from the hint; then strong
+//! rules over weak ones (and the lowest `weak_order` among weak ones); the shallowest; one that
+//! `passes` over one that does not. If more than one engine code is still standing that is
+//! `engine-ambiguous`: nothing is preselected. One code: `best`.
 //!
 //! **`best`** (Pass A's own order, 0.4.1's `best()`): the shallowest (by evidence, else the
 //! program); one that passes over one that does not; a matching bootstrapper; the largest
@@ -49,10 +53,15 @@
 //! `also_if` and the anchors are answered from per-folder name sets built once per game, never
 //! by scanning a listing ([`Folder`]).
 //!
-//! **A named program** ([`engine_of_program`], planning's engine check): the rules asked about
-//! the one program the caller names, read from a fresh listing of its folder — strong, then
-//! strong-fallback, then weak by `weak_order` (scope default or `named`) — the first that matches
-//! giving the engine; only when no built-in rule matches, the set's descriptors.
+//! **A named program** ([`engine_of_program`], planning's engine check). First the built-in
+//! rules asked about the one program the caller names, read from a fresh listing of its folder —
+//! strong, then strong-fallback, then weak by `weak_order` (scope default or `named`) — the first
+//! that matches giving the engine, exactly as 0.4.1's `engine_of_exe`. Only when none matches,
+//! and only when the game's own Pass A answer (the same walk and Steam hint
+//! [`crate::detect_with_engines`] uses) is open to descriptors, the set: the matches Pass B forms
+//! for the game — its deciding standing, on the hint or in the folder search — restricted to
+//! those whose program IS the one named, chosen by [`Game::resolve`] as Pass B chooses. So
+//! planning names a program as Pass B names the game, and never in a folder Pass A closed.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -280,6 +289,8 @@ struct Game<'a> {
     /// (descriptor, listing, glob, kind). Pass B pays for each lookup every time (its budgets).
     picks: RefCell<HashMap<(usize, Rel), Rc<Largest>>>,
     globs: RefCell<HashMap<GlobKey, Option<String>>>,
+    /// Pass B's programs a descriptor may name ([`Game::plannable`]), memoised by path.
+    plannable: RefCell<HashMap<Rel, bool>>,
     lookups: Cell<u32>,
     bytes: Cell<u64>,
     sizings: Cell<u32>,
@@ -334,70 +345,97 @@ pub(crate) fn pass_a(
     Some(game.builtin_detection(c, detect::anti_cheat_of(entries)))
 }
 
-/// The engine of the program `exe_rel` (below `root`) by the rules asked about it alone (the
-/// module doc's "named program"): the built-in descriptors (`builtin`), and only when none of
-/// their rules matches, `set`'s. `unknown` when nothing matches, or when the program's folder is
-/// not a real folder below `root` (a link on its way is never followed).
+/// What planning's engine check learns about one program ([`engine_of_program`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NamedEngine {
+    /// The program's engine: a built-in rule's code, or the code of the descriptor that names
+    /// it. `unknown` when nothing does, and when descriptors disagree
+    /// ([`NamedEngine::candidates`]).
+    pub(crate) code: EngineCode,
+    /// The digest of the descriptor that named it (Pass B's choice among this program's
+    /// matches): `None` for a built-in rule, and when nothing named it.
+    pub(crate) descriptor_sha256: Option<String>,
+    /// `engine-ambiguous` for this program: every code still standing among its matches,
+    /// sorted, each with the digest of the descriptor that would name it were that code the one
+    /// chosen (the player's pick). Empty otherwise.
+    pub(crate) candidates: Vec<(EngineCode, String)>,
+}
+
+impl NamedEngine {
+    fn of(code: EngineCode) -> NamedEngine {
+        NamedEngine {
+            code,
+            descriptor_sha256: None,
+            candidates: Vec::new(),
+        }
+    }
+
+    fn unknown() -> NamedEngine {
+        NamedEngine::of(EngineCode::unknown())
+    }
+}
+
+/// The engine of the program `exe_rel` (below `root`), for planning (the module doc's "named
+/// program"). The built-in descriptors (`builtin`) asked about it alone, as 0.4.1 asked them;
+/// only when none of their rules matches, `set`'s — and only when the game's Pass A answer,
+/// from the walk and Steam's `hint` that [`crate::detect_with_engines`] uses, is
+/// [`Detection::open_to_descriptors`]: the narrow-only gate, asked here as Pass B asks it. Then
+/// the matches Pass B forms for the game ([`Game::deciding`]), restricted to those whose
+/// program is `exe_rel`, chosen by [`Game::resolve`]. `unknown` when nothing matches, when the
+/// program's folder is not a real folder below `root` (a link on its way is never followed),
+/// and when the game goes over its budget.
 pub(crate) fn engine_of_program(
     root: &Path,
     exe_rel: &[String],
+    hint: Option<&str>,
     builtin: &EngineSet,
     set: &EngineSet,
-) -> EngineCode {
+) -> NamedEngine {
     let Some((_, dir)) = exe_rel.split_last() else {
-        return EngineCode::unknown();
+        return NamedEngine::unknown();
     };
-    let game = Game::new(root, &[], None, Policy::BuiltIn);
-    let Some(folder) = game.folder(dir) else {
-        return EngineCode::unknown();
-    };
-    let builtins = members(builtin);
-    let mut spent = Spent::default();
-    for (mb, rule) in ordered(&builtins, |r| r.scope != Scope::Anywhere) {
-        if let Ok(Some(c)) = game.on_program(mb, rule, exe_rel, &folder, &mut spent) {
-            return c.code;
-        }
+    if Game::new(root, &[], None, Policy::BuiltIn)
+        .folder(dir)
+        .is_none()
+    {
+        return NamedEngine::unknown();
+    }
+    if let Some(code) = builtin_names(root, exe_rel, builtin) {
+        return NamedEngine::of(code);
     }
     if set.is_empty() {
-        return EngineCode::unknown();
+        return NamedEngine::unknown();
     }
-    // The set's descriptors, as Pass B would ask them about this one program: the first
-    // standing with a match answers, and only with one code.
-    let game = Game::new(root, &[], None, Policy::Descriptors);
-    let described = members(set);
-    for standing in [
-        Moderation::Moderated,
-        Moderation::Unchecked,
-        Moderation::Local,
-    ] {
-        let mut found: BTreeSet<EngineCode> = BTreeSet::new();
-        'descriptors: for mb in described
-            .iter()
-            .filter(|mb| set.entries[mb.desc].origin.moderation == standing)
-        {
-            let mut spent = Spent::default();
-            // A descriptor over its budget yields nothing for this program, as in Pass B: what
-            // its earlier rules matched is dropped with it.
-            let mut own: BTreeSet<EngineCode> = BTreeSet::new();
-            for rule in mb.model.rules.iter().filter(|r| r.scope != Scope::Anywhere) {
-                match game.on_program(mb, rule, exe_rel, &folder, &mut spent) {
-                    Ok(Some(c)) => {
-                        own.insert(c.code);
-                    }
-                    Ok(None) => {}
-                    Err(Halt::Descriptor) => continue 'descriptors,
-                    Err(Halt::Game) => return EngineCode::unknown(),
-                }
-            }
-            found.extend(own);
-        }
-        match found.len() {
-            0 => continue,
-            1 => return found.into_iter().next().unwrap_or_else(EngineCode::unknown),
-            _ => return EngineCode::unknown(),
-        }
+    // The game as Pass A sees it: only a folder Pass A left open is the descriptors' to name.
+    let Ok((walk, base)) = detect::pass_a_of(root, hint) else {
+        return NamedEngine::unknown();
+    };
+    if !base.open_to_descriptors() {
+        return NamedEngine::unknown();
     }
-    EngineCode::unknown()
+    let mut game = Game::new(root, &walk.entries, hint, Policy::Descriptors);
+    game.capped = walk.capped;
+    game.named(set, exe_rel)
+}
+
+/// The code a built-in rule gives the program `exe_rel` asked about alone — strong, then
+/// strong-fallback, then weak by `weak_order`, scope default or `named` — read from a fresh
+/// listing of its folder; `None` when none matches, or its folder is not a real folder below
+/// `root`. Planning's built-in half (0.4.1's `engine_of_exe`), and what Pass B leaves alone.
+fn builtin_names(root: &Path, exe_rel: &[String], builtin: &EngineSet) -> Option<EngineCode> {
+    let (_, dir) = exe_rel.split_last()?;
+    let game = Game::new(root, &[], None, Policy::BuiltIn);
+    let folder = game.folder(dir)?;
+    let builtins = members(builtin);
+    let mut spent = Spent::default();
+    ordered(&builtins, |r| r.scope != Scope::Anywhere)
+        .into_iter()
+        .find_map(
+            |(mb, rule)| match game.on_program(mb, rule, exe_rel, &folder, &mut spent) {
+                Ok(Some(c)) => Some(c.code),
+                _ => None,
+            },
+        )
 }
 
 /// Pass B over a game whose Pass A answer is `base` (`unknown`, no evidence, no hint used).
@@ -470,6 +508,7 @@ impl<'a> Game<'a> {
             windows: RefCell::new(HashMap::new()),
             picks: RefCell::new(HashMap::new()),
             globs: RefCell::new(HashMap::new()),
+            plannable: RefCell::new(HashMap::new()),
             lookups: Cell::new(0),
             bytes: Cell::new(0),
             sizings: Cell::new(0),
@@ -484,6 +523,22 @@ impl<'a> Game<'a> {
     }
 
     fn answer(&self, set: &EngineSet, base: Detection) -> Detection {
+        let resolved = self.deciding(set).and_then(|cands| match cands {
+            Some(cands) => self.resolve(cands),
+            None => Ok(Resolution::Nothing),
+        });
+        match resolved {
+            Err(_) | Ok(Resolution::Nothing) => base,
+            Ok(Resolution::One(c)) => self.finish(set, base, c),
+            Ok(Resolution::Ambiguous(cands)) => self.ambiguous(set, base, cands),
+        }
+    }
+
+    /// The standings in Pass B's order — moderated, unchecked, local — and the first with any
+    /// match decides: these are its matches ([`Game::standing`]). A lower standing is never
+    /// asked once a higher one matched, so it can neither replace nor ambiguate it. `None`: no
+    /// descriptor matched.
+    fn deciding(&self, set: &EngineSet) -> Step<Option<Vec<Cand>>> {
         for standing in [
             Moderation::Moderated,
             Moderation::Unchecked,
@@ -496,17 +551,56 @@ impl<'a> Game<'a> {
             if members.is_empty() {
                 continue;
             }
-            let resolved = self
-                .standing(&members)
-                .and_then(|cands| self.resolve(cands));
-            match resolved {
-                Err(_) => return base,
-                Ok(Resolution::Nothing) => continue,
-                Ok(Resolution::One(c)) => return self.finish(set, base, c),
-                Ok(Resolution::Ambiguous(cands)) => return self.ambiguous(set, base, cands),
+            let cands = self.standing(&members)?;
+            if !cands.is_empty() {
+                return Ok(Some(cands));
             }
         }
-        base
+        Ok(None)
+    }
+
+    /// The engine of the one program `exe_rel`, by the matches Pass B forms for this game
+    /// ([`Game::deciding`]) whose program it is, chosen as Pass B chooses ([`Game::resolve`]).
+    /// Where Pass B names the game with this program, this names it with the same descriptor
+    /// (its winner survives every one of `resolve`'s filters among fewer matches); a program
+    /// Pass B formed no match for is named by nothing, whatever the game is.
+    fn named(&self, set: &EngineSet, exe_rel: &[String]) -> NamedEngine {
+        let digest = |c: &Cand| set.entries[c.desc].descriptor.digest().to_owned();
+        let Ok(Some(cands)) = self.deciding(set) else {
+            return NamedEngine::unknown();
+        };
+        let mine: Vec<Cand> = cands
+            .into_iter()
+            .filter(|c| c.exe.as_deref() == Some(exe_rel))
+            .collect();
+        match self.resolve(mine) {
+            Ok(Resolution::One(c)) => NamedEngine {
+                descriptor_sha256: Some(digest(&c)),
+                code: c.code,
+                candidates: Vec::new(),
+            },
+            Ok(Resolution::Ambiguous(mut cands)) => {
+                let codes: BTreeSet<EngineCode> = cands.iter().map(|c| c.code.clone()).collect();
+                let mut candidates = Vec::new();
+                for code in codes {
+                    let (of, rest): (Vec<Cand>, Vec<Cand>) =
+                        cands.into_iter().partition(|c| c.code == code);
+                    cands = rest;
+                    // One code: never ambiguous again; `Err` only when sizing its tie would
+                    // take the game over its budget.
+                    match self.resolve(of) {
+                        Ok(Resolution::One(c)) => candidates.push((code, digest(&c))),
+                        _ => return NamedEngine::unknown(),
+                    }
+                }
+                NamedEngine {
+                    code: EngineCode::unknown(),
+                    descriptor_sha256: None,
+                    candidates,
+                }
+            }
+            Err(_) | Ok(Resolution::Nothing) => NamedEngine::unknown(),
+        }
     }
 
     fn worked(&self, names: usize) {
@@ -1127,7 +1221,27 @@ impl<'a> Game<'a> {
         if !self.magic(prog, spent)? {
             return Ok(None);
         }
+        if !self.builtin_policy() && !self.plannable(&prog.rel) {
+            return Ok(None);
+        }
         self.matched(mb, rule, sc, spent)
+    }
+
+    /// Whether Pass B may name the program `rel` at all: one planning could plan as a
+    /// descriptor's engine. Not one whose path the launcher refuses on some platform (a Windows
+    /// device name, `<>:"|?*\`: [`check_component`]), and not one a built-in rule names when
+    /// asked about it alone ([`builtin_names`], planning's built-in half: an Unreal shipping
+    /// program below a launcher's folder, a program with a Godot pack embedded) — the built-ins
+    /// are asked first there, so a descriptor naming it would name a game planning refuses it
+    /// on. Read as the built-ins read, uncounted; memoised per game.
+    fn plannable(&self, rel: &[String]) -> bool {
+        if let Some(known) = self.plannable.borrow().get(rel) {
+            return *known;
+        }
+        let ok = rel.iter().all(|c| check_component(c))
+            && builtin_names(self.root, rel, super::builtin()).is_none();
+        self.plannable.borrow_mut().insert(rel.to_vec(), ok);
+        ok
     }
 
     /// A rule whose `require` held, from its outcome on: the candidate, or `None` when its
@@ -2250,22 +2364,32 @@ mod tests {
     }
 
     /// Planning's engine check asks a set's descriptors only when no built-in rule matches the
-    /// program, the first standing with a match answering — with one code, or none.
+    /// program and the game's Pass A answer is open to descriptors; then the matches Pass B forms
+    /// for the game, those of this program alone, chosen as Pass B chooses: the deciding
+    /// standing's one code, or its codes when they disagree.
     #[test]
     fn a_named_program_asks_the_set_after_the_built_ins() {
-        let root = std::env::temp_dir().join(format!("agl-eval-named-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let put = |rel: &str, bytes: &[u8]| {
+        let base = std::env::temp_dir().join(format!("agl-eval-named-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (open, closed) = (base.join("open"), base.join("closed"));
+        let put = |root: &Path, rel: &str, bytes: &[u8]| {
             let p = root.join(rel);
             fs::create_dir_all(p.parent().unwrap()).unwrap();
             fs::write(p, bytes).unwrap();
         };
-        put("game/bin/win64/cs2.exe", b"MZ\x90\0 a program");
-        put("game/bin/win64/engine2.dll", b"MZ");
-        put("game/core/pak01_dir.vpk", b"vpk");
-        put("Tool.exe", b"MZ tool");
-        put("Tool_Data/Managed/Assembly-CSharp.dll", b"MZ");
-        put("UnityPlayer.dll", b"MZ");
+        for root in [&open, &closed] {
+            put(root, "game/bin/win64/cs2.exe", b"MZ\x90\0 a program");
+            put(root, "game/bin/win64/engine2.dll", b"MZ");
+            put(root, "game/core/pak01_dir.vpk", b"vpk");
+            // A program in the same shape of folder, with nothing beside it.
+            put(root, "other/bin/win64/tool.exe", b"MZ\x90\0 a tool");
+            put(root, "other/core/x.vpk", b"vpk");
+        }
+        // The closed folder is a Unity game: Pass A decided it.
+        put(&closed, "Tool.exe", b"MZ tool");
+        put(&closed, "Tool_Data/Managed/Assembly-CSharp.dll", b"MZ");
+        put(&closed, "UnityPlayer.dll", b"MZ");
+        put(&closed, "Plain.exe", b"MZ plain");
         let text = |code: &str| {
             format!(
                 "schema = \"astra.engine/1\"\nengine = {{ codes = {{ {code} = \"S {code}\" }} }}\n[[rule]]\ntier = \"strong\"\nprograms = {{ ext = [\"exe\"], at = \"{{project}}/bin/win64\", first = 8 }}\nrequire = [ {{ listed = \"engine2.dll\", kind = \"file\" }}, {{ child = \"{{project}}/core\", kind = \"dir\", as = \"core\" }} ]\ncode = \"{code}\"\nconfidence = \"high\"\nbinary = \"windows\"\nevidence = \"{{core}}\"\n"
@@ -2283,19 +2407,62 @@ mod tests {
                 )
             }))
         };
+        let digest = |code: &str| {
+            Descriptor::from_toml(&text(code))
+                .unwrap()
+                .digest()
+                .to_owned()
+        };
         let rel = |s: &str| s.split('/').map(str::to_owned).collect::<Vec<_>>();
         let builtin = crate::engines::builtin();
-        let ask = |exe: &str, set: &EngineSet| engine_of_program(&root, &rel(exe), builtin, set);
+        let ask = |root: &Path, exe: &str, hint: Option<&str>, set: &EngineSet| {
+            engine_of_program(root, &rel(exe), hint, builtin, set)
+        };
+        let code = |n: NamedEngine| n.code.as_str().to_owned();
 
         let one = set(&[("source2", Moderation::Unchecked, "a")]);
+        let cs2 = "game/bin/win64/cs2.exe";
+        assert_eq!(code(ask(&open, cs2, None, &EngineSet::empty())), "unknown");
+        let named = ask(&open, cs2, None, &one);
         assert_eq!(
-            ask("game/bin/win64/cs2.exe", &EngineSet::empty()),
-            "unknown"
+            (named.code.as_str(), named.descriptor_sha256.as_deref()),
+            ("source2", Some(digest("source2").as_str()))
         );
-        assert_eq!(ask("game/bin/win64/cs2.exe", &one), "source2");
+        assert!(named.candidates.is_empty());
+        // On Steam's hint, as Pass B forms its matches there.
+        assert_eq!(code(ask(&open, cs2, Some(cs2), &one)), "source2");
+        // Pass B names the game with cs2.exe; the tool beside an empty folder is named by
+        // nothing, whatever the game is.
+        assert_eq!(
+            ask(&open, "other/bin/win64/tool.exe", None, &one),
+            NamedEngine::unknown()
+        );
+        // A lower standing never overrules a higher one.
+        let two = set(&[
+            ("source2", Moderation::Local, "a"),
+            ("vapor", Moderation::Moderated, "b"),
+        ]);
+        assert_eq!(code(ask(&open, cs2, None, &two)), "vapor");
+        // Two codes of one standing: none, and both, each with its own descriptor.
+        let tied = set(&[
+            ("source2", Moderation::Unchecked, "a"),
+            ("vapor", Moderation::Unchecked, "b"),
+        ]);
+        let named = ask(&open, cs2, None, &tied);
+        assert_eq!(
+            (named.code.as_str(), named.descriptor_sha256),
+            ("unknown", None)
+        );
+        assert_eq!(
+            named.candidates,
+            [
+                (EngineCode::new("source2").unwrap(), digest("source2")),
+                (EngineCode::new("vapor").unwrap(), digest("vapor")),
+            ]
+        );
+
         // A built-in rule that matches decides: the set is not asked, though one of its
         // descriptors (moderated, so first) matches the same program.
-        put("Plain.exe", b"MZ plain");
         let wide = EngineSet::build([(
             Origin {
                 moderation: Moderation::Moderated,
@@ -2307,22 +2474,16 @@ mod tests {
             ),
         )]);
         assert_eq!(wide.len(), 1, "{:?}", wide.skipped());
-        assert_eq!(ask("Tool.exe", &wide), "unity-mono");
-        // The same descriptor names a program no built-in rule matches (no `Plain_Data/`).
-        assert_eq!(ask("Plain.exe", &wide), "squat");
-        assert_eq!(ask("Tool.exe", &one), "unity-mono");
-        // A lower standing never overrules a higher one; two codes of one standing are none.
-        let two = set(&[
-            ("source2", Moderation::Local, "a"),
-            ("vapor", Moderation::Moderated, "b"),
-        ]);
-        assert_eq!(ask("game/bin/win64/cs2.exe", &two), "vapor");
-        let tied = set(&[
-            ("source2", Moderation::Unchecked, "a"),
-            ("vapor", Moderation::Unchecked, "b"),
-        ]);
-        assert_eq!(ask("game/bin/win64/cs2.exe", &tied), "unknown");
-        let _ = fs::remove_dir_all(&root);
+        assert_eq!(code(ask(&closed, "Tool.exe", None, &wide)), "unity-mono");
+        assert_eq!(code(ask(&closed, "Tool.exe", None, &one)), "unity-mono");
+        // Pass A closed the folder (a Unity game): no descriptor names any program in it, not
+        // one no built-in rule matches (no `Plain_Data/`), not one shaped as it describes.
+        assert_eq!(
+            ask(&closed, "Plain.exe", None, &wide),
+            NamedEngine::unknown()
+        );
+        assert_eq!(ask(&closed, cs2, None, &one), NamedEngine::unknown());
+        let _ = fs::remove_dir_all(&base);
     }
 
     /// A descriptor that goes over its budget on a named program yields nothing for it, as in
@@ -2373,7 +2534,7 @@ mod tests {
         };
         let exe = vec!["Plain.exe".to_owned()];
         let builtin = crate::engines::builtin();
-        let ask = |s: &EngineSet| engine_of_program(&root, &exe, builtin, s);
+        let ask = |s: &EngineSet| engine_of_program(&root, &exe, None, builtin, s).code;
         assert_eq!(ask(&set(&[&matches])), "spent");
         assert_eq!(
             ask(&set(&[&matches, &burns, &burns])),

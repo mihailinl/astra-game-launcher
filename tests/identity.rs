@@ -37,6 +37,14 @@
 //! 0.4.1 runs in a child process with a timeout. The corpus holds links but no FIFO, and no link
 //! a read would follow, so 0.4.1 runs in-process here.
 //!
+//! **The planning canary** ([`planning_canary`]) rides the same detections: wherever Pass B
+//! names a game with a program, `plan_install_in` of that program as that code — with the
+//! program Steam launches for the trusted appid as the hint — plans and pins the very
+//! descriptor Pass B reported; wherever Pass A closed the folder, no program plans as a
+//! descriptor's code; and a program planning names as a descriptor's code has that
+//! descriptor's anchor beside it. C1b's plans are also made again with each hostile set and
+//! must not change (C1c for planning; one set per plan, in turn).
+//!
 //! **Against plan B §2's C1** this is the generated corpus at its full size; the `bin/list-shape`
 //! recordings (`tests/corpus/recorded/`) are not here yet (docs/ENGINE-DESCRIPTORS-DEBT.md).
 
@@ -52,14 +60,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
 use astra_game_launcher::{
-    Detection, Engine, EngineSet, ExePick, detect_with_engines, valve_anti_cheat,
+    Detection, Engine, EngineSet, ExePick, GameTarget, GiPackage, InstallPlan, LauncherError,
+    Platform, Provenance, codes, detect_with_engines, launch_executable, plan_install_in,
+    valve_anti_cheat,
 };
 use common::identity::{
     checked_with_hostile, hostile_lower_set, hostile_set, moderated_hostile_set, narrowed,
     open_to_descriptors,
 };
 use common::{
-    DOORSTOP_V4, E, Tmp, X64, appinfo_vac, copy_tree, pe_with_options, sha, snapshot, write, zip,
+    DOORSTOP_V4, E, Tmp, X64, appinfo_launch, appinfo_vac, copy_tree, pe_with_options, sha,
+    snapshot, write, zip,
 };
 use corpus::{App, Node};
 
@@ -76,6 +87,20 @@ const THREADS: u64 = 8;
 const VAC: u32 = 4_000_011;
 const CLEAR: u32 = 4_000_013;
 const UNLISTED: u32 = 4_000_016;
+
+/// The appid the planning canary's plans are vouched to be, whose appinfo launches the tree's
+/// hint.
+const HINTED: u32 = 4_000_019;
+
+/// The codes the hostile sets admit (`tests/common/identity.rs`), and those of the lower
+/// standings alone.
+const HOSTILE_CODES: [&str; 4] = [
+    "hostile-all",
+    "hostile-unity",
+    "hostile-paks",
+    "hostile-pck",
+];
+const LOWER_CODES: [&str; 3] = ["hostile-unity", "hostile-paks", "hostile-pck"];
 
 /// The walk's bounds (src/detect.rs `MAX_ENTRIES`, `MAX_DEPTH`).
 const MAX_ENTRIES: usize = 5000;
@@ -159,6 +184,25 @@ struct Counts {
     c1b_former_removed: AtomicUsize,
     /// Installs per manifest.
     c1b_installed: Mutex<BTreeMap<String, usize>>,
+    /// C1c for planning: C1b's plans made again with a hostile set (each in turn), held equal.
+    c1b_hostile: AtomicUsize,
+    /// The planning canary ([`planning_canary`]): Pass B named the game with a program, and
+    /// planning that program pinned the same descriptor — with the whole hostile set, and with
+    /// its lower standings.
+    planning_pinned: AtomicUsize,
+    planning_pinned_lower: AtomicUsize,
+    /// Programs of folders Pass A closed, planned as a descriptor's code and refused by the
+    /// engine check with a built-in `got`.
+    planning_closed: AtomicUsize,
+    /// Programs of open folders planned with the lower standings: named by a descriptor (its
+    /// anchor beside them), and left unknown in a game those standings named — of those, the
+    /// ones without the winner's anchor, which planning would name were it not restricted to
+    /// the program's own matches.
+    planning_named: AtomicUsize,
+    planning_unclaimed: AtomicUsize,
+    planning_unclaimed_anchorless: AtomicUsize,
+    /// Plans asked with Steam's hint for the trusted appid (a hint the tree gives).
+    planning_hinted: AtomicUsize,
 }
 
 fn bump(a: &AtomicUsize) {
@@ -581,6 +625,7 @@ fn bootstrap_tie(root: &Path, d: &Detection) -> bool {
 fn one_tree(
     seed: u64,
     zips: &[(Engine, Vec<u8>)],
+    probes: &BTreeMap<&'static str, Vec<u8>>,
     fixtures: &[Fixture],
     appinfo: &Path,
     counts: &Counts,
@@ -623,10 +668,12 @@ fn one_tree(
     }
 
     let mut exes: Vec<PathBuf> = tree.programs.iter().map(PathBuf::from).collect();
+    let mut seen: Vec<Seen> = Vec::new();
     for hint in &tree.hints {
         let hint = (!hint.is_empty()).then_some(hint.as_str());
         let (d, with) = checked_with_hostile(t.path(), hint);
         bump(&counts.detections);
+        let mut lower_seen = None;
         if let Some(exe) = &d.exe
             && !exes.contains(exe)
         {
@@ -704,6 +751,7 @@ fn one_tree(
             if lower.descriptor_sha256.is_some() {
                 bump(&counts.claimed_lower);
             }
+            lower_seen = Some(lower.clone());
             // Where the moderated claim answers alone, nothing below it changes that answer.
             let moderated = detect_with_engines(t.path(), hint, moderated_hostile_set()).unwrap();
             if moderated.descriptor_sha256.is_some() {
@@ -714,6 +762,17 @@ fn one_tree(
                 );
             }
         }
+        seen.push(Seen {
+            hint: hint.map(str::to_owned),
+            pass_a: d,
+            with,
+            lower: lower_seen,
+        });
+    }
+    let hints = seen.len();
+    for (i, s) in seen.into_iter().enumerate() {
+        let at = Turn { seed, i, hints };
+        planning_canary(at, t.path(), profile.path(), s, &exes, probes, counts);
     }
 
     let appid = tree.app.map(|a| match a {
@@ -781,6 +840,241 @@ fn one_tree(
     }
 }
 
+/// Which detection of which tree the planning canary is asked about: the tree's seed, the
+/// hint's index, and how many hints the tree has.
+#[derive(Clone, Copy)]
+struct Turn {
+    seed: u64,
+    i: usize,
+    hints: usize,
+}
+
+/// One detection of a tree, kept for the planning canary ([`planning_canary`]).
+struct Seen {
+    hint: Option<String>,
+    /// Pass A's answer (C1), the hostile set's (C1c), and its lower standings' alone where
+    /// Pass A left the game open.
+    pass_a: Detection,
+    with: Detection,
+    lower: Option<Detection>,
+}
+
+/// Whether the anchor of the hostile descriptor `code` (`tests/common/identity.rs`) sits beside
+/// the program `exe` below `dir`, ignoring ASCII case — the canary's own reading, so a planning
+/// that names a program its descriptor never matched is seen as such. `None` for a descriptor
+/// with no anchor (`hostile-all`, first-party).
+fn anchored(code: &str, dir: &Path, exe: &Path) -> Option<bool> {
+    let program = dir.join(exe);
+    let folder = program.parent()?;
+    let name = program.file_name()?.to_string_lossy().into_owned();
+    let stem = name.rsplit_once('.').map_or(name.as_str(), |(s, _)| s);
+    let beside = |want: &str| {
+        fs::read_dir(folder)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| {
+                e.file_name().to_string_lossy().eq_ignore_ascii_case(want)
+                    && fs::metadata(e.path()).is_ok_and(|m| m.is_file())
+            })
+    };
+    match code {
+        "hostile-unity" => Some(beside("UnityPlayer.dll") || beside("UnityPlayer.so")),
+        "hostile-paks" => Some(beside("Game.pdb")),
+        "hostile-pck" => Some(beside(&format!("{stem}.pck"))),
+        _ => None,
+    }
+}
+
+/// The planning canary (what docs/ENGINE-DESCRIPTORS-DEBT.md's row 10 owed, closed by L3-4),
+/// for one detection of a tree: planning (`plan_install_in`, community) asks the descriptors as
+/// Pass B does, with the program Steam launches for the trusted appid — the tree's hint,
+/// written into that appid's appinfo — as the hint.
+///
+/// - Where Pass B names the game with a program (the whole hostile set, and its lower standings
+///   alone), planning that program as that code plans, and pins the very descriptor Pass B
+///   reports (`Detection::descriptor_sha256`).
+/// - Where Pass A closed the folder, no program plans as any descriptor's code: the engine
+///   check refuses it, with a built-in `got` (each program under one of the tree's hints).
+/// - Where Pass A left it open, a program the lower standings name as a descriptor's code has
+///   that descriptor's anchor beside it ([`anchored`]): a descriptor names only a program it
+///   matched, whatever it named the game with.
+fn planning_canary(
+    turn: Turn,
+    dir: &Path,
+    steam: &Path,
+    seen: Seen,
+    exes: &[PathBuf],
+    probes: &BTreeMap<&'static str, Vec<u8>>,
+    counts: &Counts,
+) {
+    let Turn { seed, i, hints } = turn;
+    // The hint as planning reads it: Steam's launch entry for the trusted appid.
+    let appinfo = steam.join(format!("planning-{i}.vdf"));
+    let (appid, hint) = match &seen.hint {
+        None => (None, None),
+        Some(h) => {
+            fs::write(&appinfo, appinfo_launch(&[(HINTED, h, "windows")])).unwrap();
+            (Some(HINTED), launch_executable(&appinfo, HINTED, "windows"))
+        }
+    };
+    if hint.is_some() {
+        bump(&counts.planning_hinted);
+    }
+    let Seen {
+        pass_a,
+        with,
+        lower,
+        ..
+    } = if hint == seen.hint {
+        seen
+    } else {
+        // Steam's spelling of the hint (normalised): the detections the daemon would make.
+        let h = hint.as_deref();
+        let pass_a = detect_with_engines(dir, h, &EngineSet::empty()).unwrap();
+        let with = detect_with_engines(dir, h, hostile_set()).unwrap();
+        let lower = open_to_descriptors(&pass_a)
+            .then(|| detect_with_engines(dir, h, hostile_lower_set()).unwrap());
+        Seen {
+            hint: hint.clone(),
+            pass_a,
+            with,
+            lower,
+        }
+    };
+    let profile = steam.join("planning-profile");
+    let plan = |exe: &Path, code: &str, set: &EngineSet| -> Result<InstallPlan, LauncherError> {
+        let zip = &probes[code];
+        let pkg = GiPackage::open(zip, &sha(zip)).unwrap();
+        let game = GameTarget {
+            dir: dir.to_path_buf(),
+            exe: exe.to_path_buf(),
+            steam_appid: appid,
+            platform: Platform::LinuxProton { prefix: None },
+            steam_appinfo: Some(appinfo.clone()),
+        };
+        plan_install_in(&pkg, &game, &profile, set, Provenance::Community, None)
+    };
+    let at = |exe: &Path| format!("seed {seed:#x}, hint {hint:?}, exe {exe:?}");
+
+    // Pass B named the game with a program: planning it as that code pins Pass B's descriptor.
+    for (named, set, pinned) in [
+        (Some(&with), hostile_set(), &counts.planning_pinned),
+        (
+            lower.as_ref(),
+            hostile_lower_set(),
+            &counts.planning_pinned_lower,
+        ),
+    ] {
+        let Some(named) = named else { continue };
+        let (Some(sha256), Some(exe)) = (&named.descriptor_sha256, &named.exe) else {
+            continue;
+        };
+        match plan(exe, named.engine.as_str(), set) {
+            Ok(p) => {
+                assert_eq!(
+                    p.engine_descriptor.as_ref().map(|d| &d.sha256),
+                    Some(sha256),
+                    "planning canary: planning pins the descriptor Pass B named the game with ({})",
+                    at(exe)
+                );
+                bump(pinned);
+            }
+            Err(e) => assert_eq!(
+                e.code,
+                codes::ANTI_CHEAT,
+                "planning canary: Pass B named the game {} with this program, so planning it as that is no {e:?} ({})",
+                named.engine,
+                at(exe)
+            ),
+        }
+    }
+
+    if !open_to_descriptors(&pass_a) {
+        // Each program under one of the tree's hints, turning: Pass A's walk per plan is what
+        // this costs.
+        for (k, exe) in exes
+            .iter()
+            .enumerate()
+            .filter(|(k, _)| (k + i) % hints == 0)
+        {
+            let code = HOSTILE_CODES[(seed as usize + i + k) % HOSTILE_CODES.len()];
+            match plan(exe, code, hostile_set()) {
+                Ok(_) => panic!(
+                    "planning canary: Pass A closed the folder, yet a program plans as {code} ({})",
+                    at(exe)
+                ),
+                Err(e) if e.code == codes::ENGINE_MISMATCH => {
+                    let got = e.param("got").unwrap_or_default();
+                    assert!(
+                        Engine::from_code(got).is_some(),
+                        "planning canary: Pass A closed the folder, yet planning names a program {got} ({})",
+                        at(exe)
+                    );
+                    bump(&counts.planning_closed);
+                }
+                Err(e) => assert!(
+                    ![codes::ENGINE_AMBIGUOUS, codes::DESCRIPTOR_MISMATCH].contains(&e.code),
+                    "planning canary: Pass A closed the folder, yet descriptors were asked: {e:?} ({})",
+                    at(exe)
+                ),
+            }
+        }
+        return;
+    }
+    let Some(lower) = lower else { return };
+    let claim = lower
+        .descriptor_sha256
+        .is_some()
+        .then_some(lower.engine.as_str());
+    for (k, exe) in exes.iter().enumerate() {
+        let code = LOWER_CODES[(seed as usize + i + k) % LOWER_CODES.len()];
+        let named = match plan(exe, code, hostile_lower_set()) {
+            Ok(_) => code.to_owned(),
+            Err(e) if e.code == codes::ENGINE_MISMATCH => {
+                e.param("got").unwrap_or_default().to_owned()
+            }
+            Err(_) => continue,
+        };
+        if Engine::from_code(&named).is_none() {
+            assert_ne!(
+                anchored(&named, dir, exe),
+                Some(false),
+                "planning canary: planning names a program {named} without that descriptor's anchor beside it ({})",
+                at(exe)
+            );
+            bump(&counts.planning_named);
+        } else if named == "unknown"
+            && let Some(claim) = claim
+        {
+            bump(&counts.planning_unclaimed);
+            if anchored(claim, dir, exe) == Some(false) {
+                bump(&counts.planning_unclaimed_anchorless);
+            }
+        }
+    }
+}
+
+/// [`plan_new`], with `set` (first-party, no pick): C1c for planning.
+fn plan_new_in(p: &Planned, zip: &[u8], set: &EngineSet) -> String {
+    let pkg = GiPackage::open(zip, &sha(zip)).unwrap();
+    let game = GameTarget {
+        dir: p.dir.to_path_buf(),
+        exe: p.exe.to_path_buf(),
+        steam_appid: p.appid,
+        platform: if p.proton {
+            Platform::LinuxProton { prefix: None }
+        } else {
+            Platform::LinuxNative
+        },
+        steam_appinfo: Some(p.appinfo.to_path_buf()),
+    };
+    match plan_install_in(&pkg, &game, p.profile, set, Provenance::FirstParty, None) {
+        Ok(plan) => serde_json::to_string(&plan).unwrap(),
+        Err(e) => format!("{} {:?}", e.code, e.params),
+    }
+}
+
 /// The engine planning's engine check saw for the probe `probe`: its own when it planned, `got`
 /// when it refused as a mismatch, nothing when it refused before the check.
 fn engine_seen(plan: &str, probe: Engine) -> Option<String> {
@@ -839,6 +1133,18 @@ fn c1b_plan(
         f.name, p.exe, p.appid
     );
     bump(&counts.c1b_plans);
+    // C1c for planning: no engine set changes a plan of Astra's own (a built-in engine). One
+    // hostile set per plan, turning, so each is passed in over a third of the corpus.
+    let sets = [hostile_set(), hostile_lower_set(), moderated_hostile_set()];
+    assert_eq!(
+        plan_new_in(&p, &f.zip, sets[turn % sets.len()]),
+        new,
+        "C1c: Astra's own manifest {} plans alike whatever engine set planning is given (seed {seed:#x}, exe {:?}, set {})",
+        f.name,
+        p.exe,
+        turn % sets.len()
+    );
+    bump(&counts.c1b_hostile);
     tally(&new, &counts.c1b_actions, &counts.c1b_refusals);
     if new.starts_with('{') {
         bump(&counts.c1b_planned);
@@ -1372,6 +1678,8 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
         .filter(|e| **e != Engine::Unknown)
         .map(|e| (*e, probe_zip(e.code())))
         .collect();
+    let probes: BTreeMap<&'static str, Vec<u8>> =
+        HOSTILE_CODES.iter().map(|c| (*c, probe_zip(c))).collect();
     let fixtures: Vec<Fixture> = MANIFESTS.iter().map(|(n, m)| fixture(n, m)).collect();
     let world = Tmp::new("corpus-appinfo");
     let appinfo = world.join("appinfo.vdf");
@@ -1398,7 +1706,8 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
     std::thread::scope(|s| {
         pool.run(s, &fixtures, &appinfo, &counts);
         for w in 0..THREADS {
-            let (zips, fixtures, counts, appinfo) = (&zips, &fixtures, &counts, appinfo.as_path());
+            let (zips, probes, fixtures, counts, appinfo) =
+                (&zips, &probes, &fixtures, &counts, appinfo.as_path());
             let installs = installs.clone();
             s.spawn(move || {
                 let mut i = w;
@@ -1406,6 +1715,7 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
                     one_tree(
                         SEED.wrapping_add(i),
                         zips,
+                        probes,
                         fixtures,
                         appinfo,
                         counts,
@@ -1602,6 +1912,59 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
         assert!(
             got >= floor,
             "C1b past the fresh game, {k}: {got} < {floor}: the corpus no longer reaches it"
+        );
+    }
+
+    // C1c for planning, and the planning canary: what each reached.
+    // About half what the seed reaches in 20,000 trees, as C1's floors are.
+    let planning = [
+        ("C1b plans with a hostile set", get(&c.c1b_hostile), 34_000),
+        (
+            "plans asked with Steam's hint",
+            get(&c.planning_hinted),
+            32_000,
+        ),
+        (
+            "Pass B's program pinned (hostile set)",
+            get(&c.planning_pinned),
+            8_000,
+        ),
+        (
+            "Pass B's program pinned (lower standings)",
+            get(&c.planning_pinned_lower),
+            1_400,
+        ),
+        (
+            "closed folders: programs refused",
+            get(&c.planning_closed),
+            27_000,
+        ),
+        (
+            "open folders: programs named",
+            get(&c.planning_named),
+            1_500,
+        ),
+        (
+            "named games: programs left unknown",
+            get(&c.planning_unclaimed),
+            3_000,
+        ),
+        (
+            "... without the winner's anchor",
+            get(&c.planning_unclaimed_anchorless),
+            2_700,
+        ),
+    ];
+    eprintln!("C1c for planning and the planning canary:");
+    for (k, v, _) in &planning {
+        eprintln!("  {v:7}  {k}");
+    }
+    assert_eq!(get(&c.c1b_hostile), get(&c.c1b_plans));
+    for (k, got, per_20k) in planning {
+        let floor = (per_20k * trees as usize / 20_000).max(1);
+        assert!(
+            got >= floor,
+            "planning canary, {k}: {got} < {floor}: the corpus no longer reaches it"
         );
     }
 }

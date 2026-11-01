@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{LauncherError, Result, codes};
 use crate::manifest::IntegrationInfo;
 use crate::paths::{LEDGER_FILE, LOCK_FILE, check_regular_or_absent, write_atomic};
-use crate::plan::GameAction;
+use crate::plan::{GameAction, Provenance};
 
 /// The newest ledger schema this launcher reads. A ledger is WRITTEN as the lowest schema that
 /// carries it: 1, or 2 for a `proton` array (several overrides), or 3 for a game file shared with
@@ -123,6 +123,16 @@ pub struct Ledger {
     /// proxy that is not ours counts as someone else's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loader_baseline: Vec<LoaderBaseline>,
+    /// Who vouched for the integration at install ([`crate::plan_install_in`]). Absent when
+    /// first-party, and from every ledger written before 0.5.0: a launcher before it ignores the
+    /// key (no schema change).
+    #[serde(default, skip_serializing_if = "Provenance::is_first_party")]
+    pub provenance: Provenance,
+    /// The digest of the engine descriptor that named the game's engine at install
+    /// ([`crate::InstallPlan::engine_descriptor`]). Absent for a built-in engine, and from every
+    /// ledger written before 0.5.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub descriptor_sha256: Option<String>,
 }
 
 /// `proton` is an object when there is one record (every ledger written before several overrides

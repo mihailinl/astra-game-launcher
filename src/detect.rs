@@ -61,7 +61,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::engines::{self, EngineCode, EngineSet};
+use crate::engines::{self, EngineCode, EngineSet, NamedEngine};
 use crate::error::{LauncherError, Result};
 
 const MAX_DEPTH: usize = 4;
@@ -505,9 +505,7 @@ pub fn detect_with_engines(
     launch_hint: Option<&str>,
     engines: &EngineSet,
 ) -> Result<Detection> {
-    let walked = builtin_walk(game_dir)?;
-    let found = engines::pass_a(game_dir, launch_hint, &walked.entries, engines::builtin())
-        .unwrap_or_else(|| one_program(&walked.entries));
+    let (walked, found) = pass_a_of(game_dir, launch_hint)?;
     if engines.is_empty() || !found.open_to_descriptors() {
         return Ok(found);
     }
@@ -518,6 +516,16 @@ pub fn detect_with_engines(
         engines,
         found,
     ))
+}
+
+/// Pass A, as [`detect_with_engines`] makes it: the built-ins' walk of `game_dir`, and their
+/// answer (the one-program fallback when no rule names a game). Planning's engine check asks
+/// this, with the same hint, before it lets a descriptor name a program.
+pub(crate) fn pass_a_of(game_dir: &Path, launch_hint: Option<&str>) -> Result<(Walk, Detection)> {
+    let walked = builtin_walk(game_dir)?;
+    let found = engines::pass_a(game_dir, launch_hint, &walked.entries, engines::builtin())
+        .unwrap_or_else(|| one_program(&walked.entries));
+    Ok((walked, found))
 }
 
 /// No built-in rule named a game: `unknown`, with the program named when there is exactly one
@@ -570,14 +578,18 @@ pub(crate) fn rel_path(rel: &[String]) -> PathBuf {
     rel.iter().collect()
 }
 
-/// The engine of the game whose program is `exe_rel`, by the rules asked about that one program
-/// (the built-in descriptors, then `engines`' only when no built-in rule matches): read from a
-/// fresh listing of its own folder, never through a link. `unknown` when nothing matches:
-/// another program in the folder being a game says nothing about this one.
+/// The engine of the game whose program is `exe_rel`, for planning's engine check: by the
+/// built-in rules asked about that one program, read from a fresh listing of its own folder,
+/// never through a link — another program in the folder being a game says nothing about this
+/// one — and only when none matches, by `engines`: where the game's Pass A answer (with Steam's
+/// `launch_hint`, as the daemon detects) is open to descriptors, the descriptor Pass B would
+/// choose among the matches of this program ([`engines::engine_of_program`]). `unknown` when
+/// nothing matches.
 pub(crate) fn engine_of_exe_with(
     engines: &EngineSet,
     game_dir: &Path,
     exe_rel: &[String],
-) -> EngineCode {
-    engines::engine_of_program(game_dir, exe_rel, engines::builtin(), engines)
+    launch_hint: Option<&str>,
+) -> NamedEngine {
+    engines::engine_of_program(game_dir, exe_rel, launch_hint, engines::builtin(), engines)
 }

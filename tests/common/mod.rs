@@ -413,3 +413,56 @@ pub fn appinfo_vac(apps: &[(u32, Option<bool>)]) -> Vec<u8> {
     out.extend_from_slice(&0u32.to_le_bytes());
     out
 }
+
+/// An `appinfo.vdf` (v28) of apps that each launch one program: `(appid, executable, os)`, as
+/// the entry `config/launch/0` of type `default` for that OS — what `launch_executable` reads
+/// as the program Steam starts. No `common/category`: the VAC flag is not known for them.
+pub fn appinfo_launch(apps: &[(u32, &str, &str)]) -> Vec<u8> {
+    fn key(out: &mut Vec<u8>, ty: u8, k: &str) {
+        out.push(ty);
+        out.extend_from_slice(k.as_bytes());
+        out.push(0);
+    }
+    fn string(out: &mut Vec<u8>, k: &str, v: &str) {
+        key(out, 0x01, k);
+        out.extend_from_slice(v.as_bytes());
+        out.push(0);
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x0756_4428u32.to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes());
+    for (id, exe, os) in apps {
+        let mut body = Vec::new();
+        key(&mut body, 0x00, "appinfo");
+        key(&mut body, 0x02, "appid");
+        body.extend_from_slice(&(*id as i32).to_le_bytes());
+        key(&mut body, 0x00, "common");
+        string(&mut body, "name", "A game");
+        string(&mut body, "type", "Game");
+        body.push(0x08); // common
+        key(&mut body, 0x00, "config");
+        key(&mut body, 0x00, "launch");
+        key(&mut body, 0x00, "0");
+        string(&mut body, "executable", exe);
+        string(&mut body, "type", "default");
+        key(&mut body, 0x00, "config");
+        string(&mut body, "oslist", os);
+        body.push(0x08); // config
+        body.push(0x08); // 0
+        body.push(0x08); // launch
+        body.push(0x08); // config
+        body.push(0x08); // appinfo
+        body.push(0x08); // the record
+        out.extend_from_slice(&id.to_le_bytes());
+        out.extend_from_slice(&(60 + body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&2u32.to_le_bytes());
+        out.extend_from_slice(&1_700_000_000u32.to_le_bytes());
+        out.extend_from_slice(&0u64.to_le_bytes());
+        out.extend_from_slice(&[0xAB; 20]);
+        out.extend_from_slice(&42u32.to_le_bytes());
+        out.extend_from_slice(&[0xCD; 20]);
+        out.extend_from_slice(&body);
+    }
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out
+}

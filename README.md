@@ -281,6 +281,7 @@ have one digest.
 ```rust
 let engines = EngineSet::build(offered);                 // (Origin, Descriptor::from_json(..)) pairs
 let d = detect_with_engines(&dir, hint, &engines)?;      // Pass A, then perhaps Pass B
+let plan = plan_install_in(&pkg, &game, &profile_dir, &engines, Provenance::Community, pick)?;
 ```
 
 - `Detection::engine` is an `EngineCode` (`^[a-z][a-z0-9-]{1,31}$`), serialised exactly as the
@@ -306,7 +307,24 @@ let d = detect_with_engines(&dir, hint, &engines)?;      // Pass A, then perhaps
   the built-ins are Astra's own, bounded by the walk alone.
 - A Pass B answer carries `Detection::descriptor_sha256`, perhaps `Detection::version`, and
   `anti-cheat-unknown` in `anti_cheat` when the walk stopped at its cap or a `*.sys` ships.
-  None of these fields appear in a Pass A detection's JSON.
+  None of these fields appear in a Pass A detection's JSON. Pass B never names a program a
+  built-in rule names when asked about it alone (planning asks the built-ins first), nor one
+  whose path the launcher refuses on some platform.
+- **Planning asks them too: `plan_install_in`.** `[target] engine` = a descriptor's code plans
+  where the descriptor Pass B would choose among the game program's own matches names it —
+  never in a folder the built-ins decided — asked with the program Steam launches for the
+  trusted appid as the hint, as the daemon detects; `engine-mismatch{want, got}` elsewhere. A
+  program descriptors of one standing disagree about plans only with the player's `pick` of
+  the manifest's code (`engine-ambiguous{want, codes}`). A foundation's own
+  `[integration.engine]` must be that very descriptor (`descriptor-mismatch{want, got}`). A
+  built-in code is checked as before, whatever the set holds. The plan pins the descriptor
+  (`InstallPlan::engine_descriptor`, a `PinnedDescriptor`) and records the `Provenance` the
+  caller vouches for (first-party: id and repository in Astra's compiled seed; community:
+  anyone else's), and `install` plans again with the pin alone, its digest checked
+  (`plan-stale` otherwise); the ledger records both (`provenance`, `descriptor_sha256`).
+  `plan_install` is `plan_install_in` with no descriptors, first-party and no pick: 0.4.1's
+  planning, and a first-party plan of a built-in engine's manifest serialises exactly as
+  0.4.1's.
 
 ## `gi-probe`: checking a release before anybody installs it (0.5.0)
 

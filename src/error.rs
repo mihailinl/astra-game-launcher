@@ -97,9 +97,14 @@ pub mod codes {
     pub const ENGINE_NAME_RESERVED: &str = "engine-name-reserved";
     /// `code` belongs to another publisher (`owner`), admitted with it first.
     pub const ENGINE_CODE_TAKEN: &str = "engine-code-taken";
-    /// Not a refusal of the launcher's: the state of a [`crate::Detection`] whose
-    /// `engine_candidates` are not empty — descriptors of one standing disagree.
+    /// The state of a [`crate::Detection`] whose `engine_candidates` are not empty —
+    /// descriptors of one standing disagree; and planning's refusal (`want`, `codes`) when they
+    /// disagree about the game's program and the player's pick is not the manifest's code
+    /// ([`crate::plan_install_in`]).
     pub const ENGINE_AMBIGUOUS: &str = "engine-ambiguous";
+    /// The manifest's own `[integration.engine]` (`want`, its digest) is not the descriptor
+    /// that named the game's engine (`got`: that one's digest, `none` when no descriptor did).
+    pub const DESCRIPTOR_MISMATCH: &str = "descriptor-mismatch";
     /// Not a refusal of the launcher's: the anti-cheat entry a descriptor's claim carries when
     /// the walk stopped at its cap or a kernel driver (`*.sys`) ships beside the game.
     pub const ANTI_CHEAT_UNKNOWN: &str = "anti-cheat-unknown";
@@ -182,6 +187,7 @@ pub mod codes {
         ENGINE_NAME_RESERVED,
         ENGINE_CODE_TAKEN,
         ENGINE_AMBIGUOUS,
+        DESCRIPTOR_MISMATCH,
         ANTI_CHEAT_UNKNOWN,
         ENGINE_UNDECLARED,
         NEEDS_NEWER_ASTRA,
@@ -303,6 +309,9 @@ impl LauncherError {
             codes::ENGINE_NAME_RESERVED => "an engine descriptor's engine name is reserved",
             codes::ENGINE_CODE_TAKEN => "the engine code belongs to another publisher",
             codes::ENGINE_AMBIGUOUS => "more than one engine matches this game",
+            codes::DESCRIPTOR_MISMATCH => {
+                "the integration's engine descriptor is not the one that recognised this game"
+            }
             codes::ANTI_CHEAT_UNKNOWN => {
                 "whether the game uses anti-cheat cannot be told from its folder"
             }
