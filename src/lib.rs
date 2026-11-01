@@ -9,7 +9,8 @@
 //! manifest; [`plan_install`] says exactly what would happen (the consent sheet, as data;
 //! [`plan_install_in`] when the game's engine may be one an engine descriptor describes);
 //! [`install`] does that and writes a ledger; [`prepare_launch`] builds the command and
-//! [`launch`] starts it; [`uninstall`] puts everything back.
+//! [`launch`] starts it; [`uninstall`] puts everything back, and [`restore_game_files`] puts the
+//! game's files back and keeps the profile (a withdrawn integration).
 //!
 //! Every refusal is a [`LauncherError`]: a stable code plus params. The library never elevates,
 //! never runs a program from a package, and writes into the game folder only the files the
@@ -55,7 +56,9 @@ pub use fetch::UreqFetch;
 pub use fetch::{Fetch, MAX_DOWNLOAD_BYTES, fetch_verified};
 pub use former::FormerKind;
 pub use game::{GameTarget, Platform, proton_prefix_for, steam_appid_of_dir, steam_appids_of_dir};
-pub use install::{KEPT_FOLDER_GAINED_FILES, UninstallReport, install, installed, uninstall};
+pub use install::{
+    KEPT_FOLDER_GAINED_FILES, UninstallReport, install, installed, restore_game_files, uninstall,
+};
 pub use launch::{
     MODS_CHOICE_UNREADABLE, MODS_PACK_PATH_REFUSED, ProcessPlan, STEAM_LAUNCH_OPTIONS_DOORSTOP,
     Spawn, StdSpawn, find_steam, launch, prepare_launch, prepare_launch_with,

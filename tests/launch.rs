@@ -388,3 +388,65 @@ fn several_overrides_are_all_applied_and_all_restored_byte_exactly() {
         "user.reg is byte-for-byte what it was"
     );
 }
+
+/// A `[[config_writes]]` entry that sets a caller's variable (the runner's sets `${bridge_port}`
+/// and `${bridge_token}`) is the user's alone: mode 0600 when Play creates it, when it rewrites an
+/// existing 0644 file, and when it leaves an 0644 file's text as it is. One that sets only
+/// `${profile}` keeps whatever mode its file had.
+#[cfg(unix)]
+#[test]
+fn a_config_write_carrying_a_token_is_mode_0600_and_one_carrying_only_paths_keeps_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let set_mode =
+        |p: &Path, m: u32| fs::set_permissions(p, fs::Permissions::from_mode(m)).unwrap();
+    let w = World::new();
+    let m = runner_manifest(
+        "\n[[config_writes]]\nfile = \"${profile}/BepInEx/config/paths.cfg\"\nsection = \"Paths\"\nset = { Root = \"${profile}/data\" }\n",
+    );
+    let pkg = open(&runner_zip(&m)).unwrap();
+    let game = w.proton();
+    plan_and_install(&pkg, &game, &w.profile());
+    let cfg = w.profile().join("BepInEx/config/astra.cfg");
+    let paths = w.profile().join("BepInEx/config/paths.cfg");
+    let play = || prepare_launch(&w.profile(), &game, &vars(), steam()).unwrap();
+    // Under Proton, `${profile}/data` is the profile's `Z:` path.
+    let profile = fs::canonicalize(w.profile()).unwrap();
+    let root = format!(
+        "[Paths]\nRoot = Z:{}\\data\n",
+        profile.display().to_string().replace('/', "\\")
+    );
+
+    // Fresh.
+    play();
+    assert_eq!(mode(&cfg), 0o600, "a fresh token file");
+    assert_eq!(
+        fs::read_to_string(&cfg).unwrap(),
+        "[Connection]\nPort = 5555\nToken = s3cret\n"
+    );
+
+    // Over an existing 0644 file that the write changes.
+    fs::write(&cfg, "[Connection]\nPort = 5555\nToken = old\n").unwrap();
+    set_mode(&cfg, 0o644);
+    play();
+    assert_eq!(mode(&cfg), 0o600, "rewritten over an 0644 file");
+    assert!(fs::read_to_string(&cfg).unwrap().contains("Token = s3cret"));
+
+    // Over an existing 0644 file that already says it all: tightened, its text untouched.
+    set_mode(&cfg, 0o644);
+    let text = fs::read_to_string(&cfg).unwrap();
+    play();
+    assert_eq!(mode(&cfg), 0o600, "an unchanged 0644 file is tightened");
+    assert_eq!(fs::read_to_string(&cfg).unwrap(), text);
+
+    // `${profile}` alone: the mode the file had, whether the write changes it or not.
+    for (m, rewrite) in [(0o644, true), (0o640, true), (0o644, false)] {
+        if rewrite {
+            fs::write(&paths, "[Paths]\nRoot = elsewhere\n").unwrap();
+        }
+        set_mode(&paths, m);
+        play();
+        assert_eq!(mode(&paths), m, "a file of paths keeps its mode ({m:o})");
+        assert_eq!(fs::read_to_string(&paths).unwrap(), root);
+    }
+}

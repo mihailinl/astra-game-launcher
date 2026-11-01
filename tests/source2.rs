@@ -13,7 +13,8 @@
 //! and planning refuses wherever the descriptor is not the one that named the game.
 //!
 //! Step 5 of L3 adds the loader rules on its game (a foreign `dinput8.dll`, a kept `s2bridge.ini`,
-//! the proxy-folder baseline); steps 6-7 extend it (the restore).
+//! the proxy-folder baseline); step 6 the restore of a withdrawn integration (`restore_game_files`:
+//! the folder back, the profile kept, Play refused, then the uninstall).
 
 mod common;
 #[path = "common/spec_goldens.rs"]
@@ -25,7 +26,7 @@ use astra_game_launcher::{
     Ctx, Descriptor, Engine, EngineSet, GameAction, GiPackage, KEPT_FOLDER_GAINED_FILES,
     LEDGER_FILE_NAME, Ledger, Manifest, Moderation, Origin, Platform, Provenance, codes,
     detect_with_engines, install, installed, plan_install, plan_install_in, prepare_launch,
-    uninstall,
+    restore_game_files, uninstall,
 };
 use common::*;
 
@@ -259,6 +260,27 @@ fn a_unity_game_with_engine2_beside_its_program_stays_unity() {
     );
 }
 
+/// The foundation's own proxy and the config it keeps, as the loader tests place them.
+const PROXY: &[u8] = b"MZ the foundation's dinput8 proxy";
+const BRIDGE_INI: &[u8] = b"[bridge]\nport = 0\n";
+
+/// The golden placing both files its `[integration.loader]` names beside the program:
+/// `dinput8.dll` (a declared proxy) and `s2bridge.ini` (kept when present).
+fn with_loader_files(golden: &str) -> GiPackage {
+    let text = format!(
+        "{golden}\n[[game_files]]\nfrom = \"loader/dinput8.dll\"\nto = \"${{game}}/dinput8.dll\"\nsha256 = \"{}\"\n\n[[game_files]]\nfrom = \"loader/s2bridge.ini\"\nto = \"${{game}}/s2bridge.ini\"\nsha256 = \"{}\"\n",
+        sha(PROXY),
+        sha(BRIDGE_INI)
+    );
+    open(&zip(&[
+        E::File("astra-gi.toml", text.as_bytes()),
+        E::File("bridge/s2bridge.dll", b"MZ bridge"),
+        E::File("loader/dinput8.dll", PROXY),
+        E::File("loader/s2bridge.ini", BRIDGE_INI),
+    ]))
+    .unwrap()
+}
+
 /// The foundation's own `[integration.loader]` (`proxies = ["dinput8.dll"]`, `keep_if_present =
 /// ["s2bridge.ini"]`) on its game, the golden placing both beside the program: a foreign
 /// `dinput8.dll` is another loader, never replaced; a foreign `s2bridge.ini` is the player's and
@@ -269,20 +291,8 @@ fn the_source2_foundations_loader_rules_hold_on_its_game() {
     let golden = manifest_text();
     let d = descriptor_of(&golden);
     let set = engines(&d);
-    let proxy: &[u8] = b"MZ the foundation's dinput8 proxy";
-    let ini: &[u8] = b"[bridge]\nport = 0\n";
-    let text = format!(
-        "{golden}\n[[game_files]]\nfrom = \"loader/dinput8.dll\"\nto = \"${{game}}/dinput8.dll\"\nsha256 = \"{}\"\n\n[[game_files]]\nfrom = \"loader/s2bridge.ini\"\nto = \"${{game}}/s2bridge.ini\"\nsha256 = \"{}\"\n",
-        sha(proxy),
-        sha(ini)
-    );
-    let pkg = open(&zip(&[
-        E::File("astra-gi.toml", text.as_bytes()),
-        E::File("bridge/s2bridge.dll", b"MZ bridge"),
-        E::File("loader/dinput8.dll", proxy),
-        E::File("loader/s2bridge.ini", ini),
-    ]))
-    .unwrap();
+    let proxy = PROXY;
+    let pkg = with_loader_files(&golden);
     let dir = Tmp::new("s2-loader");
     source2_game(dir.path());
     let beside = dir.join("game/bin/win64");
@@ -333,6 +343,57 @@ fn the_source2_foundations_loader_rules_hold_on_its_game() {
         r.kept_reasons.get("dinput8.dll").map(String::as_str),
         Some(KEPT_FOLDER_GAINED_FILES)
     );
+    assert_eq!(r.warnings, [codes::RESTORE_PARTIAL], "ours is still there");
     assert_eq!(std::fs::read(beside.join("dinput8.dll")).unwrap(), proxy);
     assert_eq!(std::fs::read(beside.join("s2bridge.ini")).unwrap(), theirs);
+}
+
+/// A withdrawn Source 2 foundation (a revoke, A§4.4): `restore_game_files` puts the game folder
+/// back byte for byte and keeps the profile; Play is then refused; the uninstall removes the
+/// profile.
+#[test]
+fn a_restored_source2_foundation_refuses_play_and_uninstalls() {
+    let golden = manifest_text();
+    let set = engines(&descriptor_of(&golden));
+    let pkg = with_loader_files(&golden);
+    let dir = Tmp::new("s2-restore");
+    source2_game(dir.path());
+    let before = snapshot(dir.path());
+    let game = target(dir.path(), EXE, None, Platform::Windows);
+    let profiles = Tmp::new("s2-restore-profiles");
+    let profile = profiles.join("p");
+    let plan = plan_install_in(&pkg, &game, &profile, &set, Provenance::Community, None).unwrap();
+    install(&pkg, &plan, &game, ACCEPT, &Ctx::silent()).unwrap();
+    prepare_launch(&profile, &game, &vars(), None).unwrap();
+
+    let r = restore_game_files(&profile, &game).unwrap();
+    assert_eq!(r.removed, ["s2bridge.ini", "dinput8.dll"]);
+    assert!(r.kept.is_empty() && r.warnings.is_empty(), "{r:?}");
+    assert_eq!(
+        snapshot(dir.path()),
+        before,
+        "the game folder byte for byte"
+    );
+    assert!(
+        profile.join("bridge/s2bridge.dll").is_file(),
+        "the profile is kept"
+    );
+    let restored = installed(&profile).unwrap().unwrap();
+    assert_eq!(restored.state, astra_game_launcher::LedgerState::Restored);
+    assert_eq!(
+        restored.descriptor_sha256,
+        plan.engine_descriptor.map(|d| d.sha256)
+    );
+
+    let e = prepare_launch(&profile, &game, &vars(), None).unwrap_err();
+    assert_eq!(
+        (e.code, e.param("reason")),
+        (codes::NEEDS_REINSTALL, Some("restored"))
+    );
+
+    let r = uninstall(&profile, &game).unwrap();
+    assert_eq!(r.profile_files_removed as usize, restored.files.len());
+    assert_eq!(installed(&profile).unwrap(), None);
+    assert!(!profile.join("bridge/s2bridge.dll").exists());
+    assert_eq!(snapshot(dir.path()), before);
 }

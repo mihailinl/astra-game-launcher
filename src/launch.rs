@@ -55,7 +55,8 @@ use crate::mods::ModsEnv;
 use crate::mods::play::{GamePath, without_doorstop_options};
 use crate::paths::{
     FileState, PLAY_ARM_FILE, canonical_dir, check_regular_or_absent, checked_rel, existing_target,
-    file_state, parse_jailed, plain, prepare_target, real_case, write_atomic,
+    file_state, is_private, parse_jailed, plain, prepare_target, real_case, write_atomic,
+    write_atomic_private,
 };
 use crate::plan::{GameAction, is_loader_proxy, keep_if_present};
 use crate::proton;
@@ -399,7 +400,9 @@ fn write_play_arm(path: &Path, appid: u32) -> Result<()> {
     write_atomic(path, &text)
 }
 
-/// Prepares a launch: checks the install, writes `[[config_writes]]` (into the profile only),
+/// Prepares a launch: checks the install (`needs-reinstall`, `reason` = `incomplete` for an
+/// install cut off, `restored` after [`crate::restore_game_files`]), writes `[[config_writes]]`
+/// (into the profile only; an entry that sets a caller's variable is mode 0600 on Unix),
 /// applies the Proton override (`proton-prefix-missing` when the prefix does not exist yet) and
 /// returns the command — `<steam> -applaunch <appid> <args…>` for a Steam game, otherwise the
 /// exe itself with its args and env. A Steam game's plan carries the play-arm [`launch`] writes;
@@ -437,8 +440,14 @@ pub fn prepare_launch_with(
     let Some(mut ledger) = ledger::read(&profile)? else {
         return Err(LauncherError::new(codes::NOT_INSTALLED));
     };
-    if ledger.state != LedgerState::Installed {
-        return Err(needs_reinstall("").with("reason", "incomplete"));
+    match ledger.state {
+        LedgerState::Installed => {}
+        LedgerState::Installing => {
+            return Err(needs_reinstall("").with("reason", "incomplete"));
+        }
+        // Its game files were put back (`crate::restore_game_files`, a withdrawn integration):
+        // only installing again plays it.
+        LedgerState::Restored => return Err(needs_reinstall("").with("reason", "restored")),
     }
     let m = Manifest::parse(&ledger.manifest)?;
 
@@ -688,7 +697,14 @@ pub fn prepare_launch_with(
             .map(|(k, v)| Ok((k.clone(), x.expand(v)?)))
             .collect::<Result<Vec<_>>>()?;
         let new = ini::set_keys(&old, &c.section, &keys);
-        if new != old {
+        // A value that carries a caller's variable (a bridge credential) is the user's alone: mode
+        // 0600 on Unix, and a file left unchanged is tightened too (`paths::write_atomic_private`).
+        let private = c.set.values().any(|v| !vars_in(v).is_empty());
+        if private {
+            if new != old || !is_private(&target) {
+                write_atomic_private(&target, new.as_bytes())?;
+            }
+        } else if new != old {
             write_atomic(&target, new.as_bytes())?;
         }
     }

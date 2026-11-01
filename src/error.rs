@@ -56,6 +56,11 @@ pub mod codes {
     pub const PLAN_STALE: &str = "plan-stale";
     /// A file the ledger records is missing or changed; install again.
     pub const NEEDS_REINSTALL: &str = "needs-reinstall";
+    /// An uninstall's or a restore's warning (`UninstallReport::warnings`), not a refusal: a game
+    /// file is not as it was before Astra — one `kept` names (changed since it was placed, a proxy
+    /// kept for another loader, a replaced file whose backup is missing or changed, a link or a
+    /// folder in its place), or a replaced one that is gone. Verify the game's files in Steam.
+    pub const RESTORE_PARTIAL: &str = "restore-partial";
     // Proton.
     pub const PROTON_PREFIX_MISSING: &str = "proton-prefix-missing";
     // Launch.
@@ -184,6 +189,7 @@ pub mod codes {
         GAME_RUNNING,
         PLAN_STALE,
         NEEDS_REINSTALL,
+        RESTORE_PARTIAL,
         PROTON_PREFIX_MISSING,
         STEAM_NOT_FOUND,
         MODS_CHOICE_NEEDED,
@@ -300,6 +306,9 @@ impl LauncherError {
             codes::GAME_RUNNING => "the game is running; close it first",
             codes::PLAN_STALE => "the game folder changed since the plan was made; plan again",
             codes::NEEDS_REINSTALL => "an installed file is missing or changed; install again",
+            codes::RESTORE_PARTIAL => {
+                "some of the game's files are not as they were before Astra; verify the game's files in Steam"
+            }
             codes::PROTON_PREFIX_MISSING => {
                 "the game's Proton prefix does not exist yet; start the game once from Steam"
             }

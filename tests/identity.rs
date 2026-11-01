@@ -25,12 +25,13 @@
 //! of ours changed; files named as an older Astra left them laid beside), both are planned again
 //! from the ledger the install wrote, and now and then that plan is installed as the update;
 //! then both are uninstalled. Plans, refusals, ledgers, `UninstallReport`s and the trees left
-//! must be equal — but for C1b's two declared rows (`tests/corpus/divergence.txt`), applied to
+//! must be equal — but for C1b's three declared rows (`tests/corpus/divergence.txt`), applied to
 //! 0.4.1's answer and counted: `foreign-dwmapi` (step 10a: a foreign `dwmapi.dll` where Astra's
 //! own manifest places one is `foreign-loader`, never replaced; neither launcher then installs
-//! the update) and `proxy-folder-gained-files` (merged plan R42: an added hijack-named file whose
+//! the update), `proxy-folder-gained-files` (merged plan R42: an added hijack-named file whose
 //! folder gained a name since is left by the uninstall, `kept_reasons`, and the ledger keeps the
-//! folder's listing the test took before the install). For a share of those, a third copy is installed by launcher 0.3.1 — what
+//! folder's listing the test took before the install) and `restore-partial` (marketplace plan
+//! A§4.4, M2: an uninstall that leaves a game file as it is warns `restore-partial`). For a share of those, a third copy is installed by launcher 0.3.1 — what
 //! Astra 0.2.7 ships, so what wrote every 0.2.7 user's ledger — whose ledger must be 0.4.1's on
 //! every field 0.3.1's has; it is changed alike and planned again by this crate, which must plan
 //! as 0.4.1 does over its own install. The older Astra's files are look-alikes (the
@@ -193,10 +194,12 @@ struct Counts {
     c1b_hostile: AtomicUsize,
     /// C1b's declared exceptions (`tests/corpus/divergence.txt`), applied: plans where Astra's
     /// own manifest places `dwmapi.dll` over a foreign one (`foreign-dwmapi`: 0.4.1 replaces it,
-    /// this crate refuses `foreign-loader`), fresh and from a ledger; and uninstalls that left a
-    /// file we added because its folder gained a name (`proxy-folder-gained-files`).
+    /// this crate refuses `foreign-loader`), fresh and from a ledger; uninstalls that left a
+    /// file we added because its folder gained a name (`proxy-folder-gained-files`); and
+    /// uninstalls that left a game file as it is, warning `restore-partial`.
     c1b_row_dwmapi: AtomicUsize,
     c1b_row_proxy_folder: AtomicUsize,
+    c1b_row_restore_partial: AtomicUsize,
     /// The planning canary ([`planning_canary`]): Pass B named the game with a program, and
     /// planning that program pinned the same descriptor — with the whole hostile set, and with
     /// its lower standings.
@@ -1604,6 +1607,21 @@ fn proxy_folder_row(
     (serde_json::to_string(&r).unwrap(), moved)
 }
 
+/// Row `restore-partial` of `tests/corpus/divergence.txt` applied to the uninstall report `want`
+/// (0.4.1's, the rows before it applied): where the uninstall leaves a game file as it is — one
+/// `kept` names — this crate's report also warns `restore-partial`. (A file we replaced that is
+/// gone warns too, and `kept` cannot name it: C1b removes none of ours, so it never meets one.)
+/// Returns the report and whether the row applied.
+fn restore_partial_row(want: &str) -> (String, bool) {
+    match serde_json::from_str::<astra_game_launcher::UninstallReport>(want) {
+        Ok(mut r) if !r.kept.is_empty() => {
+            r.warnings = vec![codes::RESTORE_PARTIAL.to_owned()];
+            (serde_json::to_string(&r).unwrap(), true)
+        }
+        _ => (want.to_owned(), false),
+    }
+}
+
 /// One [`c1b_install`]: the program and the appid C1b planned it with, the fixture, the turn's
 /// choices, and the copies of its tree as it was then (the corpus tree changes afterwards).
 struct Job {
@@ -1875,6 +1893,10 @@ fn c1b_install(job: Job, fixtures: &[Fixture], appinfo: &Path, counts: &Counts) 
             .c1b_row_proxy_folder
             .fetch_add(kept_for_folder.len(), Ordering::Relaxed);
     }
+    let (want_b, partial) = restore_partial_row(&want_b);
+    if partial {
+        bump(&counts.c1b_row_restore_partial);
+    }
     assert_eq!(
         b.norm(&gone_b),
         a.norm(&want_b),
@@ -2115,9 +2137,10 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
         get(&c.c1b_former_removed),
     );
     eprintln!(
-        "C1b's declared rows applied: foreign-dwmapi {}, proxy-folder-gained-files {}",
+        "C1b's declared rows applied: foreign-dwmapi {}, proxy-folder-gained-files {}, restore-partial {}",
         get(&c.c1b_row_dwmapi),
-        get(&c.c1b_row_proxy_folder)
+        get(&c.c1b_row_proxy_folder),
+        get(&c.c1b_row_restore_partial)
     );
     assert_eq!(get(&c.c1b_replans), get(&c.c1b_installs));
     assert_eq!(get(&c.c1b_uninstalls), get(&c.c1b_installs));
@@ -2162,6 +2185,8 @@ fn c1_detection_and_planning_are_launcher_0_4_1s_over_the_corpus() {
             get(&c.c1b_row_proxy_folder),
             9,
         ),
+        // tests/corpus/divergence.txt `restore-partial`, applied.
+        ("row restore-partial", get(&c.c1b_row_restore_partial), 290),
     ];
     for (k, got, per_20k) in past_floors {
         let floor = (per_20k * trees as usize / 20_000).max(1);
@@ -2393,16 +2418,17 @@ fn c1b_every_manifest_plans_as_0_4_1_on_the_games_it_is_for() {
             "C1b: no plan from a ledger holds {a} on the games the manifests are for"
         );
     }
-    // Both declared rows, applied on the games the manifests are for.
+    // Every declared row, applied on the games the manifests are for.
     let rows = (
         counts.c1b_row_dwmapi.load(Ordering::Relaxed),
         counts.c1b_row_proxy_folder.load(Ordering::Relaxed),
+        counts.c1b_row_restore_partial.load(Ordering::Relaxed),
     );
     eprintln!(
-        "C1b on its own games: rows applied (foreign-dwmapi, proxy-folder-gained-files) {rows:?}"
+        "C1b on its own games: rows applied (foreign-dwmapi, proxy-folder-gained-files, restore-partial) {rows:?}"
     );
     assert!(
-        rows.0 >= 1 && rows.1 >= 1,
+        rows.0 >= 1 && rows.1 >= 1 && rows.2 >= 1,
         "C1b: a declared row never applied: {rows:?}"
     );
 }

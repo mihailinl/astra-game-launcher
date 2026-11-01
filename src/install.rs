@@ -71,6 +71,14 @@ pub struct UninstallReport {
     /// (`proton_overrides_kept`). Absent when empty, and before 0.5.0.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub kept_reasons: BTreeMap<String, String>,
+    /// `restore-partial` ([`codes::RESTORE_PARTIAL`]) when a game file is not as it was before
+    /// Astra: one in `kept` (changed since we placed it, a proxy kept for another loader, one we
+    /// replaced whose backup is missing or changed, a link or a folder in its place), or one we
+    /// replaced that is gone (its backup goes back only over our file). The person is told to
+    /// verify the game's files in Steam (marketplace plan A§4.4, M2). A backup that is an older
+    /// Astra's own file (`not_restored`) is not one. Absent when empty, and before 0.5.0.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// [`UninstallReport::kept_reasons`]: the folder of a file we added gained a name since.
@@ -294,15 +302,57 @@ fn place(
     Ok(())
 }
 
-/// Undoes what a ledger records and removes the ledger. A game file is removed or restored only
-/// while it still has our digest; one that changed since is the game's, and it wins. An added
-/// Doorstop someone else's loader now runs through stays too ([`kept_for_their_loader`]), and so
-/// does the Proton override that loads it — unless `readd`, the plan of the integration replacing
-/// this one, adds it again right away. A shared proxy (`share-loader`) still there keeps its
-/// override as well. So does a hijack-named file we added whose folder gained a name since
-/// ([`proxy_folder_gained`], reported in `kept_reasons`). A rollback passes none: with the
+/// Undoes what a ledger records and removes the ledger: the game half ([`undo_game`]), then the
+/// profile's files, the backups and the ledger itself. A rollback passes no `readd`: with the
 /// baselines the failed install recorded, only what arrived since keeps a proxy, and nothing did.
 pub(crate) fn uninstall_ledger(
+    profile: &Path,
+    game_root: &Path,
+    ledger: &Ledger,
+    readd: &[GameFileAction],
+) -> Result<UninstallReport> {
+    let mut report = undo_game(profile, game_root, ledger, readd)?;
+
+    for f in &ledger.files {
+        let comps = checked_rel(&f.rel)?;
+        let found = match existing_target(profile, &comps) {
+            Ok(p) => p,
+            // Never delete through a link.
+            Err(e) if e.code == codes::PATH_ESCAPES => None,
+            Err(e) => return Err(e),
+        };
+        if let Some(p) = found {
+            match fs::symlink_metadata(&p) {
+                Ok(m) if m.is_file() || m.file_type().is_symlink() => {
+                    fs::remove_file(&p).map_err(|e| LauncherError::io_at(&e, &p))?;
+                    report.profile_files_removed += 1;
+                }
+                _ => {}
+            }
+            if let Some(parent) = p.parent() {
+                prune_empty_dirs(parent.to_path_buf(), profile);
+            }
+        }
+    }
+
+    remove_tree_no_follow(&profile.join(BACKUP_DIR))?;
+    ledger::remove(profile)?;
+    Ok(report)
+}
+
+/// The game half of undoing a ledger — what [`uninstall`] and [`restore_game_files`] both do, and
+/// install before an update: the game files and the Proton overrides, nothing in the profile but
+/// reading the backups. The restore rules (marketplace plan A§4.4, M2): a game file is removed or
+/// restored only while it still has our digest, and a backup goes back only over our file, and
+/// only while the backup still has the digest recorded for it; anything else — a file that
+/// changed since (the game's, and it wins), a link or a folder in our file's place (never
+/// followed) — is left alone, and the report says `restore-partial`
+/// ([`UninstallReport::warnings`]). An added Doorstop someone else's loader now runs through stays
+/// too ([`kept_for_their_loader`]), and so does the Proton override that loads it — unless
+/// `readd`, the plan of the integration replacing this one, adds it again right away. A shared
+/// proxy (`share-loader`) still there keeps its override as well. So does a hijack-named file we
+/// added whose folder gained a name since ([`proxy_folder_gained`], reported in `kept_reasons`).
+fn undo_game(
     profile: &Path,
     game_root: &Path,
     ledger: &Ledger,
@@ -324,6 +374,7 @@ pub(crate) fn uninstall_ledger(
         not_restored: Vec::new(),
         former_removed: Vec::new(),
         kept_reasons: BTreeMap::new(),
+        warnings: Vec::new(),
     };
     let readded = |rel: &str| {
         readd
@@ -332,6 +383,9 @@ pub(crate) fn uninstall_ledger(
     };
     // The DLLs (file stems) of proxies kept for another loader.
     let mut kept_dlls: Vec<String> = Vec::new();
+    // A game file we had replaced is gone: the player's is not back (no backup goes back over
+    // anything but our file), and `kept` cannot name what is not there.
+    let mut replaced_gone = false;
 
     for g in ledger.game_files.iter().rev() {
         let comps = checked_rel(&g.rel)?;
@@ -342,7 +396,11 @@ pub(crate) fn uninstall_ledger(
         });
         let (target, current) = match found {
             Ok(Some(x)) => x,
-            Ok(None) => continue,
+            // A folder on the way is gone (or is a file now): ours went with it.
+            Ok(None) => {
+                replaced_gone |= g.action == GameAction::Replace;
+                continue;
+            }
             Err(e) if e.code == codes::PATH_ESCAPES => {
                 report.kept.push(g.rel.clone());
                 continue;
@@ -410,7 +468,12 @@ pub(crate) fn uninstall_ledger(
                     // The replace never happened (an install cut off before it).
                     FileState::File { sha256 } if backup.is_some_and(|b| b.sha256 == sha256) => {}
                     FileState::File { .. } => report.kept.push(g.rel.clone()),
-                    FileState::Absent => {}
+                    // Ours is gone, and what we replaced is not back — unless that was an older
+                    // Astra's own file, which is never put back anyway.
+                    FileState::Absent => {
+                        replaced_gone |=
+                            !backup.is_some_and(|b| backup_is_former(game_root, &g.rel, b));
+                    }
                 }
             }
             // A shared proxy stays where it is, and so does the override that loads it: under
@@ -440,30 +503,10 @@ pub(crate) fn uninstall_ledger(
         }
     }
 
-    for f in &ledger.files {
-        let comps = checked_rel(&f.rel)?;
-        let found = match existing_target(profile, &comps) {
-            Ok(p) => p,
-            // Never delete through a link.
-            Err(e) if e.code == codes::PATH_ESCAPES => None,
-            Err(e) => return Err(e),
-        };
-        if let Some(p) = found {
-            match fs::symlink_metadata(&p) {
-                Ok(m) if m.is_file() || m.file_type().is_symlink() => {
-                    fs::remove_file(&p).map_err(|e| LauncherError::io_at(&e, &p))?;
-                    report.profile_files_removed += 1;
-                }
-                _ => {}
-            }
-            if let Some(parent) = p.parent() {
-                prune_empty_dirs(parent.to_path_buf(), profile);
-            }
-        }
+    // Every file left in place is not as it was before Astra, whatever kept it.
+    if !report.kept.is_empty() || replaced_gone {
+        report.warnings.push(codes::RESTORE_PARTIAL.to_owned());
     }
-
-    remove_tree_no_follow(&profile.join(BACKUP_DIR))?;
-    ledger::remove(profile)?;
     Ok(report)
 }
 
@@ -577,8 +620,19 @@ fn recorded_game_root(game: &GameTarget, ledger: &Ledger) -> Option<PathBuf> {
     root.starts_with(&current).then_some(root)
 }
 
+/// The folder `ledger`'s game files were PLACED in: the ledger's, not today's detection. An exe
+/// detected differently now (a launcher fix, a game update) must not send an uninstall or a
+/// restore to another folder while ours stay behind. Trusted only inside the same game folder.
+fn placed_root(game: &GameTarget, ledger: &Ledger) -> Result<PathBuf> {
+    match recorded_game_root(game, ledger) {
+        Some(root) => Ok(root),
+        None => game_root_for_uninstall(game),
+    }
+}
+
 /// Removes an installed integration: restores the game files, the Proton override and the
-/// profile to what they were.
+/// profile to what they were. Over a [`LedgerState::Restored`] ledger (whose game files went back
+/// already) it removes the profile's files and the ledger.
 pub fn uninstall(profile_dir: &Path, game: &GameTarget) -> Result<UninstallReport> {
     let profile = match canonical_dir(profile_dir) {
         Ok(p) => p,
@@ -590,13 +644,7 @@ pub fn uninstall(profile_dir: &Path, game: &GameTarget) -> Result<UninstallRepor
             return Err(LauncherError::new(codes::NOT_INSTALLED));
         };
         refuse_if_running(&game.exe_file_name()?)?;
-        // The folder the files were PLACED in is the ledger's, not today's detection: an exe
-        // detected differently now (a launcher fix, a game update) must not send uninstall to
-        // another folder while ours stay behind. Trusted only inside the same game folder.
-        let game_root = match recorded_game_root(game, &ledger) {
-            Some(root) => root,
-            None => game_root_for_uninstall(game)?,
-        };
+        let game_root = placed_root(game, &ledger)?;
         let mut report = uninstall_ledger(&profile, &game_root, &ledger, &[])?;
         report.former_removed = sweep_former(&game_root, &ledger);
         // The player's answer to "play with your mods?" goes with the install, so a reinstall asks
@@ -608,6 +656,46 @@ pub fn uninstall(profile_dir: &Path, game: &GameTarget) -> Result<UninstallRepor
         report
     };
     let _ = fs::remove_file(profile.join(LOCK_FILE));
+    Ok(report)
+}
+
+/// Puts the game's files back and keeps the profile: the restore for an integration that was
+/// withdrawn (the daemon's `RestoreGameFiles` and its revocations; marketplace plan A§4.4).
+///
+/// Under the profile lock, and refused with `game-running` while the game runs: the caller waits
+/// for the game to exit, and blocks Play meanwhile (M2). The game files and the Proton override are
+/// undone exactly as [`uninstall`] undoes them — one function, the restore rules M2 sets
+/// ([`UninstallReport::warnings`]: `restore-partial` for anything left as it is) — and so are the
+/// files an older Astra left beside the program. The profile's own files stay (the mods choice
+/// and Play's files too); the backups go, as nothing names them any more. The ledger is then
+/// rewritten as [`LedgerState::Restored`] with no game files, no Proton records and no baselines:
+/// schema 4, which a launcher before 0.5.0 refuses (`schema-too-new`) rather than plays. After it,
+/// Play is `needs-reinstall` (`reason` = `restored`), [`uninstall`] removes the profile's files and
+/// the ledger, and [`install`] is a fresh install. A restore over a restored ledger changes
+/// nothing. `not-installed` when the profile holds no ledger.
+pub fn restore_game_files(profile_dir: &Path, game: &GameTarget) -> Result<UninstallReport> {
+    let profile = match canonical_dir(profile_dir) {
+        Ok(p) => p,
+        Err(_) => return Err(LauncherError::new(codes::NOT_INSTALLED)),
+    };
+    let _lock = ProfileLock::acquire(&profile)?;
+    let Some(ledger) = ledger::read(&profile)? else {
+        return Err(LauncherError::new(codes::NOT_INSTALLED));
+    };
+    refuse_if_running(&game.exe_file_name()?)?;
+    let game_root = placed_root(game, &ledger)?;
+    let mut report = undo_game(&profile, &game_root, &ledger, &[])?;
+    report.former_removed = sweep_former(&game_root, &ledger);
+    let restored = Ledger {
+        state: LedgerState::Restored,
+        game_files: Vec::new(),
+        proton: Vec::new(),
+        loader_baseline: Vec::new(),
+        proxy_folders: Vec::new(),
+        ..ledger
+    };
+    ledger::write(&profile, &restored)?;
+    remove_tree_no_follow(&profile.join(BACKUP_DIR))?;
     Ok(report)
 }
 

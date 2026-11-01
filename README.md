@@ -62,6 +62,7 @@ install(&pkg, &plan, &game, &Ctx::silent())?;                     // exactly the
 let cmd = prepare_launch(&profile_dir, &game, &vars, steam)?;     // INI keys, Proton override
 launch(&cmd, &StdSpawn)?;                                         // or the caller's own `Spawn`
 uninstall(&profile_dir, &game)?;                                  // everything back
+restore_game_files(&profile_dir, &game)?;                         // the game's files back, the profile kept
 ```
 
 HTTP (`Fetch`) and process spawning (`Spawn`) are injected. Build with
@@ -349,6 +350,21 @@ let plan = plan_install_in(&pkg, &game, &profile_dir, &engines, Provenance::Comm
   does not place (a UE4SS installed by hand after us ships the very same `dwmapi.dll`), with its
   Proton override, and says why: `UninstallReport::kept_reasons` = `folder-gained-files`. A game
   update that adds a file there keeps it too.
+- **Restores never touch the player's files** (marketplace plan A§4.4, M2). `uninstall` and
+  `restore_game_files` undo the game half through one function: a game file is removed or
+  restored only while it still has our digest, and a backup goes back only over our file and
+  only while it is what was backed up. Anything else (changed since, a link or a folder in its
+  place, a proxy kept for another loader, a backup missing or changed) is left as it is and
+  named in `UninstallReport::kept`; then `UninstallReport::warnings` says `restore-partial`
+  (verify the game's files in Steam), as it does for a file we replaced that is gone.
+- **`restore_game_files(&profile_dir, &game)`**, for a withdrawn integration: the game files and
+  the Proton override back, the profile kept, `game-running` while the game runs. The ledger is
+  left `restored` (schema 4, which launchers 0.3.1 and 0.4.1 refuse as `schema-too-new`): Play is
+  `needs-reinstall` (`reason` = `restored`), `uninstall` removes the profile, and an install over
+  it is a fresh one.
+- **A token is the user's alone.** A `[[config_writes]]` entry that sets a caller's variable
+  (anything but `${profile}` and `${game}`; today the bridge's port and token) is written mode
+  0600 on Unix, and an existing file's looser mode is tightened even when its text is unchanged.
 
 ## `gi-probe`: checking a release before anybody installs it (0.5.0)
 

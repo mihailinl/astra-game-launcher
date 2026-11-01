@@ -19,11 +19,14 @@ use crate::plan::{GameAction, Provenance};
 
 /// The newest ledger schema this launcher reads. A ledger is WRITTEN as the lowest schema that
 /// carries it: 1, or 2 for a `proton` array (several overrides), or 3 for a game file shared with
-/// another mod manager (`share-loader`) — shapes an older launcher cannot parse. [`read`] judges
-/// the schema before the shape, so from this launcher on a newer ledger is `schema-too-new`
-/// rather than a parse failure; a launcher from before schema 3 parsed the shape first and fails
-/// on a schema-3 ledger with an `io` error naming the unknown action.
-pub const LEDGER_SCHEMA: u32 = 3;
+/// another mod manager (`share-loader`) — shapes an older launcher cannot parse — or 4 for a
+/// `restored` one, which an older launcher must not take for an install it could play or
+/// uninstall by its game files. [`read`] judges the schema before the shape, so from this
+/// launcher on a newer ledger is `schema-too-new` rather than a parse failure (launchers 0.3.1
+/// and 0.4.1 already do: both refuse a schema-4 ledger so); a launcher from before schema 3
+/// parsed the shape first and fails on a schema-3 ledger with an `io` error naming the unknown
+/// action.
+pub const LEDGER_SCHEMA: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -31,6 +34,11 @@ pub enum LedgerState {
     /// Written before the first file is placed; a crash leaves this, and uninstall rolls it back.
     Installing,
     Installed,
+    /// [`crate::restore_game_files`] put the game's files back and kept the profile: no game
+    /// files and no Proton records left, Play refused (`needs-reinstall`, `reason` = `restored`),
+    /// uninstall removes the profile's files, and installing over it is a fresh install. Always
+    /// written as schema 4.
+    Restored,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,7 +231,9 @@ pub(crate) fn read(profile: &Path) -> Result<Option<Ledger>> {
 
 /// The schema a ledger is written as: the lowest that can carry it.
 fn schema_for(ledger: &Ledger) -> u32 {
-    if ledger
+    if ledger.state == LedgerState::Restored {
+        4
+    } else if ledger
         .game_files
         .iter()
         .any(|g| g.action == GameAction::ShareLoader)

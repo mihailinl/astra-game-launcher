@@ -331,6 +331,42 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// reader sees the old file or the new one, never half of one. A link at `target` is replaced,
 /// never followed. Keeps the old file's permissions when there was one.
 pub(crate) fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
+    write_atomic_as(target, bytes, false)
+}
+
+/// [`write_atomic`] for a file that holds a secret: on Unix the file is mode `0600` — the
+/// temporary file is created so and set so before the rename, and an existing file's looser mode
+/// is not carried over (the new file replaces it). Elsewhere it is exactly [`write_atomic`].
+///
+/// Used for every `[[config_writes]]` entry that sets a caller's variable (anything but
+/// `${profile}` and `${game}`; `link-v1.md` §2's "Mode 0600 on Unix" for the same kind of file).
+/// The decision: the launcher cannot tell which caller variable is a secret, and every one today
+/// is a bridge credential (`${bridge_token}`, and `${bridge_port}` beside it), so every write that
+/// carries one is private. The game runs as the same user, so nothing that read the file loses
+/// access. [`is_private`] says whether a file left unchanged still needs tightening.
+pub(crate) fn write_atomic_private(target: &Path, bytes: &[u8]) -> Result<()> {
+    write_atomic_as(target, bytes, true)
+}
+
+/// Whether the file at `target` is readable by its owner alone (mode `0600` or stricter on Unix),
+/// or there is none to tighten; always `true` elsewhere.
+pub(crate) fn is_private(target: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match fs::symlink_metadata(target) {
+            Ok(m) => m.permissions().mode() & 0o077 == 0,
+            Err(_) => true,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = target;
+        true
+    }
+}
+
+fn write_atomic_as(target: &Path, bytes: &[u8], private: bool) -> Result<()> {
     let parent = target
         .parent()
         .ok_or_else(|| escapes(&target.display().to_string()))?;
@@ -341,14 +377,29 @@ pub(crate) fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
     let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(".{name}{TEMP_MARK}{}-{n}", std::process::id()));
     let result = (|| -> std::io::Result<()> {
-        let mut f = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        let mut open = OpenOptions::new();
+        open.write(true).create_new(true);
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Never readable by anyone else, not even for the moment before the bytes land.
+            open.mode(0o600);
+        }
+        let mut f = open.open(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
         drop(f);
-        if let Ok(m) = fs::symlink_metadata(target)
+        if !private
+            && let Ok(m) = fs::symlink_metadata(target)
             && m.is_file()
         {
             let _ = fs::set_permissions(&tmp, m.permissions());
+        }
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::PermissionsExt;
+            // Exactly 0600, whatever the umask took away at creation.
+            fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
         }
         fs::rename(&tmp, target)
     })();

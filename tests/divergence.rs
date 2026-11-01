@@ -299,6 +299,12 @@ fn fixtures() -> BTreeSet<&'static str> {
         proxy_folder_gained_files();
         pinned.insert("proxy-folder-gained-files");
     }
+
+    // restore-partial (marketplace plan A§4.4, M2)
+    {
+        restore_partial();
+        pinned.insert("restore-partial");
+    }
     pinned
 }
 
@@ -474,6 +480,93 @@ fn proxy_folder_gained_files() {
             );
         } else {
             assert_eq!(new, old, "nothing arrived: 0.5.0 uninstalls as 0.4.1");
+        }
+    }
+}
+
+/// Row `restore-partial`: Astra's own manifest adds `settings.json` (no loader's name) and
+/// replaces the game's `options.ini`. Changed after the install — ours rewritten, the game's
+/// updated over ours, the backup gone or changed — each uninstall leaves the file and names it in
+/// `kept`, alike; 0.5.0's report also warns `restore-partial`, and is otherwise 0.4.1's. With
+/// nothing changed, both reports are the same, warning nothing.
+fn restore_partial() {
+    let ours_bytes: &[u8] = b"{\"ours\":true}";
+    let z = {
+        let manifest = format!(
+            "schema = 1\n\n[integration]\nid = \"astra.probe\"\nname = \"Probe\"\nversion = \"1.0.0\"\n\n[target]\nexe = \"*\"\nplatforms = [\"linux-proton\"]\nanti_cheat = \"none\"\n\n[[files]]\nfrom = \"p.txt\"\nto = \"${{profile}}/p.txt\"\n\n[[game_files]]\nfrom = \"settings.json\"\nto = \"${{game}}/settings.json\"\nsha256 = \"{}\"\n\n[[game_files]]\nfrom = \"options.ini\"\nto = \"${{game}}/options.ini\"\n",
+            sha(ours_bytes)
+        );
+        zip(&[
+            E::File("astra-gi.toml", manifest.as_bytes()),
+            E::File("p.txt", b"p"),
+            E::File("settings.json", ours_bytes),
+            E::File("options.ini", b"[ours]\n"),
+        ])
+    };
+    let backup = "astra-launcher-backup/game/options.ini";
+    type Change = fn(&Path, &Path);
+    let changes: [(&str, Option<&str>, Change); 5] = [
+        ("nothing", None, |_, _| {}),
+        ("ours rewritten", Some("settings.json"), |game, _| {
+            write(&game.join("settings.json"), b"{\"theirs\":true}")
+        }),
+        (
+            "the game's updated over ours",
+            Some("options.ini"),
+            |game, _| write(&game.join("options.ini"), b"[game update]\n"),
+        ),
+        ("the backup gone", Some("options.ini"), |_, profile| {
+            std::fs::remove_file(profile.join("astra-launcher-backup/game/options.ini")).unwrap()
+        }),
+        ("the backup changed", Some("options.ini"), |_, profile| {
+            write(
+                &profile.join("astra-launcher-backup/game/options.ini"),
+                b"[not what was backed up]\n",
+            )
+        }),
+    ];
+    for (what, kept, change) in changes {
+        let mut gone = Vec::new();
+        for (who, install, uninstall) in [
+            (
+                "legacy",
+                legacy::install as fn(&Path, &Path, &[u8]),
+                legacy::uninstall as fn(&Path, &Path) -> String,
+            ),
+            ("ours", ours::install, ours::uninstall),
+        ] {
+            let t = Tmp::new(&format!("div-restore-partial-{who}"));
+            let game = t.join("game");
+            write(&game.join("Game.exe"), b"MZ game");
+            write(&game.join("options.ini"), b"[the game's]\n");
+            let profile = t.join("profile/p");
+            install(&game, &profile, &z);
+            assert!(profile.join(backup).is_file(), "{who}: {what}");
+            change(&game, &profile);
+            gone.push(uninstall(&game, &profile));
+        }
+        let (old, new) = (&gone[0], &gone[1]);
+        let r: astra_game_launcher::UninstallReport = serde_json::from_str(new).unwrap();
+        match kept {
+            None => {
+                assert_eq!(new, old, "{what}: 0.5.0 uninstalls as 0.4.1");
+                assert!(r.warnings.is_empty(), "{what}");
+            }
+            Some(rel) => {
+                assert_eq!(r.kept, [rel], "{what}: {new}");
+                assert_eq!(
+                    r.warnings,
+                    [astra_game_launcher::codes::RESTORE_PARTIAL],
+                    "{what}"
+                );
+                let mut without = r.clone();
+                without.warnings.clear();
+                assert_eq!(
+                    serde_json::to_string(&without).unwrap(),
+                    *old,
+                    "{what}: but for the warning, 0.4.1's report"
+                );
+            }
         }
     }
 }
