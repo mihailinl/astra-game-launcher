@@ -14,7 +14,8 @@
 //!   `tools/fetch-first-party-manifests.sh`), and each passes 0.2.7's check for its source.
 //! - `compat` passes a well-formed release of every source and fails each kind of break at the
 //!   step that owns it; `validate-descriptor` passes plan B §1's Source 2 descriptor and refuses
-//!   the anchorless, the runtime-anchored and the too broad.
+//!   the anchorless, the runtime-anchored and the too broad, wherever its rules look for a
+//!   program (`tests/descriptors/hostile/`, and debt row 33's weakness pinned).
 //! - `check` answers every manifest golden of the specification as `tests/goldens.rs` judges the
 //!   library (the same `SPEC_DEFECTS_AT_PIN`), and on release zips: Link files, reserved ids by
 //!   provenance, the descriptor's negative folders, `built_on` and `code_changed`.
@@ -1623,6 +1624,18 @@ fn validate_descriptor_passes_the_source2_descriptor() {
     let folders = r["negative_folders"].as_array().unwrap();
     assert_eq!(folders.len(), 4);
     assert!(folders.iter().all(|f| f["claimed"] == false));
+    // Asked where it looks, `<project>/bin/win64`, as well as where the spec draws them.
+    let dlls = folders
+        .iter()
+        .find(|f| f["folder"] == "system-dlls")
+        .unwrap();
+    let programs: Vec<&str> = dlls["places"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["program"].as_str().unwrap())
+        .collect();
+    assert_eq!(programs, ["Game.exe", "Game/bin/win64/Game.exe"], "{r:#}");
 
     let manifest = format!(
         "schema = 1\n\n[integration]\nid = \"community.source2\"\nname = \"Source 2\"\nversion = \"1.0.0\"\n\n{}\n[target]\nengine = \"source2\"\nexe = \"*\"\nplatforms = [\"windows-x64\"]\nanti_cheat = \"none\"\n",
@@ -1745,6 +1758,272 @@ evidence = "{program}"
     let (exit, r) = validate(&tmp, "broad.toml", broad, &[]);
     assert_eq!(exit, 1);
     assert_eq!(r["findings"][0]["step"], 2);
+}
+
+/// `tests/descriptors/hostile/negative-folders-nested.toml`.
+const NESTED_GRIEFER: &str = include_str!("descriptors/hostile/negative-folders-nested.toml");
+
+/// `(code, reason, program)` of every finding of a report at `step`.
+fn too_broad_at(r: &Value, step: u64) -> Vec<(String, String, String)> {
+    r["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["step"] == step)
+        .map(|f| {
+            let s = |k: &str| f["params"][k].as_str().unwrap_or_default().to_owned();
+            (
+                f["code"].as_str().unwrap().to_owned(),
+                s("reason"),
+                s("program"),
+            )
+        })
+        .collect()
+}
+
+/// The engine `descriptor`, alone as a community foundation's (unchecked), names for a game it
+/// knows nothing of: `winhttp.dll` beside `Some Game/bin/win64/SomeGame.exe`.
+fn engine_of_a_winhttp_game(tmp: &Tmp, descriptor: &str) -> String {
+    use astra_game_launcher::{Descriptor, EngineSet, Moderation, Origin, detect_with_engines};
+    let game = tmp.join("winhttp-game");
+    let win64 = game.join("Some Game/bin/win64");
+    fs::create_dir_all(&win64).unwrap();
+    let mut pe = vec![0u8; 0x80];
+    pe[..2].copy_from_slice(b"MZ");
+    fs::write(win64.join("SomeGame.exe"), &pe).unwrap();
+    fs::write(win64.join("winhttp.dll"), b"MZ").unwrap();
+    let origin = Origin {
+        moderation: Moderation::Unchecked,
+        publisher: "someone".to_owned(),
+        first_party: false,
+    };
+    let d = Descriptor::from_toml(descriptor).unwrap();
+    let set = EngineSet::build([(origin, Ok(d))]);
+    detect_with_engines(&game, None, &set)
+        .unwrap()
+        .engine
+        .as_str()
+        .to_owned()
+}
+
+/// The hostile fixture names real games: alone in a set, as the unchecked descriptor a
+/// community foundation's is, it claims a folder holding `winhttp.dll` beside a program in
+/// `<project>/bin/win64` — a game it knows nothing of. `validate-descriptor` (step 3) and
+/// `gi-probe check` (step 4) refuse it, at the place it looks; laid only as the spec draws the
+/// folder (the flat row), it is not caught, which is all launcher 0.5.0 L3 asked.
+#[test]
+fn the_nested_griefer_is_refused_by_validate_descriptor_and_check() {
+    let tmp = Tmp::new("validate-nested");
+    let d = astra_game_launcher::Descriptor::from_toml(NESTED_GRIEFER).unwrap();
+    d.check_pass_b(false).unwrap();
+    assert_eq!(engine_of_a_winhttp_game(&tmp, NESTED_GRIEFER), "grief");
+
+    let (exit, r) = validate(&tmp, "nested.toml", NESTED_GRIEFER, &[]);
+    assert_eq!(exit, 1, "{r:#}");
+    let at = "Game/bin/win64/Game.exe".to_owned();
+    let want = vec![(
+        "descriptor-too-broad".to_owned(),
+        "negative:system-dlls".to_owned(),
+        at.clone(),
+    )];
+    assert_eq!(too_broad_at(&r, 3), want, "{r:#}");
+    assert_eq!(r["findings"].as_array().unwrap().len(), 1, "{r:#}");
+    let dlls = r["negative_folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["folder"] == "system-dlls")
+        .unwrap()
+        .clone();
+    assert_eq!(dlls["claimed"], true);
+    assert_eq!(dlls["engine"], "grief");
+    assert_eq!(dlls["places"][0]["program"], "Game.exe");
+    assert_eq!(dlls["places"][0]["claimed"], false, "the spec's drawing");
+    assert_eq!(dlls["places"][1]["program"], at.as_str());
+    assert_eq!(dlls["places"][1]["claimed"], true);
+
+    // A community foundation carrying it as [integration.engine]: `gi-probe check` step 4.
+    let manifest = format!(
+        "schema = 1\n\n[integration]\nid = \"someone.grief\"\nname = \"Grief\"\nversion = \"1.0.0\"\nlicense = \"MIT\"\n\n{}\n[target]\nengine = \"grief\"\nexe = \"*\"\nplatforms = [\"windows-x64\"]\nanti_cheat = \"none\"\n\n[[files]]\nfrom = \"a.txt\"\nto = \"${{profile}}/a.txt\"\n",
+        NESTED_GRIEFER
+            .replace(
+                "schema = \"astra.engine/1\"\nengine =",
+                "[integration.engine]\nschema = \"astra.engine/1\"\nengine ="
+            )
+            .replace("[[rule]]", "[[integration.engine.rule]]")
+    );
+    assert!(manifest.contains("[integration.engine]\n"), "{manifest}");
+    let z = zip(&[
+        E::File("astra-gi.toml", manifest.as_bytes()),
+        E::File("a.txt", b"a"),
+    ]);
+    let z = put(&tmp, "r", "astra-gi.zip", &z);
+    let (exit, r) = check(&z, &[]);
+    assert_eq!(exit, 1, "{r:#}");
+    assert_eq!(too_broad_at(&r, 4), want, "{r:#}");
+    assert_eq!(r["findings"].as_array().unwrap().len(), 1, "{r:#}");
+    assert_eq!(statuses(&r)[3], "fail", "{r:#}");
+}
+
+/// A rule is held to the negative folders wherever it looks for a program and whatever program
+/// it selects: each of these names games it knows nothing of, and each passed when the folders
+/// were laid only as the spec draws them. The beyond-the-walk one is caught with Steam's hint
+/// alone; the ones that skip the probe's first name are laid under the next.
+#[test]
+fn the_negative_folders_are_laid_wherever_a_rule_looks() {
+    let tmp = Tmp::new("validate-places");
+    let rule = |programs: &str, require: &str, extra: &str| {
+        format!(
+            "schema = \"astra.engine/1\"\nengine = {{ codes = {{ grief = \"Grief Engine\" }} }}\n{extra}\n[[rule]]\ntier = \"strong\"\nprograms = {programs}\nrequire = [ {require} ]\ncode = \"grief\"\nconfidence = \"high\"\nbinary = \"windows\"\nevidence = \"{{program}}\"\n"
+        )
+    };
+    let winhttp = "{ listed = \"winhttp.dll\", kind = \"file\" }";
+    /// What a case is: its descriptor, `validate-descriptor`'s flags, the folder it claims first
+    /// and where, and whether only Steam's hint reaches that place.
+    struct Case {
+        what: &'static str,
+        text: String,
+        flags: &'static [&'static str],
+        reason: &'static str,
+        at: &'static str,
+        hint_only: bool,
+    }
+    let cases = [
+        Case {
+            what: "any program in <project>/bin/win64 (first-party)",
+            text: rule(
+                "{ ext = [\"exe\"], at = \"{project}/bin/win64\", first = 8 }",
+                "{ stat = \"{program}\", kind = \"file\" }",
+                "",
+            ),
+            flags: &["--first-party"],
+            reason: "negative:exe-only",
+            at: "Game/bin/win64/Game.exe",
+            hint_only: false,
+        },
+        Case {
+            what: "below the walk's depth: Steam's hint alone reaches it",
+            text: rule(
+                "{ ext = [\"exe\"], at = \"{project}/a/b/c\", first = 8 }",
+                winhttp,
+                "",
+            ),
+            flags: &[],
+            reason: "negative:system-dlls",
+            at: "Game/a/b/c/Game.exe",
+            hint_only: true,
+        },
+        Case {
+            what: "a suffix",
+            text: rule(
+                "{ suffix = \"-retail.exe\", at = \"{project}/bin\", first = 8 }",
+                winhttp,
+                "",
+            ),
+            flags: &[],
+            reason: "negative:system-dlls",
+            at: "Game/bin/Game-retail.exe",
+            hint_only: false,
+        },
+        Case {
+            what: "an ELF program",
+            text: rule("{ ext = [\"x86_64\"], at = \"\", first = 8 }", winhttp, ""),
+            flags: &[],
+            reason: "negative:system-dlls",
+            at: "Game.x86_64",
+            hint_only: false,
+        },
+        Case {
+            what: "an extension-less program, in a fixed folder",
+            text: rule("{ ext = [\"\"], at = \"bin\", first = 8 }", winhttp, ""),
+            flags: &[],
+            reason: "negative:system-dlls",
+            at: "bin/Game",
+            hint_only: false,
+        },
+        Case {
+            what: "a wrapper the probe's first name holds",
+            text: rule(
+                "{ ext = [\"exe\"], at = \"{project}/bin/win64\", first = 8 }",
+                winhttp,
+                "wrappers = [\"game\"]\n",
+            ),
+            flags: &[],
+            reason: "negative:system-dlls",
+            at: "Koala/bin/win64/Koala.exe",
+            hint_only: false,
+        },
+        Case {
+            what: "a skip_dirs naming the probe's first name",
+            text: rule(
+                "{ ext = [\"exe\"], at = \"{project}/bin/win64\", first = 8, skip_dirs = [\"Game\"] }",
+                winhttp,
+                "",
+            ),
+            flags: &[],
+            reason: "negative:system-dlls",
+            at: "Koala/bin/win64/Game.exe",
+            hint_only: false,
+        },
+    ];
+    for (i, c) in cases.iter().enumerate() {
+        let Case {
+            what,
+            text,
+            flags,
+            reason,
+            at,
+            hint_only,
+        } = c;
+        let d = astra_game_launcher::Descriptor::from_toml(text)
+            .unwrap_or_else(|e| panic!("{what}: {e:?}\n{text}"));
+        d.check_pass_b(flags.contains(&"--first-party"))
+            .unwrap_or_else(|e| panic!("{what}: Pass B: {e:?}"));
+        let (exit, r) = validate(&tmp, &format!("{i}.toml"), text, flags);
+        assert_eq!(exit, 1, "{what}: {r:#}");
+        let got = too_broad_at(&r, 3);
+        assert_eq!(
+            got.first(),
+            Some(&(
+                "descriptor-too-broad".to_owned(),
+                (*reason).to_owned(),
+                (*at).to_owned()
+            )),
+            "{what}: {r:#}"
+        );
+        let folder = reason.strip_prefix("negative:").unwrap();
+        let place = r["negative_folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["folder"] == folder)
+            .flat_map(|f| f["places"].as_array().unwrap().iter())
+            .find(|p| p["program"] == *at)
+            .unwrap_or_else(|| panic!("{what}: no place {at}: {r:#}"))
+            .clone();
+        assert_eq!(place["claimed"], true, "{what}: {r:#}");
+        if *hint_only {
+            assert_eq!(place["engine"], "unknown", "{what}: {r:#}");
+            assert_eq!(place["engine_with_hint"], "grief", "{what}: {r:#}");
+        }
+    }
+}
+
+/// **Debt row 33, the weakness pinned:** the negative folders are fixed, so a rule may name one
+/// of their files in a `none` and step around them all — this one, the hostile fixture with
+/// `none = [dwmapi.dll]`, passes `validate-descriptor` and still claims a real game holding
+/// `winhttp.dll` and not `dwmapi.dll`. When the row closes, this test flips.
+#[test]
+fn a_rule_that_names_a_negative_folder_steps_around_it() {
+    let tmp = Tmp::new("validate-evades");
+    let evading = NESTED_GRIEFER.replace(
+        "require = [ { listed = \"winhttp.dll\", kind = \"file\" } ]",
+        "require = [ { listed = \"winhttp.dll\", kind = \"file\" },\n            { none = [ { listed = \"dwmapi.dll\", kind = \"file\" } ] } ]",
+    );
+    assert_ne!(evading, NESTED_GRIEFER);
+    let (exit, r) = validate(&tmp, "evading.toml", &evading, &[]);
+    assert_eq!(exit, 0, "row 33 closed? {r:#}");
+    assert_eq!(engine_of_a_winhttp_game(&tmp, &evading), "grief");
 }
 
 // ---------------------------------------------------------------------------------------------

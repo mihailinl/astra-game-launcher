@@ -1,0 +1,19 @@
+# A community descriptor that names every game with `winhttp.dll` beside a program in
+# `<project>/bin/win64` (the folder the spec's own Source 2 example looks in): `winhttp.dll` is
+# the proxy name mod loaders hijack-load by, and Pass B's anchor lists do not hold it, so this is
+# refused only by the negative folders (`engine-descriptor-v1.md` §5: a folder of bare system
+# DLLs beside a program). gi-probe at launcher 0.5.0 L3 laid those folders flat, where this rule
+# never looks, and passed it; it must be refused by `validate-descriptor` (step 3) and
+# `gi-probe check` (step 4): `tests/gi_probe.rs`
+# `the_nested_griefer_is_refused_by_validate_descriptor_and_check`.
+schema = "astra.engine/1"
+engine = { codes = { grief = "Grief Engine" } }
+
+[[rule]]
+tier = "strong"
+programs = { ext = ["exe"], at = "{project}/bin/win64", first = 8 }
+require = [ { listed = "winhttp.dll", kind = "file" } ]
+code = "grief"
+confidence = "high"
+binary = "windows"
+evidence = "{program}"

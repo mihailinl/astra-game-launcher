@@ -461,8 +461,10 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
   (AstraPlugins `spec/games/engine-descriptor-v1.md` §5): the descriptor (TOML, JSON, or a
   foundation's `astra-gi.toml` holding `[integration.engine]`) parses, Pass B admits it, and it
   claims none of the spec's negative folders (empty, an exe alone, an exe among bare system
-  DLLs, `steam_api64.dll` beside an exe), each detected with it alone
-  (`descriptor-too-broad`, `reason=negative:<folder>`). With `--corpus`, every recording in
+  DLLs, `steam_api64.dll` beside an exe), each detected with it alone — laid as the spec draws
+  it and again wherever its rules look for a program (the folder `programs.at` names, holding
+  each program its `ext` or `suffix` selects), each place asked with no hint and with Steam's
+  hint naming its program (`descriptor-too-broad`, `reason=negative:<folder>`, `program`). With `--corpus`, every recording in
   the folder (below) is laid below `TMPDIR` and detected with the descriptor alone, with no hint
   and with the recording's own: claiming recordings labelled with two or more engines is
   `descriptor-too-broad`, `reason=two-engines` (`unknown` names no engine). The report gives its

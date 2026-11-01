@@ -15,8 +15,13 @@
 //! 3. it claims none of the spec's negative folders — an empty folder, a folder holding a
 //!    program only, one of bare system DLLs beside a program, and `steam_api64.dll` beside a
 //!    program — each laid below `TMPDIR` and detected with this descriptor alone, as an unchecked
-//!    one, through the same [`astra_game_launcher::detect_with_engines`] Astra calls. Any claim
-//!    (it names the game, or makes it ambiguous) is `descriptor-too-broad{reason=negative:<folder>}`.
+//!    one, through the same [`astra_game_launcher::detect_with_engines`] Astra calls. Each is laid
+//!    as the spec draws it (`Game.exe` at the top) and again at every place the descriptor's
+//!    rules look for a program ([`places`]: the folder `programs.at` names, `{project}` one
+//!    folder, holding each program its `ext` or `suffix` selects), and each place is asked twice:
+//!    as the folder search finds it, and with Steam's launch hint naming its program — a place
+//!    deeper than the walk lists is reached only so. Any claim (it names the game, or makes it
+//!    ambiguous) is `descriptor-too-broad{reason=negative:<folder>, program}`.
 //!
 //! 4. with `--corpus <folder>`: it claims no recordings of two or more engines — every
 //!    `astra.list-shape/1` recording (`*.json`, as `gi-probe capture` writes them; the format is
@@ -46,14 +51,16 @@ use crate::{Fatal, Finding, Scratch, report};
 /// `tools/vendor-astraplugins-goldens.sh` alone (and whatever the new spec says).
 pub const SPEC_SHA: &str = include_str!("../../../tests/goldens/astraplugins/PIN").trim_ascii_end();
 
-/// The negative folders of spec §5: `(name, files)`; a file name ending in `/` is a folder.
-pub const NEGATIVE_FOLDERS: &[(&str, &[&str])] = &[
-    ("empty", &[]),
-    ("exe-only", &["Game.exe"]),
+/// The negative folders of spec §5: `(name, program, beside)` — whether it holds a program, and
+/// the files beside that program (or, with none, in the folder). The program is laid at every
+/// [`Place`] the descriptor looks for one ([`places`]).
+pub const NEGATIVE_FOLDERS: &[(&str, bool, &[&str])] = &[
+    ("empty", false, &[]),
+    ("exe-only", true, &[]),
     (
         "system-dlls",
+        true,
         &[
-            "Game.exe",
             "d3d11.dll",
             "d3d12.dll",
             "dxgi.dll",
@@ -72,8 +79,159 @@ pub const NEGATIVE_FOLDERS: &[(&str, &[&str])] = &[
             "openal32.dll",
         ],
     ),
-    ("steam-api-beside-exe", &["Game.exe", "steam_api64.dll"]),
+    ("steam-api-beside-exe", true, &["steam_api64.dll"]),
 ];
+
+/// The program as the spec draws the negative folders: `Game.exe`, at the top.
+const SPEC_PROGRAM: &str = "Game.exe";
+
+/// The names the probe gives the folders and programs it lays where a rule looks: [`places`]
+/// takes the first one the rule does not skip. No two share three letters in a row and no two end
+/// in the same letter (ASCII case ignored), none is long enough to hold a built-in wrapper's name
+/// (the shortest is six letters), and there are more of them than a rule has wrappers and
+/// `skip_dirs` together: each skip catches one name at most, so a folder name is always left, and
+/// when no program name is, every one the rule would select ends in a wrapper's name — it selects
+/// none, anywhere (`tests::no_rule_can_skip_every_neutral_name`).
+const NEUTRAL_NAMES: &[&str] = &[
+    "Game", "Koala", "Cob", "Zinc", "Field", "Waif", "Smog", "Moth", "Kiwi", "Hajj", "Yolk",
+    "Petal", "Plum", "Fern", "Banjo", "Tulip", "Tranq", "Cedar", "Moss", "Quilt", "Emu", "Shiv",
+    "Yew", "Onyx", "Ivy", "Topaz",
+];
+
+/// Where a negative folder is laid: the folder its program sits in (components below the
+/// folder's root) and the program's file name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Place {
+    dir: Vec<String>,
+    program: String,
+}
+
+impl Place {
+    /// The program below the folder's root, `/`-separated: Steam's launch hint for it.
+    fn rel(&self) -> String {
+        let mut parts = self.dir.clone();
+        parts.push(self.program.clone());
+        parts.join("/")
+    }
+}
+
+/// The descriptor has something [`places`] does not read: an error, never a place left out.
+fn unread(field: &str, what: impl std::fmt::Display) -> Fatal {
+    Fatal {
+        code: "io",
+        detail: format!(
+            "the descriptor's {field}: {what}: gi-probe reads less of astra.engine/1 than the launcher admits"
+        ),
+    }
+}
+
+/// A descriptor value's array of strings; `[]` when it is absent.
+fn strings(v: Option<&Value>, field: &str) -> Result<Vec<String>, Fatal> {
+    match v {
+        None => Ok(Vec::new()),
+        Some(Value::Array(a)) => a
+            .iter()
+            .map(|s| s.as_str().map(str::to_owned))
+            .collect::<Option<_>>()
+            .ok_or_else(|| unread(field, "not an array of strings")),
+        Some(_) => Err(unread(field, "not an array")),
+    }
+}
+
+/// Every place `d`'s rules look for a program, the spec's own drawing ([`SPEC_PROGRAM`] at the
+/// top) first: for each rule, each program its `programs` selects (`ext`: `<name>.<ext>`, or
+/// `<name>` for `""`; `suffix`: `<name><suffix>`) in the folder its `programs.at` names
+/// (`{project}`: one folder), or at the top when it names none. The names are the first of
+/// [`NEUTRAL_NAMES`] the rule does not skip: a folder named in its `skip_dirs` or holding one of
+/// the descriptor's `wrappers`, a program holding a wrapper (neither, with `skip_wrappers =
+/// false`). Read off the descriptor's canonical JSON, which the launcher has parsed and admitted.
+fn places(d: &Descriptor) -> Result<Vec<Place>, Fatal> {
+    let v: Value =
+        serde_json::from_str(d.canonical_json()).map_err(|e| unread("canonical JSON", e))?;
+    let wrappers = strings(v.get("wrappers"), "wrappers")?;
+    let wrapped = |name: &str| {
+        let lower = name.to_ascii_lowercase();
+        wrappers.iter().any(|w| lower.contains(w.as_str()))
+    };
+    let mut out = vec![Place {
+        dir: Vec::new(),
+        program: SPEC_PROGRAM.to_owned(),
+    }];
+    let rules = v
+        .get("rule")
+        .and_then(Value::as_array)
+        .ok_or_else(|| unread("rule", "not an array"))?;
+    for (i, r) in rules.iter().enumerate() {
+        let field = format!("rule[{i}].programs");
+        // `programs = "none"` (or `none = true`): Pass B refused it before any folder is asked.
+        let Some(p) = r.get("programs").and_then(Value::as_object) else {
+            continue;
+        };
+        if p.get("none") == Some(&Value::Bool(true)) {
+            continue;
+        }
+        let skip_dirs = strings(p.get("skip_dirs"), &format!("{field}.skip_dirs"))?;
+        // `skip_wrappers`: `true` (the default) skips both, `"folders"` folders only.
+        let (dirs_wrapped, programs_wrapped) = match p.get("skip_wrappers") {
+            None | Some(Value::Bool(true)) => (true, true),
+            Some(Value::Bool(false)) => (false, false),
+            Some(Value::String(s)) if s == "folders" => (true, false),
+            Some(other) => return Err(unread(&field, format!("skip_wrappers = {other}"))),
+        };
+        let folder_skipped = |n: &str| {
+            skip_dirs.iter().any(|s| s.eq_ignore_ascii_case(n)) || (dirs_wrapped && wrapped(n))
+        };
+        let dir = match p.get("at") {
+            None => Vec::new(),
+            Some(Value::String(at)) if at.is_empty() => Vec::new(),
+            Some(Value::String(at)) => {
+                let mut parts = at.split('/').peekable();
+                let mut dir = Vec::new();
+                if parts.next_if_eq(&"{project}").is_some() {
+                    let project = NEUTRAL_NAMES
+                        .iter()
+                        .find(|n| !folder_skipped(n))
+                        .expect("more neutral names than a rule's skips");
+                    dir.push((*project).to_owned());
+                }
+                for part in parts {
+                    if part.is_empty() || part.contains(['{', '}', '*']) {
+                        return Err(unread(&format!("{field}.at"), format!("{at:?}")));
+                    }
+                    dir.push(part.to_owned());
+                }
+                dir
+            }
+            Some(other) => return Err(unread(&format!("{field}.at"), other)),
+        };
+        let endings: Vec<String> = match (p.get("ext"), p.get("suffix")) {
+            (Some(_), None) => strings(p.get("ext"), &format!("{field}.ext"))?
+                .into_iter()
+                .map(|e| if e.is_empty() { e } else { format!(".{e}") })
+                .collect(),
+            (None, Some(Value::String(s))) => vec![s.clone()],
+            _ => return Err(unread(&field, "neither ext nor suffix")),
+        };
+        for ending in endings {
+            // None left: every program it selects ends in a wrapper's name, so it selects none.
+            let Some(program) = NEUTRAL_NAMES
+                .iter()
+                .map(|n| format!("{n}{ending}"))
+                .find(|n| !(programs_wrapped && wrapped(n)))
+            else {
+                continue;
+            };
+            let place = Place {
+                dir: dir.clone(),
+                program,
+            };
+            if !out.contains(&place) {
+                out.push(place);
+            }
+        }
+    }
+    Ok(out)
+}
 
 /// What the file held.
 enum Input {
@@ -127,6 +285,18 @@ fn pe_x64() -> Vec<u8> {
     b
 }
 
+/// A program's bytes, what its name says it is (Pass B reads its magic): a PE image for `.exe`,
+/// an ELF image for any other.
+fn program_bytes(name: &str) -> Vec<u8> {
+    if name.to_ascii_lowercase().ends_with(".exe") {
+        return pe_x64();
+    }
+    let mut b = vec![0u8; 0x40];
+    b[..4].copy_from_slice(b"\x7fELF");
+    b[4..7].copy_from_slice(&[2, 1, 1]);
+    b
+}
+
 /// `d` alone in a set, as an unchecked descriptor (`first_party` as given); the refusals of the
 /// set that would not hold it when Pass B does not admit it.
 fn alone(d: &Descriptor, first_party: bool) -> Result<EngineSet, Vec<LauncherError>> {
@@ -154,47 +324,83 @@ fn claims(d: &Descriptor, det: &Detection) -> bool {
 pub type NegativeFolders = Result<(Vec<Value>, Vec<Finding>), Vec<LauncherError>>;
 
 /// What the spec's negative folders make of `d`, asked alone as an unchecked descriptor
-/// (`first_party` as given): one row per folder (`{folder, claimed, engine}`) and a
-/// `descriptor-too-broad{reason=negative:<folder>}` finding per claim (step unset). `None` when
-/// Pass B does not admit `d`, with the refusals of the set that would not hold it.
+/// (`first_party` as given): each laid at every [`places`] of `d` (one folder without a program
+/// is laid once: there is nothing to place), and each place detected as the folder search finds
+/// it and with Steam's launch hint naming its program. One row per folder (`{folder, claimed,
+/// engine, places: [{program, claimed, engine, engine_with_hint}]}`) and a
+/// `descriptor-too-broad{reason=negative:<folder>, program}` finding per folder claimed, at the
+/// first place that claims it (step unset). `Err` when Pass B does not admit `d`, with the
+/// refusals of the set that would not hold it.
 pub fn negative_folders(d: &Descriptor, first_party: bool) -> Result<NegativeFolders, Fatal> {
     let set = match alone(d, first_party) {
         Ok(set) => set,
         Err(refused) => return Ok(Err(refused)),
     };
+    let places = places(d)?;
     let scratch = Scratch::new("negative")?;
+    let detect = |root: &Path, hint: Option<&str>| {
+        detect_with_engines(root, hint, &set)
+            .map_err(|e| Fatal::io(root, format!("{}: {:?}", e.code, e.params)))
+    };
     let mut folders = Vec::new();
     let mut findings = Vec::new();
-    for (name, files) in NEGATIVE_FOLDERS {
-        let dir = scratch.path().join(name);
-        std::fs::create_dir_all(&dir).map_err(|e| Fatal::io(&dir, e))?;
-        for f in *files {
-            let p = dir.join(f);
-            let bytes = if f.ends_with(".exe") {
-                pe_x64()
+    for (name, program, beside) in NEGATIVE_FOLDERS {
+        let laid = if *program { &places[..] } else { &places[..1] };
+        let mut rows = Vec::new();
+        let mut claim: Option<(Option<String>, String)> = None;
+        let mut first_engine = None;
+        for (k, place) in laid.iter().enumerate() {
+            let root = scratch.path().join(name).join(k.to_string());
+            let dir = place.dir.iter().fold(root.clone(), |p, c| p.join(c));
+            std::fs::create_dir_all(&dir).map_err(|e| Fatal::io(&dir, e))?;
+            for f in *beside {
+                let p = dir.join(f);
+                std::fs::write(&p, b"MZ").map_err(|e| Fatal::io(&p, e))?;
+            }
+            let rel = if *program {
+                let p = dir.join(&place.program);
+                std::fs::write(&p, program_bytes(&place.program)).map_err(|e| Fatal::io(&p, e))?;
+                Some(place.rel())
             } else {
-                b"MZ".to_vec()
+                None
             };
-            std::fs::write(&p, bytes).map_err(|e| Fatal::io(&p, e))?;
+            let walked = detect(&root, None)?;
+            let hinted = rel.as_deref().map(|h| detect(&root, Some(h))).transpose()?;
+            let by = [Some(&walked), hinted.as_ref()]
+                .into_iter()
+                .flatten()
+                .find(|det| claims(d, det));
+            first_engine.get_or_insert_with(|| walked.engine.as_str().to_owned());
+            if let Some(det) = by
+                && claim.is_none()
+            {
+                claim = Some((rel.clone(), det.engine.as_str().to_owned()));
+            }
+            rows.push(json!({
+                "program": rel,
+                "claimed": by.is_some(),
+                "engine": walked.engine.as_str(),
+                "engine_with_hint": hinted.as_ref().map(|h| h.engine.as_str()),
+            }));
         }
-        let det = detect_with_engines(&dir, None, &set)
-            .map_err(|e| Fatal::io(&dir, format!("{}: {:?}", e.code, e.params)))?;
-        let claimed = claims(d, &det);
         folders.push(json!({
             "folder": name,
-            "claimed": claimed,
-            "engine": det.engine.as_str(),
+            "claimed": claim.is_some(),
+            "engine": claim.as_ref().map(|(_, e)| e.clone()).or(first_engine),
+            "places": rows,
         }));
-        if claimed {
+        if let Some((rel, _)) = claim {
+            let at = rel.as_deref().unwrap_or("");
             findings.push(
                 Finding::new(
                     codes::DESCRIPTOR_TOO_BROAD,
                     format!(
-                        "the descriptor claims the negative folder {name:?} (spec §5): it would name games it knows nothing of"
+                        "the descriptor claims the negative folder {name:?}, its program laid as {at:?} (spec §5): it would name games it knows nothing of"
                     ),
                 )
                 .field("rule")
-                .with("reason", format!("negative:{name}")),
+                .with("reason", format!("negative:{name}"))
+                .with("program", at),
             );
         }
     }
@@ -338,4 +544,102 @@ pub fn spec() -> Value {
         "sha": SPEC_SHA,
         "section": "spec/games/engine-descriptor-v1.md §5",
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use astra_game_launcher::engines::descriptor::limits;
+
+    use super::*;
+
+    /// [`NEUTRAL_NAMES`]' promise, which [`places`] relies on: each of a rule's skips (a
+    /// wrapper: three letters at least, matched inside a name; a `skip_dirs` entry: a whole
+    /// name) catches one of them at most, and there are more of them than skips. And none is a
+    /// name a built-in wrapper rule skips: each alone at the top of a folder is the program the
+    /// folder search names.
+    #[test]
+    fn no_rule_can_skip_every_neutral_name() {
+        assert!(NEUTRAL_NAMES.len() > limits::WRAPPERS + limits::SKIP_DIRS);
+        assert_eq!(NEUTRAL_NAMES[0], "Game", "the spec's drawing first");
+        let mut threes = BTreeSet::new();
+        let mut ends = BTreeSet::new();
+        for n in NEUTRAL_NAMES {
+            let lower = n.to_ascii_lowercase();
+            assert!(
+                (3..=5).contains(&lower.len()) && lower.bytes().all(|b| b.is_ascii_lowercase()),
+                "{n}"
+            );
+            assert!(
+                ends.insert(lower.as_bytes()[lower.len() - 1]),
+                "{n}'s last letter"
+            );
+            for w in lower.as_bytes().windows(3) {
+                assert!(
+                    threes.insert(w.to_vec()),
+                    "{n}: {:?}",
+                    String::from_utf8_lossy(w)
+                );
+            }
+        }
+        let scratch = Scratch::new("neutral").unwrap();
+        for n in NEUTRAL_NAMES {
+            let root = scratch.path().join(n);
+            std::fs::create_dir(&root).unwrap();
+            let program = format!("{n}.exe");
+            std::fs::write(root.join(&program), program_bytes(&program)).unwrap();
+            let det = astra_game_launcher::detect(&root).unwrap();
+            assert_eq!(det.engine, "unknown", "{n}");
+            assert_eq!(det.exe.as_deref(), Some(Path::new(&program)), "{n}");
+        }
+    }
+
+    fn places_of(toml: &str) -> Vec<String> {
+        let d = Descriptor::from_toml(toml).unwrap();
+        places(&d).unwrap().iter().map(Place::rel).collect()
+    }
+
+    const HEAD: &str = "schema = \"astra.engine/1\"\nengine = { codes = { probe = \"Probe\" } }\n";
+
+    fn rule(programs: &str) -> String {
+        format!(
+            "{HEAD}[[rule]]\ntier = \"strong\"\nprograms = {programs}\nrequire = [ {{ listed = \"probe.dat\", kind = \"file\" }} ]\ncode = \"probe\"\nconfidence = \"high\"\nbinary = \"windows\"\nevidence = \"{{program}}\"\n"
+        )
+    }
+
+    /// Each program a rule selects, in the folder it looks in; the spec's drawing first, once.
+    #[test]
+    fn places_are_where_each_rule_looks() {
+        assert_eq!(
+            places_of(&rule("{ ext = [\"exe\"], first = 8 }")),
+            ["Game.exe"]
+        );
+        assert_eq!(
+            places_of(&rule(
+                "{ ext = [\"exe\", \"x86_64\", \"\"], at = \"{project}/bin/win64\", first = 8 }"
+            )),
+            [
+                "Game.exe",
+                "Game/bin/win64/Game.exe",
+                "Game/bin/win64/Game.x86_64",
+                "Game/bin/win64/Game"
+            ]
+        );
+        assert_eq!(
+            places_of(&rule("{ suffix = \"-x.x86\", at = \"a/b\", first = 8 }")),
+            ["Game.exe", "a/b/Game-x.x86"]
+        );
+        // `skip_wrappers = false`: a wrapper's name is no skip.
+        let mut wrapped =
+            rule("{ ext = [\"exe\"], at = \"{project}\", first = 8, skip_wrappers = false }");
+        wrapped.insert_str(HEAD.len(), "wrappers = [\"game\", \"koa\"]\n");
+        assert_eq!(places_of(&wrapped), ["Game.exe", "Game/Game.exe"]);
+        let wrapped = wrapped.replace(", skip_wrappers = false", "");
+        assert_eq!(places_of(&wrapped), ["Game.exe", "Cob/Cob.exe"]);
+        // Every name it would select holds a wrapper: it selects none, and is laid nowhere.
+        let mut dead = rule("{ ext = [\"exe\"], at = \"bin\", first = 8 }");
+        dead.insert_str(HEAD.len(), "wrappers = [\".exe\"]\n");
+        assert_eq!(places_of(&dead), ["Game.exe"]);
+    }
 }
