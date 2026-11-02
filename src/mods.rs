@@ -62,7 +62,8 @@ pub use status::{
 use crate::doorstop;
 use crate::engines::EngineCode;
 use crate::engines::mods::{
-    Bindings, Coexist, Enabled, LoaderOutcome, Mods, Recognised, SourceKind, Strategy, evaluate_one,
+    Bindings, Coexist, Enabled, LoaderOutcome, Meter, Mods, Recognised, SourceKind, Strategy,
+    evaluate_one_within,
 };
 use crate::game::{GameTarget, Platform, steam_appid_of_dir};
 use crate::ledger::{self, Ledger};
@@ -314,8 +315,9 @@ const LOG_HEAD_BYTES: u64 = 8 * 1024;
 /// More than any `BepInEx.dll` / `BepInEx.Core.dll` (~140 KB): a larger one's version is not read.
 const MAX_ASSEMBLY_BYTES: u64 = 16 * 1024 * 1024;
 /// What one discovery may read in all, over every data folder and source: folder entries listed,
-/// and bytes of their files read. Spent, it stops looking; what it found so far stands. Each
-/// built-in data evaluation has its own bounds besides (§7.8).
+/// and bytes of their files read — every built-in data evaluation's too, beside its own bounds
+/// (§7.8). Spent, it stops looking: what it found whole so far stands, a source whose look it cut
+/// short is shown over budget (never a partial list), and no source after it is looked at.
 const BUDGET_ENTRIES: usize = 200_000;
 const BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 /// How deep a mod's folder is looked into for what its manager switched off (0.5.0's bound).
@@ -350,6 +352,25 @@ impl Budget {
         }
         self.bytes.set(left - n);
         true
+    }
+
+    /// Nothing more may be listed or read.
+    fn spent(&self) -> bool {
+        self.entries.get() == 0 || self.bytes.get() == 0
+    }
+}
+
+impl Meter for Budget {
+    fn entry(&self) -> bool {
+        Budget::entry(self)
+    }
+
+    fn bytes(&self, n: u64) -> bool {
+        Budget::bytes(self, n)
+    }
+
+    fn bytes_left(&self) -> u64 {
+        self.bytes.get()
     }
 }
 
@@ -841,43 +862,64 @@ fn astra_item(dir: &Path) -> bool {
     find_any_case(dir, &["astra-item.json"]).is_some()
 }
 
-/// What a mod's folder holds below it, within bounds, links never followed: a file one of
-/// `globs` names, and a file renamed `*.old`.
-fn names_below(dir: &Path, globs: &[&crate::engines::mods::Glob], b: &Budget) -> (bool, bool) {
+/// What a mod's folder holds below it, within bounds, links never followed: whether a file one
+/// of `globs` names is there (the walk stops at the first), else whether a file renamed `*.old`
+/// is. `None` when the budget ran out before the walk could say: never a guess.
+fn names_below(dir: &Path, globs: &[&crate::engines::mods::Glob], b: &Budget) -> Option<Below> {
     fn walk(
         dir: &Path,
         depth: usize,
         globs: &[&crate::engines::mods::Glob],
         b: &Budget,
-        seen: &mut (bool, bool),
-    ) {
-        if depth > MOD_DEPTH || (seen.0 && seen.1) {
-            return;
+        renamed: &mut bool,
+    ) -> Option<bool> {
+        if depth > MOD_DEPTH {
+            return Some(false);
         }
         let Ok(entries) = fs::read_dir(dir) else {
-            return;
+            return Some(false);
         };
         let mut subdirs = Vec::new();
         for e in entries.flatten().take(MAX_DIR_ENTRIES) {
             if !b.entry() {
-                return;
+                return None;
             }
             let Ok(t) = e.file_type() else { continue };
             let name = e.file_name().to_string_lossy().into_owned();
             if t.is_file() {
-                seen.0 |= globs.iter().any(|g| g.matches(&name));
-                seen.1 |= name.to_ascii_lowercase().ends_with(".old");
+                if globs.iter().any(|g| g.matches(&name)) {
+                    return Some(true);
+                }
+                *renamed |= name.to_ascii_lowercase().ends_with(".old");
             } else if t.is_dir() {
                 subdirs.push(e.path());
             }
         }
         for d in subdirs {
-            walk(&d, depth + 1, globs, b, seen);
+            if walk(&d, depth + 1, globs, b, renamed)? {
+                return Some(true);
+            }
         }
+        Some(false)
     }
-    let mut seen = (false, false);
-    walk(dir, 0, globs, b, &mut seen);
-    seen
+    let mut renamed = false;
+    Some(if walk(dir, 0, globs, b, &mut renamed)? {
+        Below::Loadable
+    } else if renamed {
+        Below::Renamed
+    } else {
+        Below::Neither
+    })
+}
+
+/// What [`names_below`] found below a mod's folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Below {
+    /// A file the loader's `file-glob`s name: it loads something.
+    Loadable,
+    /// None of those, and a file renamed `*.old`.
+    Renamed,
+    Neither,
 }
 
 /// A mod folder its manager switched off: the manager's own enable state, which an adapter reads
@@ -885,21 +927,21 @@ fn names_below(dir: &Path, globs: &[&crate::engines::mods::Glob], b: &Budget) ->
 /// renaming its files `<name>.old`, so the folder stays and its loader loads nothing of it: it
 /// holds a file renamed `*.old` and none the loader's own `file-glob`s name (BepInEx: `*.dll`).
 /// Only for a source such a manager keeps; a folder of any other source is the data's alone.
+/// `None` when the discovery's budget ran out before the folder could be read whole.
 fn switched_off(
     manager: ModManager,
     dir: &Path,
     globs: &[&crate::engines::mods::Glob],
     b: &Budget,
-) -> bool {
+) -> Option<bool> {
     if !matches!(
         manager,
         ModManager::R2modman | ModManager::Thunderstore | ModManager::Gale
     ) || globs.is_empty()
     {
-        return false;
+        return Some(false);
     }
-    let (loadable, renamed) = names_below(dir, globs, b);
-    renamed && !loadable
+    Some(names_below(dir, globs, b)? == Below::Renamed)
 }
 
 /// MelonLoader's mods: the `*.dll` files in `Mods/`.
@@ -976,14 +1018,14 @@ fn astra_placed(ledger: Option<&Ledger>, game_root: Option<&Path>, files: &[Path
 }
 
 /// The built-in data's loaders recognised in `c`, for a game `p` placed: each loader's outcome
-/// (§7.4–§7.8). The game folder is `{source}` as detection reads it (the folder detection ran on);
-/// any other source is its own folder.
-fn data_loaders(p: &Placed, c: &Candidate) -> Vec<LoaderOutcome> {
+/// (§7.4–§7.8), every entry listed and byte read charged to `b`. The game folder is `{source}` as
+/// detection reads it (the folder detection ran on); any other source is its own folder.
+fn data_loaders(p: &Placed, c: &Candidate, b: &Budget) -> Vec<LoaderOutcome> {
     let Some(mods) = p.mods else {
         return Vec::new();
     };
     let root = if c.game_folder { &p.game_dir } else { &c.root };
-    evaluate_one(mods, &p.code, &p.bindings, c.manager.source_kind(), root).loaders
+    evaluate_one_within(mods, &p.code, &p.bindings, c.manager.source_kind(), root, b).loaders
 }
 
 /// The integration's verdict on a loader the built-in data recognised, in this order: a loader
@@ -1064,7 +1106,32 @@ pub(crate) fn judge(
         && let Some(mods) = p.mods
     {
         let source_root = if c.game_folder { &p.game_dir } else { &c.root };
-        for outcome in data_loaders(p, c) {
+        // A loader past a bound — one evaluation's (§7.8), or the discovery's — is shown to say
+        // so, with nothing of it listed.
+        let over = |id: &str| {
+            let kind = LoaderKind::of_id(id)?;
+            let coexist = mods
+                .loader(id)
+                .map(|l| l.coexist().iter().map(Coexistence::of_data).collect())
+                .unwrap_or_default();
+            Some(Found {
+                source: row(
+                    source_root,
+                    ModLoader {
+                        kind,
+                        version: None,
+                        preloader: None,
+                    },
+                    0,
+                    Err(Unplayable::NotSupported {
+                        reason: "over-budget".to_owned(),
+                    }),
+                    coexist,
+                ),
+                entry: None,
+            })
+        };
+        for outcome in data_loaders(p, c, b) {
             match outcome {
                 LoaderOutcome::Recognised(r) => {
                     let Some(kind) = LoaderKind::of_id(&r.id) else {
@@ -1083,18 +1150,30 @@ pub(crate) fn judge(
                             _ => None,
                         })
                         .collect();
-                    let count = r
-                        .mods
-                        .iter()
-                        .filter(|m| m.enabled)
-                        .filter(|m| {
-                            !m.folder
-                                || r.root.as_ref().is_none_or(|root| {
-                                    let dir = root.join(&m.name);
-                                    !astra_item(&dir) && !switched_off(c.manager, &dir, &globs, b)
-                                })
-                        })
-                        .count();
+                    let mut count = 0usize;
+                    let mut cut = false;
+                    for m in r.mods.iter().filter(|m| m.enabled) {
+                        let counts = !m.folder
+                            || r.root.as_ref().is_none_or(|root| {
+                                let dir = root.join(&m.name);
+                                !astra_item(&dir)
+                                    && match switched_off(c.manager, &dir, &globs, b) {
+                                        Some(off) => !off,
+                                        None => {
+                                            cut = true;
+                                            false
+                                        }
+                                    }
+                            });
+                        if cut {
+                            break;
+                        }
+                        count += usize::from(counts);
+                    }
+                    if cut {
+                        out.extend(over(&r.id));
+                        continue;
+                    }
                     let entry = r.coexist.iter().find_map(|s| match s {
                         Strategy::Chain { entry, .. } => Some(entry.clone()),
                         _ => None,
@@ -1118,31 +1197,7 @@ pub(crate) fn judge(
                         entry,
                     });
                 }
-                LoaderOutcome::OverBudget { id, .. } => {
-                    let Some(kind) = LoaderKind::of_id(&id) else {
-                        continue;
-                    };
-                    let coexist = mods
-                        .loader(&id)
-                        .map(|l| l.coexist().iter().map(Coexistence::of_data).collect())
-                        .unwrap_or_default();
-                    out.push(Found {
-                        source: row(
-                            source_root,
-                            ModLoader {
-                                kind,
-                                version: None,
-                                preloader: None,
-                            },
-                            0,
-                            Err(Unplayable::NotSupported {
-                                reason: "over-budget".to_owned(),
-                            }),
-                            coexist,
-                        ),
-                        entry: None,
-                    });
-                }
+                LoaderOutcome::OverBudget { id, .. } => out.extend(over(&id)),
             }
         }
     }
@@ -1246,10 +1301,26 @@ pub(crate) fn discover(
         });
     }
 
+    sources(&candidates, placed.as_ref(), &can, ledger, &budget)
+}
+
+/// The sources of `candidates`, in order, each folder once per loader family, the most recently
+/// played first. Every look is charged to `budget`; once it is spent nothing more is looked at (a
+/// source it cut short is shown over budget).
+fn sources(
+    candidates: &[Candidate],
+    placed: Option<&Placed>,
+    can: &Result<(Manifest, ModsDecl), Unplayable>,
+    ledger: Option<&Ledger>,
+    budget: &Budget,
+) -> Vec<ModSource> {
     let mut seen: Vec<(PathBuf, &'static str)> = Vec::new();
     let mut out: Vec<ModSource> = Vec::new();
-    for c in &candidates {
-        for f in judge(c, placed.as_ref(), &can, ledger, &budget) {
+    for c in candidates {
+        if budget.spent() {
+            break;
+        }
+        for f in judge(c, placed, can, ledger, budget) {
             let s = f.source;
             // A profile with nothing in it is no one's mods; MelonLoader in the game folder
             // loads into every start, mods or not; a loader past a bound is shown to say so.
@@ -1317,6 +1388,161 @@ mod tests {
             "spent: nothing more is listed"
         );
         assert!(b.bytes(10) && !b.bytes(1));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("agl-mods-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn put(p: &Path) {
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, b"MZ").unwrap();
+    }
+
+    fn budget(entries: usize) -> Budget {
+        Budget {
+            entries: std::cell::Cell::new(entries),
+            bytes: std::cell::Cell::new(BUDGET_BYTES),
+        }
+    }
+
+    /// A Unity Mono game as the built-in rule places it: the built-in `mods` for `unity-mono`.
+    fn mono() -> Placed {
+        let code = EngineCode::new("unity-mono").unwrap();
+        Placed {
+            mods: builtin::for_code(&code),
+            code,
+            bindings: Bindings::new(),
+            game_dir: PathBuf::from("/nonexistent"),
+            game_root: None,
+        }
+    }
+
+    /// An r2modman profile at `root` holding a BepInEx 5.
+    fn r2_profile(root: &Path) -> Candidate {
+        for f in ["BepInEx.dll", "BepInEx.Preloader.dll"] {
+            put(&root.join("BepInEx/core").join(f));
+        }
+        candidate(ModManager::R2modman, root.to_path_buf())
+    }
+
+    fn summary(sources: &[ModSource]) -> Vec<(String, u32, Result<(), Unplayable>)> {
+        sources
+            .iter()
+            .map(|s| (s.profile.clone(), s.mods, s.playable.clone()))
+            .collect()
+    }
+
+    /// Every entry an evaluation of the built-in data lists is charged to the discovery's one
+    /// budget: a source whose look the budget cuts short is shown over budget, never a partial
+    /// list, and no source after it is looked at.
+    #[test]
+    fn every_evaluation_is_charged_to_the_discoverys_one_budget() {
+        let dir = tmp("charged");
+        let candidates: Vec<Candidate> = (0..4)
+            .map(|i| {
+                let root = dir.join(format!("P{i}"));
+                put(&root.join("BepInEx/plugins/Mod.dll"));
+                for n in 0..99 {
+                    put(&root.join(format!("BepInEx/plugins/notes{n}.txt")));
+                }
+                r2_profile(&root)
+            })
+            .collect();
+        let can = Err(Unplayable::NotSupported {
+            reason: "not-installed".to_owned(),
+        });
+        let not = can.clone().unwrap_err();
+        let whole = Budget::new();
+        let all = sources(&candidates, Some(&mono()), &can, None, &whole);
+        assert_eq!(
+            summary(&all),
+            (0..4)
+                .map(|i| (format!("P{i}"), 1, Err(not.clone())))
+                .collect::<Vec<_>>()
+        );
+        // Four listings of a hundred plugins' entries: each charged.
+        assert!(BUDGET_ENTRIES - whole.entries.get() >= 400);
+        let over = Err(Unplayable::NotSupported {
+            reason: "over-budget".to_owned(),
+        });
+        let cut = sources(&candidates, Some(&mono()), &can, None, &budget(250));
+        assert_eq!(
+            summary(&cut),
+            [
+                ("P0".to_owned(), 1, Err(not.clone())),
+                ("P1".to_owned(), 1, Err(not.clone())),
+                ("P2".to_owned(), 0, over),
+            ]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A mod folder an r2modman profile holds is read for its manager's switch only as far as the
+    /// budget goes: cut short, the source is over budget, never a guess that the mod is enabled.
+    #[test]
+    fn a_mod_folder_the_budget_cannot_read_whole_is_never_guessed_enabled() {
+        let dir = tmp("cut");
+        let root = dir.join("P");
+        for n in 0..300 {
+            put(&root.join(format!("BepInEx/plugins/Big/data{n}.txt")));
+        }
+        put(&root.join("BepInEx/plugins/Big/bin/Big.dll"));
+        put(&root.join("BepInEx/plugins/ZOff/ZOff.dll.old"));
+        let c = [r2_profile(&root)];
+        let can = Err(Unplayable::NotSupported {
+            reason: "not-installed".to_owned(),
+        });
+        let whole = sources(&c, Some(&mono()), &can, None, &Budget::new());
+        assert_eq!(
+            summary(&whole),
+            [("P".to_owned(), 1, Err(can.clone().unwrap_err()))]
+        );
+        let cut = sources(&c, Some(&mono()), &can, None, &budget(102));
+        assert_eq!(
+            summary(&cut),
+            [(
+                "P".to_owned(),
+                0,
+                Err(Unplayable::NotSupported {
+                    reason: "over-budget".to_owned()
+                })
+            )]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A mod folder that holds a file its loader loads is not walked any further.
+    #[test]
+    fn an_enabled_mod_is_not_walked_past_its_first_loadable_file() {
+        let dir = tmp("first");
+        put(&dir.join("A.dll"));
+        for n in 0..50 {
+            put(&dir.join(format!("data/d{n}/x.txt")));
+        }
+        // BepInEx 5's own `file-glob`, `*.dll`.
+        let glob = builtin::for_code(&EngineCode::new("unity-mono").unwrap())
+            .and_then(|m| m.loader("bepinex5"))
+            .unwrap()
+            .enabled()
+            .iter()
+            .find_map(|e| match e {
+                Enabled::FileGlob(g) => Some(g),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(glob.as_str(), "*.dll");
+        let b = Budget::new();
+        assert_eq!(names_below(&dir, &[glob], &b), Some(Below::Loadable));
+        assert!(BUDGET_ENTRIES - b.entries.get() <= 2, "{}", b.entries.get());
+        fs::remove_file(dir.join("A.dll")).unwrap();
+        put(&dir.join("data/d7/A.dll.old"));
+        assert_eq!(names_below(&dir, &[glob], &b), Some(Below::Renamed));
+        assert_eq!(names_below(&dir, &[glob], &budget(3)), None);
         let _ = fs::remove_dir_all(&dir);
     }
 

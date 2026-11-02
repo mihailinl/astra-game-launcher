@@ -25,7 +25,10 @@
 //! [`LoaderOutcome::OverBudget`], never a partial list, and never a version "unknown" for a probe
 //! cut short — and the start is without mods. A start evaluates at most one source of each kind
 //! ([`Sources`]): the game folder, the ACTIVE profile of the one manager an adapter reports, the
-//! picked folder.
+//! picked folder. A caller that evaluates many sources (the launcher's discovery lists every
+//! profile it finds) charges each evaluation's listed entries and bytes read to a [`Meter`] of
+//! its own as well ([`evaluate_one_within`]); spent, the loader yields nothing the same way
+//! ([`Bound::Discovery`]).
 //!
 //! **Read-only and private** (§7.10): nothing here opens anything for writing, and nothing it
 //! finds is logged; what it returns is for the player's own install sheet and that one start.
@@ -53,6 +56,9 @@ pub enum Bound {
     /// More than [`limits::BYTES_PER_EVALUATION`] read, or a list longer than
     /// [`limits::LIST_BYTES`].
     Bytes,
+    /// The caller's own [`Meter`], shared by every evaluation it makes, is spent (the launcher's,
+    /// beside §7.8's per-evaluation bounds).
+    Discovery,
 }
 
 impl Bound {
@@ -62,6 +68,7 @@ impl Bound {
             Bound::Mods => "mods",
             Bound::Lookups => "lookups",
             Bound::Bytes => "bytes",
+            Bound::Discovery => "discovery",
         }
     }
 }
@@ -171,6 +178,36 @@ pub fn evaluate(
     .collect()
 }
 
+/// What a caller may still spend over all the evaluations it makes, beside each one's own §7.8
+/// bounds: entries listed and bytes read. Every entry an evaluation lists and every byte it reads
+/// is charged; once it is spent, the loader being evaluated yields nothing
+/// ([`Bound::Discovery`]).
+pub trait Meter {
+    /// One more entry listed; `false` once spent.
+    fn entry(&self) -> bool;
+    /// `n` more bytes read; `false` (and nothing charged) when they do not fit.
+    fn bytes(&self, n: u64) -> bool;
+    /// What may still be read.
+    fn bytes_left(&self) -> u64;
+}
+
+/// No meter: each evaluation has its own bounds only.
+struct Unmetered;
+
+impl Meter for Unmetered {
+    fn entry(&self) -> bool {
+        true
+    }
+
+    fn bytes(&self, _: u64) -> bool {
+        true
+    }
+
+    fn bytes_left(&self) -> u64 {
+        u64::MAX
+    }
+}
+
 /// One source of kind `kind` at `root`.
 pub fn evaluate_one(
     mods: &super::Mods,
@@ -179,12 +216,25 @@ pub fn evaluate_one(
     kind: SourceKind,
     root: &Path,
 ) -> Evaluation {
+    evaluate_one_within(mods, code, bindings, kind, root, &Unmetered)
+}
+
+/// [`evaluate_one`], every entry listed and byte read charged to `meter` as well.
+pub fn evaluate_one_within(
+    mods: &super::Mods,
+    code: &EngineCode,
+    bindings: &Bindings,
+    kind: SourceKind,
+    root: &Path,
+    meter: &dyn Meter,
+) -> Evaluation {
     let mut ctx = Ctx {
         root,
         lookups: 0,
         bytes: 0,
         listings: HashMap::new(),
         dirs: HashMap::new(),
+        meter,
     };
     let mut loaders = Vec::new();
     if fs::metadata(root).is_ok_and(|m| m.is_dir()) {
@@ -276,6 +326,8 @@ struct Ctx<'a> {
     /// folders real: each is looked at once per evaluation, so a deep path costs one look per
     /// component, never one per component per lookup.
     dirs: HashMap<String, bool>,
+    /// The caller's, charged with every entry listed and byte read.
+    meter: &'a dyn Meter,
 }
 
 impl Ctx<'_> {
@@ -291,12 +343,24 @@ impl Ctx<'_> {
         Ok(())
     }
 
+    /// `n` bytes read: charged to the evaluation and to the caller's meter.
     fn read(&mut self, n: u64) -> Step<()> {
         self.bytes += n;
         if self.bytes > limits::BYTES_PER_EVALUATION {
             return Err(Bound::Bytes);
         }
+        if !self.meter.bytes(n) {
+            return Err(Bound::Discovery);
+        }
         Ok(())
+    }
+
+    /// The most a probe bounded by `own` may read: what is left of the evaluation's bytes and of
+    /// the meter's, and whether it is the meter that bounds it.
+    fn room(&self, own: u64) -> (u64, bool) {
+        let left = own.min(limits::BYTES_PER_EVALUATION.saturating_sub(self.bytes));
+        let shared = self.meter.bytes_left();
+        (left.min(shared), shared < left)
     }
 
     /// Whether every component of `comps` is a real folder below the root (no link on the way).
@@ -361,6 +425,9 @@ impl Ctx<'_> {
         for (n, item) in read.flatten().enumerate() {
             if n >= limits::ENTRIES_PER_DIR {
                 return Err(Bound::Entries);
+            }
+            if !self.meter.entry() {
+                return Err(Bound::Discovery);
             }
             let Some(name) = item.file_name().to_str().map(str::to_owned) else {
                 continue;
@@ -562,14 +629,18 @@ impl Ctx<'_> {
         if let Some(comps) = self.resolve(paths.get(&v.pe), Kind::File)?
             && let Some((f, len)) = reads::open_regular(&self.abs(&comps))
         {
-            let left = limits::BYTES_PER_EVALUATION.saturating_sub(self.bytes);
-            let mut r = pe::Counted::new(f, len, limits::VERSION_BYTES.min(left));
+            let (room, metered) = self.room(limits::VERSION_BYTES);
+            let mut r = pe::Counted::new(f, len, room);
             let strings = pe::version_strings(&mut r, &v.keys);
             self.read(r.used)?;
             if r.exhausted {
                 // A probe that would read past its own bound, or past what is left of the
-                // evaluation's: over a per-evaluation bound, never a version "unknown" (§7.8).
-                return Err(Bound::Bytes);
+                // evaluation's (or the meter's): over a bound, never a version "unknown" (§7.8).
+                return Err(if metered {
+                    Bound::Discovery
+                } else {
+                    Bound::Bytes
+                });
             }
             let strings: Vec<String> = strings.into_iter().flatten().flatten().collect();
             written = strings.first().cloned();
@@ -657,12 +728,16 @@ impl Ctx<'_> {
         let Some(found) = self.resolve(comps, Kind::File)? else {
             return Ok(Vec::new());
         };
-        let left = limits::BYTES_PER_EVALUATION.saturating_sub(self.bytes);
-        let Some(bytes) = reads::head(&self.abs(&found), limits::LIST_BYTES.min(left) + 1) else {
+        let (room, metered) = self.room(limits::LIST_BYTES);
+        let Some(bytes) = reads::head(&self.abs(&found), room + 1) else {
             return Ok(Vec::new());
         };
-        self.read(bytes.len() as u64)?;
-        if bytes.len() as u64 > limits::LIST_BYTES {
+        let n = bytes.len() as u64;
+        if metered && n > room {
+            return Err(Bound::Discovery);
+        }
+        self.read(n)?;
+        if n > limits::LIST_BYTES {
             return Err(Bound::Bytes);
         }
         Ok(name_colon_flag(&String::from_utf8_lossy(&bytes)))
@@ -1022,6 +1097,71 @@ mod tests {
             ),
             "{got:?}"
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A caller's own meter, spent mid-evaluation: the loader yields nothing, as over any bound.
+    #[test]
+    fn a_meter_spent_mid_evaluation_yields_nothing() {
+        struct Left(std::cell::Cell<usize>, std::cell::Cell<u64>);
+        impl Meter for Left {
+            fn entry(&self) -> bool {
+                let n = self.0.get();
+                self.0.set(n.saturating_sub(1));
+                n > 0
+            }
+            fn bytes(&self, n: u64) -> bool {
+                let left = self.1.get();
+                self.1.set(left.saturating_sub(n));
+                n <= left
+            }
+            fn bytes_left(&self) -> u64 {
+                self.1.get()
+            }
+        }
+        let meter =
+            |entries, bytes| Left(std::cell::Cell::new(entries), std::cell::Cell::new(bytes));
+        let paks = mods_of(GLOB);
+        let root = tmp("meter");
+        for i in 0..10 {
+            put(&root, &format!("Content/Paks/~mods/{i}.pak"), b"");
+        }
+        let with = |mods: &super::super::Mods, b: &Bindings, m: &Left| {
+            evaluate_one_within(mods, &code(), b, SourceKind::Game, &root, m).loaders
+        };
+        let enough = meter(10, 0);
+        assert!(matches!(
+            &with(&paks, &Bindings::new(), &enough)[..],
+            [LoaderOutcome::Recognised(r)] if r.mods.len() == 10
+        ));
+        assert_eq!(enough.0.get(), 0, "every entry listed is charged");
+        assert!(matches!(
+            &with(&paks, &Bindings::new(), &meter(9, 0))[..],
+            [LoaderOutcome::OverBudget {
+                bound: Bound::Discovery,
+                ..
+            }]
+        ));
+        // The version probe and the list are read within what the meter has left.
+        let ue = mods_of(UE);
+        let b = Bindings::new().with("project", "Pal");
+        put(
+            &root,
+            "Pal/bin/ue4ss/UE4SS.dll",
+            &pe::build::pe(&[("ProductVersion", "3.0.1")], 0),
+        );
+        put(&root, "Pal/bin/ue4ss/Mods/mods.txt", b"A : 1\n");
+        assert!(matches!(
+            &with(&ue, &b, &meter(100, 1 << 20))[..],
+            [LoaderOutcome::Recognised(r)] if r.supported
+        ));
+        assert!(matches!(
+            &with(&ue, &b, &meter(100, 64))[..],
+            [LoaderOutcome::OverBudget {
+                bound: Bound::Discovery,
+                ..
+            }]
+        ));
         let _ = fs::remove_dir_all(&root);
     }
 

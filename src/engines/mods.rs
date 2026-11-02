@@ -50,7 +50,8 @@ mod eval;
 mod pe;
 
 pub use eval::{
-    Bound, Evaluation, LoaderOutcome, Mod, Recognised, Sources, Strategy, evaluate, evaluate_one,
+    Bound, Evaluation, LoaderOutcome, Meter, Mod, Recognised, Sources, Strategy, evaluate,
+    evaluate_one, evaluate_one_within,
 };
 
 /// §7.8's bounds and §7.1's nesting. Counted, never timed.
