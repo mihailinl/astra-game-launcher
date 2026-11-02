@@ -1279,9 +1279,26 @@ mod tests {
             &pe::build::pe(&[("ProductVersion", "3.0.1")], 0),
         );
         put(&root, "Pal/bin/ue4ss/Mods/mods.txt", b"A : 1\n");
+        fs::create_dir_all(root.join("Pal/bin/ue4ss/Mods/A")).unwrap();
+        let ample = meter(100, 1 << 20);
         assert!(matches!(
-            &with(&ue, &b, &meter(100, 1 << 20))[..],
+            &with(&ue, &b, &ample)[..],
             [LoaderOutcome::Recognised(r)] if r.supported
+        ));
+        // Every byte read is charged: the version probe's and the list's, the list last (its 6
+        // bytes). With exactly that much the loader is read; a byte less and the list is cut.
+        let read = (1 << 20) - ample.1.get();
+        assert!(read > 6, "{read}");
+        assert!(matches!(
+            &with(&ue, &b, &meter(100, read))[..],
+            [LoaderOutcome::Recognised(r)] if r.mods.len() == 1 && r.mods[0].enabled
+        ));
+        assert!(matches!(
+            &with(&ue, &b, &meter(100, read - 1))[..],
+            [LoaderOutcome::OverBudget {
+                bound: Bound::Discovery,
+                ..
+            }]
         ));
         assert!(matches!(
             &with(&ue, &b, &meter(100, 64))[..],
