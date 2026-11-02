@@ -1862,6 +1862,9 @@ mod tests {
             "COM1",
             "lpt9.log",
             "COM\u{b9}",
+            "COM\u{b2}",
+            "LPT\u{b3}.log",
+            "lpt\u{b2}",
             "CONIN$",
             "conout$.x",
             "AUX .txt",
@@ -1876,6 +1879,8 @@ mod tests {
             "XINPUT~1.DLL",
             "PROGRA~1",
             "x~9",
+            "a~0",
+            "LOADER~0.DLL",
             "{x",
             "a}b",
         ] {
@@ -2037,6 +2042,18 @@ mod tests {
         let two = Glob("a*b*c".into());
         assert!(two.matches("abc") && two.matches("aXbYc") && !two.matches("acb"));
         assert!(!Glob("ab*ba".into()).matches("aba"));
+        // At most two `*`, at most 64 characters (§7.5, §7.8).
+        assert_eq!(glob_reason(&Value::String("a*b*c".into())), None);
+        assert_eq!(
+            glob_reason(&Value::String("a*b*c*d".into())),
+            Some(GLOB_OVER_BUDGET)
+        );
+        let longest = format!("*{}", "a".repeat(limits::GLOB_CHARS - 1));
+        assert_eq!(glob_reason(&Value::String(longest.clone())), None);
+        assert_eq!(
+            glob_reason(&Value::String(format!("{longest}a"))),
+            Some(GLOB_OVER_BUDGET)
+        );
         for bad in ["**/*.pak", "a/b*", "*", "a", "a?*", "[a]*", "***", "{a}*"] {
             let want = if bad == "*" {
                 None
@@ -2056,6 +2073,8 @@ mod tests {
             "Mod Organizer 2",
             "modorganiser",
             "Mod_Organizer",
+            "Mod-Organizer",
+            "mod-organiser 2",
             "Overwolf",
             "gale",
             "Gale/profiles",
@@ -2346,6 +2365,20 @@ mod tests {
                 loader("lo", &req, "").replace("{source}/l/mods", &format!("{{source}}/{root}"));
             assert_eq!(found(&mods), want, "{root}");
         }
+        // Passive is exactly "no chain, no via-manager, no tell" (§7.4): `coexist = []` (Astra
+        // cannot run beside it at all) is passive, and may anchor on its own root; a `tell` is not.
+        let rooted = |coexist: &str| {
+            loader("lo", "{ stat = \"{source}/Mods\", kind = \"dir\" }", "")
+                .replace("{source}/l/mods", "{source}/Mods")
+                .replace("coexist = [ { strategy = \"side-by-side\" } ]", coexist)
+        };
+        assert_eq!(found(&rooted("coexist = []")), []);
+        assert_eq!(
+            found(&rooted(
+                "coexist = [ { strategy = \"side-by-side\", tell = \"ue4ss-mods-paths\" } ]"
+            )),
+            one("mods.loader[0].coexist", ROOT_ANCHOR_NOT_PASSIVE)
+        );
     }
 
     /// Every member keeps to its closed set and its shape, each finding at the member it is
@@ -2447,6 +2480,21 @@ mod tests {
                     &format!("[ {FILE}, {{ any = [ {{ all = [ {{ none = [ {FILE} ] }} ] }} ] }} ]"),
                 ),
                 vec![],
+            ),
+            // 64 lookups in one member: within the bound. 65: over it.
+            (
+                with(
+                    &format!("[ {FILE} ]"),
+                    &format!("[ {FILE}, {{ any = [ {} ] }} ]", [FILE; 63].join(", ")),
+                ),
+                vec![],
+            ),
+            (
+                with(
+                    &format!("[ {FILE} ]"),
+                    &format!("[ {FILE}, {{ any = [ {} ] }} ]", [FILE; 64].join(", ")),
+                ),
+                vec![("mods".to_owned(), OVER_BUDGET)],
             ),
             // Nine content probes in one member.
             (

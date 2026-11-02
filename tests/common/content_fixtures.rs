@@ -725,6 +725,8 @@ pub fn vrma() -> Vec<u8> {
 pub const FBX: &[u8] = b"Kaydara FBX Binary  \0\x1a\0\xe8\x1c\0\0";
 /// A PNG's first bytes.
 pub const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+/// A KTX2 texture's first bytes (its identifier, then a header of zeros).
+pub const KTX2: &[u8] = b"\xabKTX 20\xbb\r\n\x1a\n\0\0\0\0\0\0\0\0";
 /// A Windows DLL's first bytes.
 pub const DLL: &[u8] = b"MZ\x90\0\x03\0\0\0\x04\0\0\0\xff\xff\0\0\xb8\0\0\0\0\0\0\0@\0\0\0\0\0\0\0";
 
@@ -1238,6 +1240,7 @@ pub fn hostile() -> Vec<Fixture> {
             )),
         ),
         fx(
+            // 4 bytes past 32 MiB; its near miss exactly 32 MiB, which is allowed.
             "a release of more than 32 MiB of glTF JSON",
             rel(
                 &(part("models/a.glb", "art", cc)
@@ -1246,15 +1249,18 @@ pub fn hostile() -> Vec<Fixture> {
                 &[
                     ("models/a.glb", padded_glb(11 * MIB)),
                     ("models/b.glb", padded_glb(11 * MIB)),
-                    ("models/c.glb", padded_glb(11 * MIB)),
+                    ("models/c.glb", padded_glb(10 * MIB + 4)),
                 ],
             ),
             vec![(CONTENT_FORMAT, "gltf-json-total")],
             Some(rel(
-                &(part("models/a.glb", "art", cc) + &part("models/b.glb", "art", cc)),
+                &(part("models/a.glb", "art", cc)
+                    + &part("models/b.glb", "art", cc)
+                    + &part("models/c.glb", "art", cc)),
                 &[
                     ("models/a.glb", padded_glb(11 * MIB)),
                     ("models/b.glb", padded_glb(11 * MIB)),
+                    ("models/c.glb", padded_glb(10 * MIB)),
                 ],
             )),
         ),
@@ -1427,10 +1433,14 @@ pub fn hostile() -> Vec<Fixture> {
                 &[
                     ("models/a.glb", padded_glb(11 * MIB)),
                     ("models/b.glb", padded_glb(11 * MIB)),
-                    ("mods/props.jar", mod_jar(&padded_glb(11 * MIB), "assets/p.glb")),
+                    (
+                        "mods/props.jar",
+                        mod_jar(&padded_glb(10 * MIB + 4), "assets/p.glb"),
+                    ),
                 ],
             ),
             vec![(CONTENT_FORMAT, "gltf-json-total")],
+            // Exactly 32 MiB with the archive's: allowed.
             Some(rel(
                 &(part("models/a.glb", "art", cc)
                     + &part("models/b.glb", "art", cc)
@@ -1438,7 +1448,7 @@ pub fn hostile() -> Vec<Fixture> {
                 &[
                     ("models/a.glb", padded_glb(11 * MIB)),
                     ("models/b.glb", padded_glb(11 * MIB)),
-                    ("mods/props.jar", mod_jar(&padded_glb(9 * MIB), "assets/p.glb")),
+                    ("mods/props.jar", mod_jar(&padded_glb(10 * MIB), "assets/p.glb")),
                 ],
             )),
         ),
@@ -1818,6 +1828,51 @@ pub fn hostile() -> Vec<Fixture> {
             )),
         ),
         fx(
+            "a character bundle's body deflated where it must be stored",
+            char_release(
+                bundle_with("astra.character", &[(BODY, &allowed)], Some(BODY), |e| {
+                    e[0].method = 8
+                }),
+                cc,
+            ),
+            vec![(ARCHIVE_MUST_BE_STORED, bundle_part)],
+            Some(good_char()),
+        ),
+        fx(
+            "a character bundle's model deflated where it must be stored",
+            char_release(
+                bundle_with(
+                    "astra.character",
+                    &[(BODY, &allowed), ("accessories/hat/hat.glb", &allowed)],
+                    Some(BODY),
+                    |e| e[1].method = 8,
+                ),
+                cc,
+            ),
+            vec![(ARCHIVE_MUST_BE_STORED, bundle_part)],
+            Some(char_release(
+                character(&[(BODY, &allowed), ("accessories/hat/hat.glb", &allowed)], Some(BODY)),
+                cc,
+            )),
+        ),
+        fx(
+            "a character bundle's texture deflated where it must be stored",
+            char_release(
+                bundle_with(
+                    "astra.character",
+                    &[(BODY, &allowed), ("textures/skin.ktx2", KTX2)],
+                    Some(BODY),
+                    |e| e[1].method = 8,
+                ),
+                cc,
+            ),
+            vec![(ARCHIVE_MUST_BE_STORED, bundle_part)],
+            Some(char_release(
+                character(&[(BODY, &allowed), ("textures/skin.ktx2", KTX2)], Some(BODY)),
+                cc,
+            )),
+        ),
+        fx(
             "a character bundle whose astrachar.json is not its last entry",
             char_release(
                 bundle_with("astra.character", &[(BODY, &allowed)], Some(BODY), |e| {
@@ -1889,23 +1944,28 @@ pub fn hostile() -> Vec<Fixture> {
                     ),
                     (
                         "packs/b.astrapack",
+                        pack(&[("clips/a.gltf", &big_json(10 * MIB + 1))]),
+                    ),
+                ],
+            ),
+            vec![(CONTENT_FORMAT, "gltf-json-total")],
+            // Exactly 32 MiB with the second pack's: allowed.
+            Some(rel(
+                &(part("packs/a.astrapack", "animations", cc)
+                    + &part("packs/b.astrapack", "animations", cc)),
+                &[
+                    (
+                        "packs/a.astrapack",
                         pack(&[
                             ("clips/a.gltf", &big_json(11 * MIB)),
                             ("clips/b.gltf", &big_json(11 * MIB)),
                         ]),
                     ),
+                    (
+                        "packs/b.astrapack",
+                        pack(&[("clips/a.gltf", &big_json(10 * MIB))]),
+                    ),
                 ],
-            ),
-            vec![(CONTENT_FORMAT, "gltf-json-total")],
-            Some(rel(
-                &part("packs/a.astrapack", "animations", cc),
-                &[(
-                    "packs/a.astrapack",
-                    pack(&[
-                        ("clips/a.gltf", &big_json(11 * MIB)),
-                        ("clips/b.gltf", &big_json(11 * MIB)),
-                    ]),
-                )],
             )),
         ),
         // -- the pack inbox --

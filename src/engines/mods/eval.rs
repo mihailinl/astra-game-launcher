@@ -964,8 +964,59 @@ mod tests {
             &game(&ue, &outside, &b)[..],
             [LoaderOutcome::Recognised(_)]
         ));
+        // A `tail` whose file sits below a linked folder: never read through the link, so it
+        // does not hold; the same file below a real folder does.
+        let tailed = mods_of(TAILED);
+        put(&root, "top.dll", b"");
+        put(&outside, "sig/probe.bin", b"....SIG!");
+        std::os::unix::fs::symlink(outside.join("sig"), root.join("sig")).unwrap();
+        assert_eq!(game(&tailed, &root, &Bindings::new()), []);
+        fs::remove_file(root.join("sig")).unwrap();
+        put(&root, "sig/probe.bin", b"....SIG!");
+        assert!(matches!(
+            &game(&tailed, &root, &Bindings::new())[..],
+            [LoaderOutcome::Recognised(_)]
+        ));
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&outside);
+    }
+
+    /// A loader recognised by its own file and a `tail` of another.
+    #[cfg(unix)]
+    const TAILED: &str = "[[mods.loader]]\nid = \"tailed\"\nname = \"Tailed\"\nsource = [\"game\"]\nrequire = [ { stat = \"{source}/top.dll\", kind = \"file\" }, { tail = \"{source}/sig/probe.bin\", equals = \"SIG!\" } ]\nroot = \"{source}/mods\"\nenabled = [ { format = \"dir-per-mod\" } ]\ncoexist = [ { strategy = \"side-by-side\" } ]\n";
+
+    /// `stat` is the exact spelling (§7.4): on a file system that tells case apart, a path that
+    /// differs only in case is not there, where `child` resolves it.
+    #[test]
+    fn stat_is_the_exact_spelling_and_child_ignores_case() {
+        let root = tmp("statcase");
+        put(&root, "CaseProbe", b"");
+        let sensitive = fs::metadata(root.join("caseprobe")).is_err();
+        put(
+            &root,
+            "pal/BIN/ue4ss/ue4ss.dll",
+            &pe::build::pe(&[("ProductVersion", "3.0.1")], 0),
+        );
+        let b = Bindings::new().with("project", "Pal");
+        let ue = mods_of(UE);
+        let child = mods_of(&UE.replacen("{ stat = ", "{ child = ", 1));
+        assert!(matches!(
+            &game(&child, &root, &b)[..],
+            [LoaderOutcome::Recognised(r)] if r.supported
+        ));
+        if sensitive {
+            assert_eq!(game(&ue, &root, &b), []);
+        }
+        put(
+            &root,
+            "Pal/bin/ue4ss/UE4SS.dll",
+            &pe::build::pe(&[("ProductVersion", "3.0.1")], 0),
+        );
+        assert!(matches!(
+            &game(&ue, &root, &b)[..],
+            [LoaderOutcome::Recognised(_)]
+        ));
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// Windows: a junction (a name-surrogate reparse point, `mklink /J`, which needs no elevation)
@@ -1332,6 +1383,24 @@ mod tests {
         put(&root, "Pal/bin/ue4ss/Mods/mods.txt", text.as_bytes());
         fs::create_dir_all(root.join("Pal/bin/ue4ss/Mods/SomeMod")).unwrap();
         let b = Bindings::new().with("project", "Pal");
+        assert!(matches!(
+            &game(&mods, &root, &b)[..],
+            [LoaderOutcome::OverBudget {
+                bound: Bound::Bytes,
+                ..
+            }]
+        ));
+        // Exactly 16 KiB is within the bound: read whole. One byte more is past it.
+        let mut text = String::from("SomeMod : 1\n");
+        text.push_str(&";".repeat(limits::LIST_BYTES as usize - text.len()));
+        assert_eq!(text.len() as u64, limits::LIST_BYTES);
+        put(&root, "Pal/bin/ue4ss/Mods/mods.txt", text.as_bytes());
+        assert!(matches!(
+            &game(&mods, &root, &b)[..],
+            [LoaderOutcome::Recognised(r)] if r.mods.iter().all(|m| m.enabled)
+        ));
+        text.push(';');
+        put(&root, "Pal/bin/ue4ss/Mods/mods.txt", text.as_bytes());
         assert!(matches!(
             &game(&mods, &root, &b)[..],
             [LoaderOutcome::OverBudget {

@@ -1413,6 +1413,32 @@ fn astras_own_ue4ss_in_the_game_folder_is_not_the_players() {
     );
 }
 
+/// A UE4SS 2 laid out directly beside the program by Astra's own runner (`UE4SS.dll` and its
+/// settings are the ledger's game files there) is never one of the player's; the player's UE4SS 2
+/// there beside a proxy Astra placed is still theirs, since every runner puts a proxy beside the
+/// program.
+#[test]
+fn astras_own_ue4ss_beside_the_program_is_not_the_players() {
+    let theirs = Unreal::new();
+    ue4ss2_at(&theirs.dir(), "Pal", "2.5.2", &[("Old", true)]);
+    theirs.install(&[("dwmapi.dll", b"MZ ours")]);
+    assert_eq!(theirs.discover().len(), 1, "theirs, beside our proxy");
+    let ours = Unreal::new();
+    ue4ss2_at(&ours.dir(), "Pal", "2.5.2", &[("Old", true)]);
+    let dll = fs::read(ours.bin().join("UE4SS.dll")).unwrap();
+    let ini = fs::read(ours.bin().join("UE4SS-settings.ini")).unwrap();
+    for f in ["UE4SS.dll", "UE4SS-settings.ini"] {
+        fs::remove_file(ours.bin().join(f)).unwrap();
+    }
+    ours.install(&[("UE4SS.dll", &dll), ("UE4SS-settings.ini", &ini)]);
+    assert!(ours.bin().join("UE4SS.dll").is_file());
+    assert_eq!(
+        ours.discover(),
+        [],
+        "Astra's own loader is never one of the player's sources"
+    );
+}
+
 #[test]
 fn a_game_a_weak_rule_places_binds_no_project_and_finds_no_unreal_mods() {
     let u = Unreal::new();
