@@ -968,6 +968,74 @@ mod tests {
         let _ = fs::remove_dir_all(&outside);
     }
 
+    /// Windows: a junction (a name-surrogate reparse point, `mklink /J`, which needs no elevation)
+    /// replaces exactly what the jail walks, a folder; it is refused as a link is.
+    #[cfg(windows)]
+    #[test]
+    fn nothing_is_read_through_a_junction() {
+        let junction = |link: &Path, target: &Path| {
+            // `cmd` reads only backslashes as separators.
+            let native = |p: &Path| p.to_string_lossy().replace('/', "\\");
+            let out = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(native(link))
+                .arg(native(target))
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "mklink /J {link:?} {target:?}: {out:?}"
+            );
+        };
+        let root = tmp("junction");
+        let outside = tmp("junction-outside");
+        put(&outside, "~mods/x.pak", b"");
+        fs::create_dir_all(root.join("Content/Paks")).unwrap();
+        junction(&root.join("Content/Paks/~mods"), &outside.join("~mods"));
+        assert!(
+            fs::symlink_metadata(root.join("Content/Paks/~mods"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "a junction is a link to the standard library"
+        );
+        let mods = mods_of(GLOB);
+        assert_eq!(game(&mods, &root, &Bindings::new()), []);
+        // A real `~mods` holding a junction to a folder of paks: that folder is no mod's.
+        fs::remove_dir(root.join("Content/Paks/~mods")).unwrap();
+        put(&root, "Content/Paks/~mods/real.pak", b"");
+        junction(
+            &root.join("Content/Paks/~mods/linked"),
+            &outside.join("~mods"),
+        );
+        let got = game(&mods, &root, &Bindings::new());
+        assert!(
+            matches!(&got[..], [LoaderOutcome::Recognised(r)] if r.mods.len() == 1 && r.mods[0].name == "real.pak"),
+            "{got:?}"
+        );
+        // The `{project}` folder a junction to one outside: its `stat` and its version probe are
+        // not answered through it.
+        put(
+            &outside,
+            "Pal/bin/ue4ss/UE4SS.dll",
+            &pe::build::pe(&[("ProductVersion", "3.0.1")], 0),
+        );
+        junction(&root.join("Pal"), &outside.join("Pal"));
+        let ue = mods_of(UE);
+        let b = Bindings::new().with("project", "Pal");
+        assert_eq!(game(&ue, &root, &b), []);
+        assert!(matches!(
+            &game(&ue, &outside, &b)[..],
+            [LoaderOutcome::Recognised(_)]
+        ));
+        // The junctions first, never through them.
+        for j in ["Pal", "Content/Paks/~mods/linked"] {
+            fs::remove_dir(root.join(j)).unwrap();
+        }
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
     #[test]
     fn every_per_evaluation_bound_makes_the_loader_yield_nothing() {
         let mods = mods_of(GLOB);
