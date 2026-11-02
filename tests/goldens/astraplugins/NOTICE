@@ -1,4 +1,4 @@
-Copied by tools/vendor-astraplugins-goldens.sh from mihailinl/AstraPlugins at commit c2ac43082cc9da32316cc9e150c4e2abfd1c96df:
+Copied by tools/vendor-astraplugins-goldens.sh from mihailinl/AstraPlugins at commit c07b3ad470daced3c1ae94ce7a309692c6ad16c7:
 testdata/games/, testdata/zip-cloaking/, spec/games/reserved.yaml and spec/games/schemas/*.json,
 byte for byte.
 AstraPlugins licenses spec/ and testdata/ under GPL-3.0-or-later (its LICENSE); these files keep

@@ -1999,6 +1999,83 @@ fn validate_descriptor_takes_mods_as_a_notice_and_judges_the_rest_alike() {
     assert_eq!(s, statuses(&plain));
 }
 
+/// The specification's `mods` goldens (`vectors.json` `descriptors.mods`, engine-descriptor-v1.md
+/// §7.11) through `validate-descriptor`, as 0.5.0 answers them. A golden that a reader ignoring
+/// `mods` accepts passes with the one notice `mods-not-evaluated`, the digest the library gives
+/// it and the negative folders of the same descriptor without `mods`; `not-a-table` is no
+/// descriptor (step 1, field `mods`, no notice). §7.9 has lint refuse every hostile one
+/// (`mods-invalid` with its reasons, `verdict` = `refuse`): that is launcher 0.5.1's (debt row
+/// 46), and this test is the one that changes with it. `mods-deep-nesting` is refused whole, as
+/// its `SPEC_DEFECTS_AT_PIN` entry records.
+#[test]
+fn validate_descriptor_does_not_evaluate_the_mods_goldens() {
+    let tmp = Tmp::new("validate-mods-goldens");
+    let v = spec_goldens::vectors();
+    let mut out = Vec::new();
+    let (mut passed, mut skipped) = (0, 0);
+    for key in ["compat", "hostile"] {
+        for r in v["descriptors"]["mods"][key].as_array().unwrap() {
+            let golden = format!("testdata/games/{}", r["file"].as_str().unwrap());
+            let path = spec_goldens::root().join(&golden);
+            let (exit, report) = probe(&["validate-descriptor", path.to_str().unwrap()]);
+            assert_eq!(report["spec"]["sha"], spec_goldens::pin().as_str());
+            if r["reader_ignoring_mods"] == "refuse" {
+                assert_eq!(exit, 1, "{golden}: {report:#}");
+                assert_eq!(
+                    (
+                        &report["findings"][0]["code"],
+                        &report["findings"][0]["step"],
+                        &report["findings"][0]["field"]
+                    ),
+                    (&json!("descriptor-invalid"), &json!(1), &json!("mods")),
+                    "{golden}"
+                );
+                assert_eq!(report["notices"], json!([]), "{golden}");
+                skipped += 1;
+                continue;
+            }
+            assert_eq!(r["reader_ignoring_mods"], "accept", "{golden}");
+            let a = answer(&report);
+            assert_eq!(
+                exit,
+                if a.is_empty() { 0 } else { 1 },
+                "{golden}: {report:#}"
+            );
+            if let Some(fail) = spec_goldens::judge(&golden, &spec_goldens::Want::Accept, &a) {
+                out.push(fail);
+                continue;
+            }
+            if !a.is_empty() {
+                continue; // refused exactly as its SPEC_DEFECTS_AT_PIN entry records
+            }
+            let d = astra_game_launcher::Descriptor::from_toml(&fs::read_to_string(&path).unwrap())
+                .unwrap();
+            assert_eq!(report["verdict"], "pass", "{golden}");
+            assert_eq!(report["descriptor"]["sha256"], d.digest(), "{golden}");
+            let n = report["notices"].as_array().unwrap();
+            assert_eq!(n.len(), 1, "{golden}: {report:#}");
+            assert_eq!(
+                (&n[0]["code"], &n[0]["step"], &n[0]["field"]),
+                (&json!("mods-not-evaluated"), &json!(1), &json!("mods")),
+                "{golden}"
+            );
+            let mut plain: Value = serde_json::from_str(d.canonical_json()).unwrap();
+            plain.as_object_mut().unwrap().remove("mods").unwrap();
+            let (exit_plain, plain) = validate(&tmp, "plain.json", &plain.to_string(), &[]);
+            assert_eq!(exit_plain, 0, "{golden}: {plain:#}");
+            assert_eq!(plain["notices"], json!([]), "{golden}");
+            assert_eq!(
+                report["negative_folders"], plain["negative_folders"],
+                "{golden}"
+            );
+            passed += 1;
+        }
+    }
+    assert!(out.is_empty(), "\n{}", out.join("\n"));
+    assert_eq!(skipped, 1, "not-a-table");
+    assert!(passed >= 27, "{passed} mods goldens passed");
+}
+
 fn reason_of(r: &Value) -> Vec<(String, String)> {
     r["findings"]
         .as_array()

@@ -477,6 +477,11 @@ pub const SPEC_DEFECTS_AT_PIN: &[SpecDefect] = &[
         why: "its rules have no `binary` (a key every rule must have), so it refuses for that before its 17 rules reach the budget it is named for",
     },
     SpecDefect {
+        golden: "testdata/games/descriptors/mods/hostile/mods-deep-nesting.toml",
+        seen: Seen::Answered(&[("descriptor-invalid", "")]),
+        why: "labelled reader_ignoring_mods = accept, but its TOML is one level past the toml crate's fixed recursion limit (toml 1.1 de::parser::LIMIT = 80; only its `unbounded` feature lifts it, which a reader of hostile input does not take): the parser refuses the whole document before `mods` is reached, in 0.5.0 and in any launcher that reads TOML with toml. 39 `any` in `any` parse, 40 do not; its JSON spelling parses (serde_json's limit is 128). Nest it 39 deep or less, still far past §7.1's 11, and say in §7.1 that a TOML reader's limit is lower than serde_json's",
+    },
+    SpecDefect {
         golden: "testdata/games/manifests/invalid/engine-code-reserved.toml",
         seen: Seen::Answered(&[("descriptor-invalid", "rule[0].evidence")]),
         why: "its descriptor's evidence {project} is never captured, so it refuses before engine-code-reserved",

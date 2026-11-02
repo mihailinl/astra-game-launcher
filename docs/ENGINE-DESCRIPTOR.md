@@ -8,9 +8,9 @@ reads the places the definition leaves open. It is not a second copy of the defi
 ## The definition
 
 The normative text is AstraPlugins'
-[`spec/games/engine-descriptor-v1.md`](https://github.com/mihailinl/AstraPlugins/blob/c2ac43082cc9da32316cc9e150c4e2abfd1c96df/spec/games/engine-descriptor-v1.md)
-at commit **`c2ac43082cc9da32316cc9e150c4e2abfd1c96df`**, with its schema,
-[`spec/games/schemas/engine-descriptor-v1.schema.json`](https://github.com/mihailinl/AstraPlugins/blob/c2ac43082cc9da32316cc9e150c4e2abfd1c96df/spec/games/schemas/engine-descriptor-v1.schema.json),
+[`spec/games/engine-descriptor-v1.md`](https://github.com/mihailinl/AstraPlugins/blob/c07b3ad470daced3c1ae94ce7a309692c6ad16c7/spec/games/engine-descriptor-v1.md)
+at commit **`c07b3ad470daced3c1ae94ce7a309692c6ad16c7`**, with its schema,
+[`spec/games/schemas/engine-descriptor-v1.schema.json`](https://github.com/mihailinl/AstraPlugins/blob/c07b3ad470daced3c1ae94ce7a309692c6ad16c7/spec/games/schemas/engine-descriptor-v1.schema.json),
 and its goldens, `testdata/games/descriptors/`. That commit is the one in
 `tests/goldens/astraplugins/PIN`: the launcher's copy of the goldens is vendored from it, and
 `tests/goldens.rs` holds the commit named here equal to `PIN`. A re-pin
@@ -56,21 +56,23 @@ plans.
 
 ## Reserved for launcher 0.5.1: `mods`
 
-`mods` is an optional top-level member of `astra.engine/1`, a table, reserved for launcher
-0.5.1's mods section: how the player's own mod loader is recognised, where its mods are and
-which of them are enabled. That section is still to come in AstraPlugins'
-`spec/games/engine-descriptor-v1.md` (a draft against `spec/games/`); the specification at the
-pin above does not name `mods`. It is reserved now because the specification's §0 rule 5 skips
-the whole of a descriptor holding a field the reader does not know: a mods section that arrived
-after 0.5.0 would make every 0.5.0 drop every foundation that carries one.
+`mods` is the optional top-level member of `astra.engine/1` that the specification defines in
+[§7](https://github.com/mihailinl/AstraPlugins/blob/c07b3ad470daced3c1ae94ce7a309692c6ad16c7/spec/games/engine-descriptor-v1.md#7-mods-the-players-own-mod-loaders-optional)
+at the pin above, with `$defs/mods` in its schema: how the player's own mod loader is
+recognised, where its mods are, which of them are enabled and how Astra runs beside it. §7.1
+names this launcher as the reader that accepts `mods` and reads nothing in it; launcher 0.5.1
+evaluates it. It is accepted now because the specification's §0 rule 5 skips the whole of a
+descriptor holding a field the reader does not know: without it, every 0.5.0 would drop every
+foundation that carries one.
 
 Launcher 0.5.0:
 
 - **accepts it** — inline or as a `[mods]` table in a file, in the catalogue's JSON, and as
   `[integration.engine.mods]` in a foundation's manifest. It must be a table (anything else is
-  `descriptor-invalid`, `field` = `mods`), only at the top level, and what it holds keeps to the
-  rules every member keeps to (no float, datetime or `null`, no integer past 2^53 − 1). No key
-  inside it is checked.
+  `descriptor-invalid`, `field` = `mods`, and skips the whole descriptor, as §7.1 says), only at
+  the top level, and what it holds keeps to the rules every member keeps to (no float, datetime
+  or `null`, no integer past 2^53 − 1). No key inside it is checked, so §7.9's `mods-invalid`
+  is never raised.
 - **reads nothing in it.** It is part of the canonical form, so of the digest (the catalogue's
   copy without it is another descriptor: `descriptor-mismatch`) and of the 16 KiB size limit,
   and of nothing else: it never reaches the model the evaluator reads
@@ -82,10 +84,22 @@ Launcher 0.5.0:
   ("mods: not evaluated by this version"), never a finding, and `gi-probe check` gives the same
   notice at step 4.
 
-For this to hold, the coming section must keep `mods` a table (never `[[mods]]`) whose values
-keep to the rules above. Launcher 0.3.1 drops `[integration.engine]` unread (the
-specification's §1), so a manifest it reads is unaffected, and no first-party manifest carries
-`[integration.engine]` at all. Debt row 46.
+The specification's `mods` goldens (`testdata/games/descriptors/mods/`, `vectors.json`
+`descriptors.mods`, §7.11) say what such a reader answers (`reader_ignoring_mods`), and
+`tests/goldens.rs` holds the launcher to it: each compat golden and each hostile one is accepted
+and places a Source 2 folder exactly as the same descriptor without `mods`
+(`the_mods_goldens_change_no_detection`), `not-a-table` skips the descriptor
+(`a_mods_that_is_not_a_table_skips_the_descriptor`), the built-in loaders ride on the launcher's
+own built-ins (`the_builtin_mods_fragments_ride_on_the_launchers_builtins`), and
+`tests/gi_probe.rs` `validate_descriptor_does_not_evaluate_the_mods_goldens` holds
+`validate-descriptor` to the notice. §7.9 has lint refuse the hostile ones; that is 0.5.1's.
+One golden is answered otherwise, `hostile/mods-deep-nesting.toml`: its TOML nests past the
+toml crate's recursion limit, so the whole document is refused (`SPEC_DEFECTS_AT_PIN`).
+
+§7.1 keeps `mods` in the shape this version checks: a table (never `[[mods]]`), at the top
+level only, within the value rules above, nesting at most 11 levels. Launcher 0.3.1 drops
+`[integration.engine]` unread (the specification's §1), so a manifest it reads is unaffected,
+and no first-party manifest carries `[integration.engine]` at all. Debt row 46.
 
 ## Launcher-only notes
 
