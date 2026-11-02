@@ -18,7 +18,10 @@ use astra_game_launcher::{
     Binary, Confidence, Descriptor, Detection, EngineCode, EngineSet, ExePick, LauncherError,
     Moderation, Origin, codes, detect_with, detect_with_engines, is_reserved_code,
 };
-use common::identity::{MODS, checked, hostile_mods_set, hostile_set, narrowed, with_mods};
+use common::identity::{
+    MODS, VALID_MODS, checked, hostile_mods_set, hostile_set, hostile_valid_mods_set, narrowed,
+    with_mods, with_these_mods,
+};
 use common::*;
 
 // ---- helpers ----
@@ -181,22 +184,28 @@ fn an_unknown_key_anywhere_refuses_the_descriptor() {
     }
 }
 
-/// `mods`, reserved for launcher 0.5.1's mods section: an optional top-level table this version
-/// accepts — inline, as a `[mods]` table, empty, from TOML and from JSON — and never reads. It
-/// is part of the descriptor (its digest, its size), and the game is named exactly as without
-/// it, with or without Steam's hint, by a descriptor whose `mods` spells the grammar's own keys.
-/// Not a table, below the top, or holding what no member may (a float, a datetime, a null): the
-/// descriptor is refused, as any member that breaks its rule is.
+/// `mods` (engine-descriptor-v1.md §7): an optional top-level table — inline, as a `[mods]`
+/// table, from TOML and from JSON — that detection never reads. It is part of the descriptor
+/// (its digest, its size), and the game is named exactly as without it, with or without Steam's
+/// hint, whether it is valid ([`VALID_MODS`], which [`Descriptor::mods`] then holds) or refused
+/// inside (a `mods` spelling the grammar's own keys, a `[mods]` table of members §7 does not
+/// name, an empty one: each `mods-invalid`, and dropped, §7.9). Not a table, below the top, or
+/// holding what no member may (a float, a datetime, a null): the descriptor is refused, as any
+/// member that breaks its rule is.
 #[test]
-fn a_mods_table_is_accepted_and_never_read() {
+fn a_mods_table_never_changes_detection() {
     let plain = Descriptor::from_toml(SOURCE2).unwrap();
     assert!(!plain.carries_mods());
     let twins = [
-        with_mods(SOURCE2),
-        format!(
-            "{SOURCE2}\n[mods]\nroot = \"{{game}}/Mods\"\n[mods.enabled]\nformat = \"mods.txt\"\n"
+        (with_these_mods(SOURCE2, VALID_MODS), true),
+        (with_mods(SOURCE2), false),
+        (
+            format!(
+                "{SOURCE2}\n[mods]\nroot = \"{{game}}/Mods\"\n[mods.enabled]\nformat = \"mods.txt\"\n"
+            ),
+            false,
         ),
-        SOURCE2.replace("[[rule]]", "mods = {}\n[[rule]]"),
+        (SOURCE2.replace("[[rule]]", "mods = {}\n[[rule]]"), false),
     ];
     let t = Tmp::new("source2-mods");
     source2_game(&t);
@@ -212,9 +221,17 @@ fn a_mods_table_is_accepted_and_never_read() {
         d(t.path(), hint, &alone(&plain)),
     ];
     assert_eq!(want[0].engine, "source2");
-    for text in &twins {
+    for (text, valid) in &twins {
         let twin = Descriptor::from_toml(text).unwrap();
         assert!(twin.carries_mods(), "{text}");
+        assert_eq!(twin.mods().is_some(), *valid, "{text}");
+        assert_eq!(twin.mods_refusals().is_empty(), *valid, "{text}");
+        assert!(
+            twin.mods_refusals()
+                .iter()
+                .all(|e| e.code == codes::MODS_INVALID),
+            "{text}"
+        );
         assert_ne!(
             twin.digest(),
             plain.digest(),
@@ -223,6 +240,7 @@ fn a_mods_table_is_accepted_and_never_read() {
         let json = Descriptor::from_json(twin.canonical_json().as_bytes()).unwrap();
         assert_eq!(json.digest(), twin.digest());
         assert!(json.carries_mods());
+        assert_eq!(json.mods_findings(), twin.mods_findings());
         assert_eq!(twin.check_pass_b(false), Ok(()));
         let set = alone(&twin);
         assert_eq!(set.len(), 1, "{:?}", set.skipped());
@@ -264,10 +282,14 @@ fn a_mods_table_is_accepted_and_never_read() {
     assert_eq!(parse_err(&big).code, codes::DESCRIPTOR_TOO_LARGE);
     // The catalogue's spelling: the same descriptor, its `mods` the only thing wrong.
     let json = |mods: &str| format!("{{\"mods\":{mods},{}", &plain.canonical_json()[1..]);
-    assert!(
-        Descriptor::from_json(json(r#"{"x":1}"#).as_bytes())
-            .unwrap()
-            .carries_mods()
+    let x = Descriptor::from_json(json(r#"{"x":1}"#).as_bytes()).unwrap();
+    assert!(x.carries_mods() && x.mods().is_none());
+    assert_eq!(
+        x.mods_findings()
+            .iter()
+            .map(|f| (f.field.as_str(), f.reason))
+            .collect::<Vec<_>>(),
+        [("mods.x", "unknown"), ("mods.loader", "shape")]
     );
     for mods in [
         r#"{"x":null}"#,
@@ -281,7 +303,7 @@ fn a_mods_table_is_accepted_and_never_read() {
     // A newer schema is still skipped whole, before `mods` is looked at.
     let e = parse_err("schema = \"astra.engine/2\"\nmods = 1\n");
     assert_eq!(e.code, codes::DESCRIPTOR_SCHEMA_UNKNOWN);
-    assert!(MODS.starts_with("mods = {"));
+    assert!(MODS.starts_with("mods = {") && VALID_MODS.starts_with("mods = {"));
 }
 
 #[test]
@@ -971,22 +993,31 @@ fn the_hostile_set_admits_what_it_should_and_skips_the_rest() {
             codes::DESCRIPTOR_SCHEMA_UNKNOWN,
         ]
     );
-    // Each carrying a `mods` table: admitted and skipped alike, for the same reasons.
-    let twins = hostile_mods_set();
+    // Each carrying a `mods` table, refused inside or valid: admitted and skipped alike, for
+    // the same reasons.
     let codes_of = |s: &EngineSet| -> Vec<(String, Origin)> {
         s.descriptors()
             .flat_map(|(d, o)| d.codes().map(|(c, _)| (c.as_str().to_owned(), o.clone())))
             .collect()
     };
-    assert_eq!(codes_of(twins), codes_of(set));
-    assert!(twins.descriptors().all(|(d, _)| d.carries_mods()));
     let why = |s: &EngineSet| -> Vec<(usize, Origin, LauncherError)> {
         s.skipped()
             .into_iter()
             .map(|s| (s.index, s.origin.clone(), s.error.clone()))
             .collect()
     };
-    assert_eq!(why(twins), why(set));
+    for (twins, valid) in [
+        (hostile_mods_set(), false),
+        (hostile_valid_mods_set(), true),
+    ] {
+        assert_eq!(codes_of(twins), codes_of(set));
+        assert!(
+            twins
+                .descriptors()
+                .all(|(d, _)| d.carries_mods() && d.mods().is_some() == valid)
+        );
+        assert_eq!(why(twins), why(set));
+    }
 }
 
 // ---- Pass B: narrow-only (C1c) ----

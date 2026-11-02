@@ -92,6 +92,11 @@ pub mod codes {
     /// Not a descriptor this launcher can read (`field`, `reason`): a key the schema does not
     /// name, a float, a datetime, a null, a duplicate key, a bad path or placeholder, a limit.
     pub const DESCRIPTOR_INVALID: &str = "descriptor-invalid";
+    /// Something inside a descriptor's `mods` table is wrong (`field`, its member; `reason`, one
+    /// of the specification's §7.9 reasons, `engines::mods::reasons`): that descriptor is read as
+    /// carrying no `mods` — it detects, offers and plans as without it — and "with your mods"
+    /// is not offered with it. Ingest and `gi-probe` refuse the descriptor for it.
+    pub const MODS_INVALID: &str = "mods-invalid";
     /// The descriptor's `schema` (`schema`) is not one this launcher reads (`supported`).
     pub const DESCRIPTOR_SCHEMA_UNKNOWN: &str = "descriptor-schema-unknown";
     /// Larger than a descriptor may be (`bytes`).
@@ -281,6 +286,7 @@ pub mod codes {
         MODS_MELONLOADER,
         MODS_UNSUPPORTED,
         DESCRIPTOR_INVALID,
+        MODS_INVALID,
         DESCRIPTOR_SCHEMA_UNKNOWN,
         DESCRIPTOR_TOO_LARGE,
         DESCRIPTOR_TOO_BROAD,
@@ -437,6 +443,9 @@ impl LauncherError {
             }
             codes::MODS_UNSUPPORTED => "this integration cannot play together with your own mods",
             codes::DESCRIPTOR_INVALID => "an engine descriptor is not valid",
+            codes::MODS_INVALID => {
+                "an engine descriptor's description of mod loaders is not valid; it is read without it"
+            }
             codes::DESCRIPTOR_SCHEMA_UNKNOWN => "an engine descriptor needs a newer launcher",
             codes::DESCRIPTOR_TOO_LARGE => "an engine descriptor is larger than allowed",
             codes::DESCRIPTOR_TOO_BROAD => {

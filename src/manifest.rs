@@ -890,8 +890,9 @@ impl Manifest {
 
     /// [`Manifest::parse`] of `text`, and every refusal [`Manifest::lint`] makes beyond it. When
     /// `parse` refuses, the one thing still asked is `[integration.engine]` (its own refusal,
-    /// else Pass B's): a refusal there stops `parse` before the descriptor an author is working
-    /// on is read, and `engine-undeclared` is one of them.
+    /// else Pass B's, and its `mods`' as [`Manifest::lint`] asks them): a refusal there stops
+    /// `parse` before the descriptor an author is working on is read, and `engine-undeclared` is
+    /// one of them.
     pub fn parse_and_lint(text: &str, first_party: bool) -> (Result<Manifest>, Vec<LauncherError>) {
         match Manifest::parse(text) {
             Ok(m) => {
@@ -904,7 +905,12 @@ impl Manifest {
                     .and_then(|t| t.get("integration")?.get("engine").cloned());
                 let lint = match raw.map(|v| Descriptor::from_toml_value(&v)) {
                     Some(Err(e)) => vec![e],
-                    Some(Ok(d)) => d.check_pass_b(first_party).err().into_iter().collect(),
+                    Some(Ok(d)) => {
+                        let mut lint: Vec<_> =
+                            d.check_pass_b(first_party).err().into_iter().collect();
+                        lint.extend(d.mods_refusals());
+                        lint
+                    }
                     None => Vec::new(),
                 };
                 (Err(e), lint)
@@ -1066,7 +1072,11 @@ impl Manifest {
     /// 5. an `[integration] sdk` that is no usable URL (`manifest-invalid{key=integration.sdk}`:
     ///    metadata, which parse drops);
     /// 6. `[integration.engine]`: its own refusal, else Pass B's
-    ///    ([`Descriptor::check_pass_b`] with `first_party`).
+    ///    ([`Descriptor::check_pass_b`] with `first_party`), and everything wrong inside its
+    ///    `mods` ([`Descriptor::mods_refusals`]: `mods-invalid{field, reason}`, `field` the member
+    ///    below the descriptor, `mods.loader[0].root`). Ingest refuses a descriptor for them
+    ///    (engine-descriptor-v1.md §7.9); a client only drops its `mods`, so nothing that plans,
+    ///    installs or launches asks this.
     ///
     /// The zip's half (the files a link names, their sizes; `built_on`; `code_changed`) and the
     /// descriptor's negative folders are `gi-probe check`'s. [`Manifest::parse_and_lint`] runs
@@ -1097,6 +1107,7 @@ impl Manifest {
                 if let Err(e) = d.check_pass_b(first_party) {
                     out.push(e);
                 }
+                out.extend(d.mods_refusals());
             }
             None => {}
         }
@@ -1326,6 +1337,39 @@ evidence = "{core}"
             lint.iter().map(|e| e.code).collect::<Vec<_>>(),
             [codes::DESCRIPTOR_INVALID]
         );
+        // Everything wrong inside its `mods` is the lint's (engine-descriptor-v1.md §7.9), parsed
+        // or not; the manifest and its descriptor stand.
+        let bad_mods = SOURCE2.replace(
+            "engine = { codes",
+            "mods = { loader = [], later = 1 }\nengine = { codes",
+        );
+        let want = [
+            (codes::MODS_INVALID, "mods.later", "unknown"),
+            (codes::MODS_INVALID, "mods.loader", "shape"),
+        ];
+        let read = |lint: &[LauncherError]| {
+            lint.iter()
+                .map(|e| {
+                    (
+                        e.code,
+                        e.param("field").unwrap(),
+                        e.param("reason").unwrap(),
+                    )
+                })
+                .map(|(c, f, r)| (c, f.to_owned(), r.to_owned()))
+                .collect::<Vec<_>>()
+        };
+        let want: Vec<_> = want
+            .iter()
+            .map(|(c, f, r)| (*c, (*f).to_owned(), (*r).to_owned()))
+            .collect();
+        let (parsed, lint) =
+            Manifest::parse_and_lint(&manifest(&bad_mods, "engine = \"source2\"", ""), false);
+        assert!(parsed.unwrap().engine_descriptor().unwrap().is_ok());
+        assert_eq!(read(&lint), want);
+        let (parsed, lint) = Manifest::parse_and_lint(&manifest(&bad_mods, "", ""), false);
+        assert_eq!(parsed.unwrap_err().code, codes::ENGINE_UNDECLARED);
+        assert_eq!(read(&lint), want);
     }
 
     #[test]

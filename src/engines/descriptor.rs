@@ -13,12 +13,14 @@
 //! [`limits::DESCRIPTOR_BYTES`]. An unknown `schema` is `descriptor-schema-unknown` before any
 //! other key is looked at, so a newer schema is skipped whole, never half read.
 //!
-//! **`mods`** (reserved for launcher 0.5.1's mods section): an optional top-level table this
-//! version accepts and never reads. It must be a table, and what it holds keeps to the value
-//! rules above, but no key in it is checked; it is part of the canonical form, so of the digest
-//! and of the size limit, and of nothing else — it never reaches the model the evaluator reads,
-//! so no detection, no offer and no plan can depend on it ([`Descriptor::carries_mods`] says it
-//! is there). Without it a 0.5.0 would skip the whole of every descriptor written for 0.5.1.
+//! **`mods`** (the specification's §7, [`super::mods`]): an optional top-level table saying how
+//! to recognise the player's own mod loader. It must be a table (anything else is
+//! `descriptor-invalid`, field `mods`, and skips the whole descriptor, as launcher 0.5.0 did),
+//! and what it holds keeps to the value rules above; it is part of the canonical form, so of
+//! the digest and of the size limit. What is wrong INSIDE it voids only `mods`
+//! ([`Descriptor::mods_refusals`]: `mods-invalid{field, reason}`), never the descriptor. Its
+//! model ([`Descriptor::mods`]) is kept beside the one the evaluator reads, never in it, so no
+//! detection, no offer and no plan can depend on it.
 //!
 //! ```toml
 //! schema = "astra.engine/1"
@@ -74,6 +76,7 @@ use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 
 use super::EngineCode;
+use super::mods::{Mods, ModsFinding};
 use crate::detect::{Confidence, Engine, is_wrapper_name};
 use crate::error::{LauncherError, Result, codes};
 use crate::paths::check_component;
@@ -652,8 +655,9 @@ struct Spec {
     wrappers: Vec<String>,
     #[serde(default)]
     anti_cheat: Vec<MarkerSpec>,
-    /// Reserved for launcher 0.5.1 (the module doc's `mods`): checked to be a table before this
-    /// is read ([`Descriptor::from_value`]), and skipped unread, so nothing of it is kept.
+    /// The module doc's `mods`: checked to be a table before this is read
+    /// ([`Descriptor::from_value`]) and skipped here, so nothing of it reaches the [`Model`];
+    /// [`super::mods::validate`] reads it beside.
     #[serde(default, rename = "mods")]
     _mods: Option<de::IgnoredAny>,
 }
@@ -1514,16 +1518,22 @@ fn check_display_name(name: &str, field: &str) -> Result<()> {
     if n == 0 || n > limits::NAME_CHARS || name.trim() != name {
         return Err(invalid(field, "1 to 48 characters, trimmed"));
     }
-    if name.chars().any(|c| {
+    if !display_chars_ok(name) {
+        return Err(invalid(field, "a character a name may not hold"));
+    }
+    Ok(())
+}
+
+/// Every character of `name` one a display name may hold: [`check_display_name`]'s second half,
+/// which a mod loader's `name` is also held to (`super::mods`).
+pub(crate) fn display_chars_ok(name: &str) -> bool {
+    !name.chars().any(|c| {
         !name_char_allowed(c)
             || c.is_control()
             || is_bidi_control(c)
             || is_default_ignorable(c)
             || FORBIDDEN_NAME_CHARS.contains(&c)
-    }) {
-        return Err(invalid(field, "a character a name may not hold"));
-    }
-    Ok(())
+    })
 }
 
 struct RuleCtx<'a> {
@@ -2378,9 +2388,18 @@ pub fn is_reserved_code(code: &str) -> bool {
 pub struct Descriptor {
     canonical: String,
     digest: String,
-    /// It carries a `mods` table (reserved for 0.5.1; never in [`Model`]).
-    mods: bool,
+    /// Its `mods` table, read beside [`Model`] and never into it.
+    mods: ModsState,
     pub(crate) model: Model,
+}
+
+/// What a descriptor's `mods` table came to (§7.9).
+#[derive(Debug, Clone)]
+enum ModsState {
+    Absent,
+    Valid(Mods),
+    /// Every finding: the descriptor is as without `mods`.
+    Invalid(Vec<ModsFinding>),
 }
 
 impl PartialEq for Descriptor {
@@ -2441,11 +2460,11 @@ impl Descriptor {
             }
             _ => return Err(invalid("schema", "missing")),
         }
-        // Reserved for 0.5.1: a table, read no further.
+        // §7.1: a table, or the whole descriptor is skipped; read after the model, beside it.
         let mods = match obj.get("mods") {
-            None => false,
-            Some(Value::Object(_)) => true,
-            Some(_) => return Err(invalid("mods", "a table, reserved for launcher 0.5.1")),
+            None => None,
+            Some(Value::Object(m)) => Some(m.clone()),
+            Some(_) => return Err(invalid("mods", "a table (spec §7.1)")),
         };
         let mut canonical = String::new();
         jcs(&v, &mut canonical);
@@ -2455,6 +2474,13 @@ impl Descriptor {
         }
         let spec: Spec = serde_json::from_value(v).map_err(|e| invalid("", e.to_string()))?;
         let model = model(spec)?;
+        let mods = match mods {
+            None => ModsState::Absent,
+            Some(m) => match super::mods::validate(&m, &model) {
+                Ok(m) => ModsState::Valid(m),
+                Err(findings) => ModsState::Invalid(findings),
+            },
+        };
         let digest = hex::encode(Sha256::digest(canonical.as_bytes()));
         Ok(Descriptor {
             canonical,
@@ -2464,11 +2490,36 @@ impl Descriptor {
         })
     }
 
-    /// Whether it carries a `mods` table: reserved for launcher 0.5.1's mods section, accepted
-    /// and never read by this version (the module doc's `mods`). Only for saying so: nothing
-    /// this launcher decides reads it.
+    /// Whether it carries a `mods` table, valid or not.
     pub fn carries_mods(&self) -> bool {
-        self.mods
+        !matches!(self.mods, ModsState::Absent)
+    }
+
+    /// Its `mods` (§7), when it carries one and nothing in it is wrong. Read only by a
+    /// mods-aware install or Play ([`super::mods::evaluate`]); never by detection.
+    pub fn mods(&self) -> Option<&Mods> {
+        match &self.mods {
+            ModsState::Valid(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Everything wrong inside its `mods` (§7.9), each `mods-invalid{field, reason}`; empty when
+    /// it carries none or a valid one. Ingest and lint refuse the descriptor for any of them; a
+    /// client treats it as carrying no `mods`, and says so once.
+    pub fn mods_refusals(&self) -> Vec<LauncherError> {
+        self.mods_findings()
+            .iter()
+            .map(ModsFinding::error)
+            .collect()
+    }
+
+    /// [`Descriptor::mods_refusals`], as `(field, reason)`.
+    pub fn mods_findings(&self) -> &[ModsFinding] {
+        match &self.mods {
+            ModsState::Invalid(f) => f,
+            _ => &[],
+        }
     }
 
     /// `sha256(JCS(descriptor))`, lower-case hex.
@@ -2622,17 +2673,22 @@ mod tests {
     }
 
     /// A `mods` table that would change answers were it read: it spells the descriptor's own
-    /// grammar (a code, a rule claiming every program, the walk's depth bound).
+    /// grammar (a code, a rule claiming every program, the walk's depth bound). It is refused
+    /// inside (`mods-invalid`), so a client drops it.
     const MODS: &str = "mods = { root = \"{game}/Mods\", enabled = { format = \"dir-per-mod\" }, engine = { codes = { taken = \"Taken\" } }, rule = [ { tier = \"strong\", programs = { ext = [\"exe\", \"\"], first = 8, skip_wrappers = false }, code = \"taken\", confidence = \"high\", binary = \"by-ext\" } ], walk = { list_at_limit = [\"x\"] } }";
 
-    /// `text` with [`MODS`] after its `schema` line (the root table).
-    fn with_mods(text: &str) -> String {
+    /// A valid `mods` on every built-in and on the community descriptor below: one loader of
+    /// its own, chained.
+    const VALID_MODS: &str = "mods = { loader = [ { id = \"probe-loader\", name = \"Probe Loader\", source = [\"game\", \"manager\", \"picked\"], require = [ { stat = \"{source}/probe-loader/probe-core.dll\", kind = \"file\" } ], root = \"{source}/probe-loader/plugins\", enabled = [ { format = \"dir-per-mod\" } ], coexist = [ { strategy = \"chain\", entry = \"{source}/probe-loader/probe-core.dll\" } ] } ] }";
+
+    /// `text` with `mods` after its `schema` line (the root table).
+    fn with_mods(text: &str, mods: &str) -> String {
         let mut out = String::new();
         let mut done = false;
         for line in text.split_inclusive('\n') {
             out.push_str(line);
             if !done && line.starts_with("schema") {
-                out.push_str(MODS);
+                out.push_str(mods);
                 out.push('\n');
                 done = true;
             }
@@ -2642,17 +2698,22 @@ mod tests {
     }
 
     /// `mods` never reaches the model the evaluator reads — the built-ins' (Pass A) and a
-    /// community descriptor's (Pass B), from TOML and from JSON — nor Pass B's admission: so
-    /// it cannot change which engine a game is, nor which descriptors are asked. It is in the
-    /// digest, as every member is.
+    /// community descriptor's (Pass B), from TOML and from JSON, valid or refused inside — nor
+    /// Pass B's admission: so it cannot change which engine a game is, nor which descriptors are
+    /// asked. It is in the digest, as every member is.
     #[test]
     fn a_mods_table_never_reaches_the_model() {
         let community = "schema = \"astra.engine/1\"\nengine = { codes = { probe = \"Probe\" } }\n[[rule]]\ntier = \"strong\"\nprograms = { ext = [\"exe\"], first = 8 }\nrequire = [ { listed = \"probe.dat\", kind = \"file\" } ]\ncode = \"probe\"\nconfidence = \"high\"\nbinary = \"windows\"\nevidence = \"{program}\"\n";
         let model = |d: &Descriptor| format!("{:?}", d.model);
-        for text in super::super::BUILTIN.into_iter().chain([community]) {
+        for (text, mods) in super::super::BUILTIN
+            .into_iter()
+            .chain([community])
+            .flat_map(|t| [(t, MODS), (t, VALID_MODS)])
+        {
             let plain = Descriptor::from_toml(text).unwrap();
-            let twin = Descriptor::from_toml(&with_mods(text)).unwrap();
+            let twin = Descriptor::from_toml(&with_mods(text, mods)).unwrap();
             assert!(!plain.carries_mods() && twin.carries_mods());
+            assert_eq!(twin.mods().is_some(), mods == VALID_MODS, "{text}");
             assert_ne!(plain.digest(), twin.digest());
             assert!(twin.canonical_json().contains("\"mods\":{"));
             assert_eq!(model(&twin), model(&plain), "{text}");

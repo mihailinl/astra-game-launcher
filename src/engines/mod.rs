@@ -29,6 +29,7 @@
 
 pub mod descriptor;
 mod eval;
+pub mod mods;
 mod reads;
 
 use std::collections::{BTreeMap, BTreeSet};

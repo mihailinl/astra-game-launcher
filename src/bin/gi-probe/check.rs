@@ -15,15 +15,16 @@
 //!    is skipped, and says so;
 //! 2. [`Manifest::lint`]: a community integration's identity (`reserved-id`, `reserved-name`),
 //!    `capability-undeclared`, Astra Link v1's counts, names and lengths (`link-invalid`), the
-//!    foundation claim's keys, `[integration.engine]` and Pass B's admission of it — with
-//!    `--provenance first-party`, Astra's own ids and names and the first-party grammar are
+//!    foundation claim's keys, `[integration.engine]` and Pass B's admission of it, and
+//!    everything wrong inside `[integration.engine.mods]` (`mods-invalid{field, reason}`, spec
+//!    `engine-descriptor-v1.md` §7.9: refused here as at ingest, dropped alone by a client) —
+//!    with `--provenance first-party`, Astra's own ids and names and the first-party grammar are
 //!    allowed. When the manifest does not parse, `[integration.engine]` is still asked;
 //! 3. every file `[integration.link]` names is in the zip, a `params`/`data` schema at most
 //!    4 KiB and the skill at most 16 KiB. Whether each schema keeps to `link-v1.md` §6's
 //!    restricted profile waits for `link-v1` to freeze; the report's `link` says so;
-//! 4. the descriptor claims none of the spec's negative folders (`validate-descriptor`'s step 3);
-//!    one carrying `[integration.engine.mods]` (reserved for launcher 0.5.1, accepted and never
-//!    read here) is the notice `mods-not-evaluated`, never a finding;
+//! 4. the descriptor claims none of the spec's negative folders (`validate-descriptor`'s step 3),
+//!    whatever its `mods` holds;
 //! 5. `built_on{id, version, verified}`: the foundation (`--foundation`, a release zip) as this
 //!    release is built on it — `verified` only when every file the foundation places, this one
 //!    places alike (destination and digest; A§4.4 M3, the full set). A report, never a finding:
@@ -76,7 +77,7 @@ use serde_json::{Value, json};
 use zip::ZipArchive;
 
 use crate::compat::sha256_hex;
-use crate::descriptor::{mods_notice, negative_folders, summary};
+use crate::descriptor::{negative_folders, summary};
 use crate::{Fatal, Finding, Probe, report};
 
 const STEPS: [&str; 8] = [
@@ -330,9 +331,6 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
                     folders = rows;
                     for f in claims {
                         p.finding(4, f);
-                    }
-                    if let Some(n) = mods_notice(d) {
-                        p.notice(4, n);
                     }
                     p.close(4, f0, n0, Value::Null);
                 }

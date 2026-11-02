@@ -10,10 +10,12 @@
 //! - **C1c, narrow-only:** with [`hostile_set`], every game Pass A recognised (a code, evidence,
 //!   or a hint used) gets exactly the same answer; only a game Pass A left `unknown` with no
 //!   evidence and no hint may be answered by a descriptor, and then Pass A's anti-cheat stays.
-//! - **C1c, `mods` is never read:** [`hostile_mods_set`], the same descriptors each carrying
-//!   [`MODS`] (reserved for launcher 0.5.1, accepted and ignored by 0.5.0), admits and skips
-//!   exactly as [`hostile_set`] does and answers every game exactly as it does, but for the
-//!   digest that names the descriptor ([`without_mods`]).
+//! - **C1c, `mods` is never read by detection** (engine-descriptor-v1.md §7.1):
+//!   [`hostile_mods_set`] (the same descriptors each carrying [`MODS`], a `mods` refused inside
+//!   that spells the descriptor's own grammar, which a client drops) and
+//!   [`hostile_valid_mods_set`] (each carrying [`VALID_MODS`], a valid `mods` using every
+//!   member §7 has) admit and skip exactly as [`hostile_set`] does and answer every game exactly
+//!   as it does, but for the digest that names the descriptor ([`without_mods`]).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -216,20 +218,33 @@ pub fn moderated_hostile_set() -> &'static EngineSet {
     SET.get_or_init(|| build(&HOSTILE[..1]))
 }
 
-/// An `astra.engine/1` `mods` table (reserved for launcher 0.5.1's mods section) that would
-/// change answers were it read: beside what a mods section may hold, it spells the
-/// descriptor's own grammar — a code, a rule claiming every program, the walk's depth bound.
+/// An `astra.engine/1` `mods` table that would change answers were detection to read it, and
+/// that a client drops (`mods-invalid`, engine-descriptor-v1.md §7.9): beside what a mods
+/// section holds, it spells the descriptor's own grammar — a code, a rule claiming every
+/// program, the walk's depth bound.
 pub const MODS: &str = "mods = { root = \"{game}/Mods\", enabled = { format = \"dir-per-mod\" }, loader = [ { listed = \"winhttp.dll\", kind = \"file\" } ], coexist = \"side-by-side\", engine = { codes = { taken = \"Taken\" } }, rule = [ { tier = \"strong\", programs = { ext = [\"exe\", \"x86_64\", \"x86\", \"\"], first = 8, skip_wrappers = false }, code = \"taken\", confidence = \"high\", evidence = \"{program}\", binary = \"by-ext\" } ], walk = { list_at_limit = [\"Game\"] } }";
+
+/// A VALID `mods` (§7) for every [`HOSTILE`] descriptor that parses, using every member and
+/// every closed value §7 has: a file-anchored loader from every source kind with a `listed`, a
+/// `child`, a `stat`, a `tail`, `any` and `none`, a version, every `enabled` format and every
+/// strategy and `tell`; and a root-anchored passive one. Its names are no descriptor's detection
+/// names, so each descriptor keeps it (`hostile_valid_mods_set`).
+pub const VALID_MODS: &str = "mods = { loader = [ { id = \"probe-chain\", name = \"Probe Chain\", source = [\"game\", \"manager\", \"picked\"], require = [ { stat = \"{source}/probe-loader/probe-core.dll\", kind = \"file\" }, { child = \"{source}/probe-loader/config\", kind = \"dir\" }, { any = [ { listed = \"{source}/probe-loader/probe.ini\", kind = \"file\" }, { none = [ { stat = \"{source}/probe-loader/off.flag\", kind = \"file\" } ] } ] }, { tail = \"{source}/probe-loader/probe-core.dll\", equals = \"PRB\", min_len = 3 } ], version = { pe = \"{source}/probe-loader/probe-core.dll\", key = [\"ProductVersion\", \"FileVersion\"], template = \"N{1,2}.N{1,3}.N{1,3}\", versions = \">=1.0, <2\" }, root = \"{source}/probe-loader/plugins\", enabled = [ { format = \"dir-per-mod\" }, { format = \"file-glob\", glob = \"*.dll\" }, { format = \"enable-list\", list = \"{source}/probe-loader/plugins/list.txt\", line = \"name-colon-flag\", marker = \"on.txt\" } ], coexist = [ { strategy = \"chain\", entry = \"{source}/probe-loader/probe-core.dll\", tell = \"ue4ss-mods-paths\" }, { strategy = \"side-by-side\", tell = \"ue4ss-mods-paths\" }, { strategy = \"via-manager\" } ] }, { id = \"probe-paks\", name = \"Probe Paks\", source = [\"game\"], require = [ { child = \"{source}/probe-paks\", kind = \"dir\" } ], root = \"{source}/probe-paks\", enabled = [ { format = \"file-glob\", glob = \"*.pak\" } ], coexist = [ { strategy = \"side-by-side\" } ] } ] }";
 
 /// `text` with [`MODS`] after its `schema` line, in the root table. Every [`HOSTILE`] text and
 /// every built-in begins with that line.
 pub fn with_mods(text: &str) -> String {
+    with_these_mods(text, MODS)
+}
+
+/// `text` with the line `mods` after its `schema` line, in the root table.
+pub fn with_these_mods(text: &str, mods: &str) -> String {
     let mut out = String::new();
     let mut done = false;
     for line in text.split_inclusive('\n') {
         out.push_str(line);
         if !done && line.starts_with("schema") {
-            out.push_str(MODS);
+            out.push_str(mods);
             out.push('\n');
             done = true;
         }
@@ -240,53 +255,72 @@ pub fn with_mods(text: &str) -> String {
 
 /// [`HOSTILE`], each descriptor carrying [`MODS`].
 pub fn hostile_mods() -> Vec<(&'static str, Moderation, bool, String)> {
+    hostile_with(MODS)
+}
+
+/// [`HOSTILE`], each descriptor carrying `mods`.
+fn hostile_with(mods: &str) -> Vec<(&'static str, Moderation, bool, String)> {
     HOSTILE
         .iter()
-        .map(|(p, m, fp, text)| (*p, *m, *fp, with_mods(text)))
+        .map(|(p, m, fp, text)| (*p, *m, *fp, with_these_mods(text, mods)))
         .collect()
+}
+
+fn build_owned(twins: &[(&'static str, Moderation, bool, String)]) -> EngineSet {
+    EngineSet::build(twins.iter().map(|(publisher, moderation, fp, text)| {
+        (
+            Origin {
+                moderation: *moderation,
+                publisher: (*publisher).to_owned(),
+                first_party: *fp,
+            },
+            Descriptor::from_toml(text),
+        )
+    }))
 }
 
 /// [`hostile_set`] with [`MODS`] in every descriptor.
 pub fn hostile_mods_set() -> &'static EngineSet {
     static SET: OnceLock<EngineSet> = OnceLock::new();
-    SET.get_or_init(|| {
-        let twins = hostile_mods();
-        EngineSet::build(twins.iter().map(|(publisher, moderation, fp, text)| {
-            (
-                Origin {
-                    moderation: *moderation,
-                    publisher: (*publisher).to_owned(),
-                    first_party: *fp,
-                },
-                Descriptor::from_toml(text),
-            )
-        }))
-    })
+    SET.get_or_init(|| build_owned(&hostile_mods()))
 }
 
-/// Each digest of a [`HOSTILE`] descriptor carrying [`MODS`] → the digest of the same descriptor
-/// without it. Every text parses in both spellings or in neither, and refuses alike.
+/// [`hostile_set`] with [`VALID_MODS`] in every descriptor.
+pub fn hostile_valid_mods_set() -> &'static EngineSet {
+    static SET: OnceLock<EngineSet> = OnceLock::new();
+    SET.get_or_init(|| build_owned(&hostile_with(VALID_MODS)))
+}
+
+/// Each digest of a [`HOSTILE`] descriptor carrying [`MODS`] or [`VALID_MODS`] → the digest of
+/// the same descriptor without it. Every text parses in all three spellings or in none, and
+/// refuses alike; with [`MODS`] its `mods` is refused inside (dropped), with [`VALID_MODS`] it
+/// is valid.
 fn mods_digests() -> &'static BTreeMap<String, String> {
     static MAP: OnceLock<BTreeMap<String, String>> = OnceLock::new();
     MAP.get_or_init(|| {
         let mut map = BTreeMap::new();
-        for ((_, _, _, plain), (_, _, _, twin)) in HOSTILE.iter().zip(hostile_mods()) {
-            match (Descriptor::from_toml(plain), Descriptor::from_toml(&twin)) {
-                (Ok(p), Ok(t)) => {
-                    assert!(t.carries_mods() && !p.carries_mods());
-                    assert_ne!(p.digest(), t.digest());
-                    map.insert(t.digest().to_owned(), p.digest().to_owned());
+        for (mods, valid) in [(MODS, false), (VALID_MODS, true)] {
+            for ((_, _, _, plain), (_, _, _, twin)) in HOSTILE.iter().zip(hostile_with(mods)) {
+                match (Descriptor::from_toml(plain), Descriptor::from_toml(&twin)) {
+                    (Ok(p), Ok(t)) => {
+                        assert!(t.carries_mods() && !p.carries_mods());
+                        assert_eq!(t.mods().is_some(), valid, "{:?}\n{twin}", t.mods_findings());
+                        assert_eq!(t.mods_refusals().is_empty(), valid);
+                        assert_ne!(p.digest(), t.digest());
+                        map.insert(t.digest().to_owned(), p.digest().to_owned());
+                    }
+                    (Err(p), Err(t)) => assert_eq!(p.code, t.code, "{plain}"),
+                    (p, t) => panic!("mods changed whether it parses: {p:?} vs {t:?}\n{plain}"),
                 }
-                (Err(p), Err(t)) => assert_eq!(p.code, t.code, "{plain}"),
-                (p, t) => panic!("mods changed whether it parses: {p:?} vs {t:?}\n{plain}"),
             }
         }
         map
     })
 }
 
-/// A detection made with [`hostile_mods_set`], its descriptor named by the digest the same
-/// descriptor has without [`MODS`]: what [`hostile_set`] must have answered.
+/// A detection made with [`hostile_mods_set`] or [`hostile_valid_mods_set`], its descriptor
+/// named by the digest the same descriptor has without `mods`: what [`hostile_set`] must have
+/// answered.
 pub fn without_mods(mut d: Detection) -> Detection {
     if let Some(s) = d.descriptor_sha256.take() {
         let plain = mods_digests()
@@ -338,7 +372,13 @@ pub fn checked_with_hostile(dir: &Path, hint: Option<&str>) -> (Detection, Detec
     assert_eq!(
         without_mods(mods),
         hostile,
-        "C1c: a descriptor's `mods` table changes no answer ({dir:?}, hint {hint:?})"
+        "C1c: a descriptor's `mods` refused inside changes no answer ({dir:?}, hint {hint:?})"
+    );
+    let valid = detect_with_engines(dir, hint, hostile_valid_mods_set()).unwrap();
+    assert_eq!(
+        without_mods(valid),
+        hostile,
+        "C1c: a descriptor's valid `mods` changes no answer ({dir:?}, hint {hint:?})"
     );
     (new, hostile)
 }

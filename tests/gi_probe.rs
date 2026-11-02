@@ -1874,67 +1874,79 @@ fn validate_descriptor_passes_the_source2_descriptor() {
     assert_eq!(r["descriptor"]["sha256"], digest);
 }
 
-/// `mods`, reserved for launcher 0.5.1's mods section: `validate-descriptor` accepts it and says
-/// so as a notice — "mods: not evaluated by this version", step 1, field `mods` — never a
-/// finding, and judges the rest exactly as without it: the Source 2 descriptor passes in all
-/// three spellings, the nested griefer is refused alike. `check` gives the same notice at step 4
-/// and nothing else changes. A `mods` that is no table is no descriptor.
+/// A valid `mods` for [`SOURCE2`] (the compat golden's loader, inline): a loader of its own,
+/// side by side.
+const VALID_MODS: &str = "mods = { loader = [ { id = \"s2-loader\", name = \"S2 Loader\", codes = [\"source2\"], source = [\"game\", \"picked\"], require = [ { stat = \"{source}/s2loader/s2loader.dll\", kind = \"file\" } ], root = \"{source}/s2loader/mods\", enabled = [ { format = \"dir-per-mod\" } ], coexist = [ { strategy = \"side-by-side\" } ] } ] }";
+
+/// A `mods` with three things wrong inside it: two members §7.2 does not name, and no `loader`.
+const BAD_MODS: &str = "mods = { root = \"{game}/Mods\", enabled = { format = \"dir-per-mod\" } }";
+
+/// `text` (a descriptor whose root table has an `engine = {` line) with `mods` before that line.
+fn with_mods_line(text: &str, mods: &str) -> String {
+    assert!(text.contains("\nengine = {"), "{text}");
+    text.replacen("\nengine = {", &format!("\n{mods}\nengine = {{"), 1)
+}
+
+/// A report's `mods-invalid` findings, as `(step, field, reason)`.
+fn mods_invalid(r: &Value) -> Vec<(u64, String, String)> {
+    r["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] == "mods-invalid")
+        .map(|f| {
+            assert_eq!(f["field"], f["params"]["field"], "{f:#}");
+            (
+                f["step"].as_u64().unwrap(),
+                f["field"].as_str().unwrap().to_owned(),
+                f["params"]["reason"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// A report's other findings.
+fn not_mods_invalid(r: &Value) -> Vec<Value> {
+    r["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] != "mods-invalid")
+        .cloned()
+        .collect()
+}
+
+/// What the library refuses inside `text`'s `mods`, as `(step, field, reason)` at `step`.
+fn library_mods_invalid(text: &str, step: u64) -> Vec<(u64, String, String)> {
+    astra_game_launcher::Descriptor::from_toml(text)
+        .unwrap()
+        .mods_refusals()
+        .iter()
+        .map(|e| {
+            assert_eq!(e.code, "mods-invalid");
+            (
+                step,
+                e.param("field").unwrap().to_owned(),
+                e.param("reason").unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// `mods` (spec §7): `validate-descriptor` judges it at step 1. A valid one passes with no
+/// finding and no notice, its loaders named in `descriptor.mods_loaders`; one with anything wrong
+/// inside is refused for exactly the library's `mods-invalid{field, reason}`s, at step 1, and
+/// everything else is judged as without it — the negative folders, and the nested griefer's own
+/// findings. In all three spellings. `check` refuses the same at step 2 (`Manifest::lint`, as
+/// ingest does) and judges step 4 as without it. A `mods` that is no table is no descriptor.
 #[test]
-fn validate_descriptor_takes_mods_as_a_notice_and_judges_the_rest_alike() {
+fn validate_descriptor_judges_mods_and_the_rest_alike() {
     let tmp = Tmp::new("validate-mods");
-    let twin = |text: &str| {
-        assert!(text.contains("\nengine = {"), "{text}");
-        text.replacen(
-            "\nengine = {",
-            "\nmods = { root = \"{game}/Mods\", enabled = { format = \"dir-per-mod\" } }\nengine = {",
-            1,
-        )
-    };
-    let notice = |r: &Value, step: u64| {
-        let n = r["notices"].as_array().unwrap();
-        assert_eq!(n.len(), 1, "{r:#}");
-        assert_eq!(n[0]["code"], "mods-not-evaluated", "{r:#}");
-        assert_eq!(
-            (&n[0]["step"], &n[0]["field"]),
-            (&json!(step), &json!("mods"))
-        );
-        assert!(
-            n[0]["detail"]
-                .as_str()
-                .unwrap()
-                .starts_with("mods: not evaluated by this version"),
-            "{r:#}"
-        );
-    };
     let (exit, plain) = validate(&tmp, "plain.toml", SOURCE2, &[]);
     assert_eq!(exit, 0, "{plain:#}");
-    assert_eq!(plain["notices"], json!([]), "no mods, no notice");
+    assert_eq!(plain["notices"], json!([]));
+    assert_eq!(plain["descriptor"]["mods_loaders"], Value::Null);
 
-    let text = twin(SOURCE2);
-    let digest = astra_game_launcher::Descriptor::from_toml(&text)
-        .unwrap()
-        .digest()
-        .to_owned();
-    let (exit, r) = validate(&tmp, "mods.toml", &text, &[]);
-    assert_eq!(exit, 0, "{r:#}");
-    assert_eq!(r["verdict"], "pass");
-    assert_eq!(r["findings"], json!([]));
-    notice(&r, 1);
-    assert_eq!(r["descriptor"]["sha256"], digest);
-    assert_ne!(r["descriptor"]["sha256"], plain["descriptor"]["sha256"]);
-    assert_eq!(r["negative_folders"], plain["negative_folders"]);
-    // From JSON, and as a foundation's [integration.engine.mods].
-    let canonical = astra_game_launcher::Descriptor::from_toml(&text)
-        .unwrap()
-        .canonical_json()
-        .to_owned();
-    let (exit, r) = validate(&tmp, "mods.json", &canonical, &[]);
-    assert_eq!(
-        (exit, &r["descriptor"]["sha256"]),
-        (0, &json!(digest)),
-        "{r:#}"
-    );
-    notice(&r, 1);
     let manifest = |engine: &str| {
         format!(
             "schema = 1\n\n[integration]\nid = \"community.source2\"\nname = \"Source 2\"\nversion = \"1.0.0\"\nlicense = \"MIT\"\n\n{}\n[target]\nengine = \"source2\"\nexe = \"*\"\nplatforms = [\"windows-x64\"]\nanti_cheat = \"none\"\n\n[[files]]\nfrom = \"a.txt\"\nto = \"${{profile}}/a.txt\"\n",
@@ -1946,132 +1958,200 @@ fn validate_descriptor_takes_mods_as_a_notice_and_judges_the_rest_alike() {
                 .replace("[[rule]]", "[[integration.engine.rule]]")
         )
     };
-    let (exit, r) = validate(&tmp, "astra-gi.toml", &manifest(&text), &[]);
-    assert_eq!(exit, 0, "{r:#}");
-    assert_eq!(r["input"]["kind"], "manifest-integration-engine");
-    assert_eq!(r["descriptor"]["sha256"], digest);
-    notice(&r, 1);
+    for (mods, loaders) in [(VALID_MODS, json!(["s2-loader"])), (BAD_MODS, json!([]))] {
+        let text = with_mods_line(SOURCE2, mods);
+        let d = astra_game_launcher::Descriptor::from_toml(&text).unwrap();
+        let want = library_mods_invalid(&text, 1);
+        assert_eq!(want.is_empty(), mods == VALID_MODS, "{want:?}");
+        let canonical = d.canonical_json().to_owned();
+        for (name, input, kind) in [
+            ("mods.toml", text.clone(), "descriptor-toml"),
+            ("mods.json", canonical, "descriptor-json"),
+            (
+                "astra-gi.toml",
+                manifest(&text),
+                "manifest-integration-engine",
+            ),
+        ] {
+            let (exit, r) = validate(&tmp, name, &input, &[]);
+            assert_eq!(r["input"]["kind"], kind);
+            assert_eq!(exit, i32::from(!want.is_empty()), "{name}: {r:#}");
+            assert_eq!(
+                r["verdict"],
+                if want.is_empty() { "pass" } else { "fail" },
+                "{name}"
+            );
+            assert_eq!(mods_invalid(&r), want, "{name}: {r:#}");
+            assert_eq!(not_mods_invalid(&r), Vec::<Value>::new(), "{name}: {r:#}");
+            assert_eq!(r["notices"], json!([]), "{name}");
+            assert_eq!(r["descriptor"]["sha256"], d.digest(), "{name}");
+            assert_ne!(r["descriptor"]["sha256"], plain["descriptor"]["sha256"]);
+            assert_eq!(r["descriptor"]["mods_loaders"], loaders, "{name}");
+            assert_eq!(r["negative_folders"], plain["negative_folders"], "{name}");
+        }
+    }
 
-    // The nested griefer is refused exactly as without it.
-    let (exit, plain) = validate(&tmp, "nested.toml", NESTED_GRIEFER, &[]);
+    // The nested griefer is refused for its own findings as without `mods`, and for `mods`'.
+    let (exit, griefer) = validate(&tmp, "nested.toml", NESTED_GRIEFER, &[]);
     assert_eq!(exit, 1);
-    let (exit, r) = validate(&tmp, "nested-mods.toml", &twin(NESTED_GRIEFER), &[]);
-    assert_eq!(exit, 1, "{r:#}");
-    assert_eq!(r["findings"], plain["findings"], "{r:#}");
-    assert_eq!(r["negative_folders"], plain["negative_folders"]);
-    notice(&r, 1);
+    for mods in [VALID_MODS, BAD_MODS] {
+        let text = with_mods_line(NESTED_GRIEFER, mods);
+        let (exit, r) = validate(&tmp, "nested-mods.toml", &text, &[]);
+        assert_eq!(exit, 1, "{r:#}");
+        assert_eq!(not_mods_invalid(&r), not_mods_invalid(&griefer), "{r:#}");
+        assert_eq!(mods_invalid(&r), library_mods_invalid(&text, 1), "{r:#}");
+        assert_eq!(r["negative_folders"], griefer["negative_folders"]);
+        assert_eq!(r["notices"], json!([]));
+    }
 
-    // Not a table: no descriptor (step 1), and nothing to say about `mods`.
+    // Not a table: no descriptor (step 1), and nothing else to say about `mods`.
     let (exit, r) = validate(
         &tmp,
         "mods-list.toml",
-        &SOURCE2.replacen("\nengine = {", "\nmods = [\"Mods\"]\nengine = {", 1),
+        &with_mods_line(SOURCE2, "mods = [\"Mods\"]"),
         &[],
     );
     assert_eq!(exit, 1);
+    let f = r["findings"].as_array().unwrap();
+    assert_eq!(f.len(), 1, "{r:#}");
     assert_eq!(
-        (
-            &r["findings"][0]["code"],
-            &r["findings"][0]["step"],
-            &r["findings"][0]["field"]
-        ),
+        (&f[0]["code"], &f[0]["step"], &f[0]["field"]),
         (&json!("descriptor-invalid"), &json!(1), &json!("mods"))
     );
     assert_eq!(r["notices"], json!([]));
 
-    // `check`, of the foundation as a bare manifest: the same findings, the notice at step 4.
+    // `check`, of the foundation as a bare manifest: step 2 refuses what is wrong inside `mods`,
+    // as ingest does, and nothing else changes.
     let plain_file = tmp.join("check-plain.toml");
     fs::write(&plain_file, manifest(SOURCE2)).unwrap();
-    let mods_file = tmp.join("check-mods.toml");
-    fs::write(&mods_file, manifest(&text)).unwrap();
     let (exit_plain, plain) = check(plain_file.to_str().unwrap(), &[]);
-    let (exit, r) = check(mods_file.to_str().unwrap(), &[]);
-    assert_eq!(exit, exit_plain, "{r:#}");
-    assert_eq!(r["findings"], plain["findings"], "{r:#}");
-    notice(&r, 4);
+    assert_eq!(exit_plain, 0, "{plain:#}");
     assert_eq!(plain["notices"], json!([]), "{plain:#}");
-    assert_eq!(statuses(&plain)[3], "pass", "{plain:#}");
-    assert_eq!(statuses(&r)[3], "notice", "{r:#}");
-    let mut s = statuses(&r);
-    s[3] = "pass".to_owned();
-    assert_eq!(s, statuses(&plain));
+    for mods in [VALID_MODS, BAD_MODS] {
+        let text = with_mods_line(SOURCE2, mods);
+        let file = tmp.join("check-mods.toml");
+        fs::write(&file, manifest(&text)).unwrap();
+        let (exit, r) = check(file.to_str().unwrap(), &[]);
+        let want = library_mods_invalid(&text, 2);
+        assert_eq!(exit, i32::from(!want.is_empty()), "{r:#}");
+        assert_eq!(mods_invalid(&r), want, "{r:#}");
+        assert_eq!(not_mods_invalid(&r), not_mods_invalid(&plain), "{r:#}");
+        assert_eq!(r["notices"], plain["notices"], "{r:#}");
+        let mut s = statuses(&r);
+        if !want.is_empty() {
+            assert_eq!(s[1], "fail", "{r:#}");
+            s[1] = "pass".to_owned();
+        }
+        assert_eq!(s, statuses(&plain), "{r:#}");
+    }
 }
 
 /// The specification's `mods` goldens (`vectors.json` `descriptors.mods`, engine-descriptor-v1.md
-/// §7.11) through `validate-descriptor`, as 0.5.0 answers them. A golden that a reader ignoring
-/// `mods` accepts passes with the one notice `mods-not-evaluated`, the digest the library gives
-/// it and the negative folders of the same descriptor without `mods`; `not-a-table` is no
-/// descriptor (step 1, field `mods`, no notice). §7.9 has lint refuse every hostile one
-/// (`mods-invalid` with its reasons, `verdict` = `refuse`): that is launcher 0.5.1's (debt row
-/// 46), and this test is the one that changes with it. Every one of them parses at this pin
-/// (`mods-deep-nesting` nests 39 deep since AstraPlugins #133).
+/// §7.11) through `validate-descriptor`, which refuses what ingest refuses (§7.9): each compat
+/// and hostile golden is refused at step 1 for exactly its `reasons` — every such finding
+/// `mods-invalid`, its `field` a member of `mods` — and passes when it has none, naming its
+/// loaders; steps 2 to 4 judge each exactly as the same descriptor without `mods` (no other
+/// finding, the same negative folders). `not-a-table` is no descriptor (step 1, field `mods`).
+/// The built-in fragments on the launcher's own built-ins have no `mods-invalid`, and name the
+/// loaders `vectors.json` names. Every one of them parses at this pin (`mods-deep-nesting` nests
+/// 39 deep since AstraPlugins #133).
 #[test]
-fn validate_descriptor_does_not_evaluate_the_mods_goldens() {
+fn validate_descriptor_refuses_each_mods_golden_for_exactly_its_reasons() {
     let tmp = Tmp::new("validate-mods-goldens");
     let v = spec_goldens::vectors();
     let mut out = Vec::new();
-    let (mut passed, mut skipped) = (0, 0);
+    let (mut judged, mut skipped, mut passed) = (0, 0, 0);
     for key in ["compat", "hostile"] {
         for r in v["descriptors"]["mods"][key].as_array().unwrap() {
             let golden = format!("testdata/games/{}", r["file"].as_str().unwrap());
             let path = spec_goldens::root().join(&golden);
             let (exit, report) = probe(&["validate-descriptor", path.to_str().unwrap()]);
             assert_eq!(report["spec"]["sha"], spec_goldens::pin().as_str());
+            let mut want: Vec<String> = r["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_str().unwrap().to_owned())
+                .collect();
+            want.sort();
             if r["reader_ignoring_mods"] == "refuse" {
+                assert_eq!(want, ["descriptor-invalid"], "{golden}");
                 assert_eq!(exit, 1, "{golden}: {report:#}");
+                let f = report["findings"].as_array().unwrap();
+                assert_eq!(f.len(), 1, "{golden}: {report:#}");
                 assert_eq!(
-                    (
-                        &report["findings"][0]["code"],
-                        &report["findings"][0]["step"],
-                        &report["findings"][0]["field"]
-                    ),
+                    (&f[0]["code"], &f[0]["step"], &f[0]["field"]),
                     (&json!("descriptor-invalid"), &json!(1), &json!("mods")),
                     "{golden}"
                 );
-                assert_eq!(report["notices"], json!([]), "{golden}");
                 skipped += 1;
                 continue;
             }
-            assert_eq!(r["reader_ignoring_mods"], "accept", "{golden}");
-            let a = answer(&report);
+            let found = mods_invalid(&report);
+            let mut got: Vec<String> = found.iter().map(|(_, _, r)| r.clone()).collect();
+            got.sort();
+            got.dedup();
+            if got != want {
+                out.push(format!(
+                    "{golden}: refused for {got:?}, the golden names {want:?}"
+                ));
+            }
+            assert!(
+                found
+                    .iter()
+                    .all(|(step, field, _)| *step == 1 && field.starts_with("mods")),
+                "{golden}: {found:?}"
+            );
             assert_eq!(
-                exit,
-                if a.is_empty() { 0 } else { 1 },
+                report["verdict"] == "fail",
+                r["verdict"] == "refuse",
                 "{golden}: {report:#}"
             );
-            if let Some(fail) = spec_goldens::judge(&golden, &spec_goldens::Want::Accept, &a) {
-                out.push(fail);
-                continue;
-            }
-            if !a.is_empty() {
-                continue; // refused exactly as its SPEC_DEFECTS_AT_PIN entry records
-            }
+            assert_eq!(exit, i32::from(r["verdict"] == "refuse"), "{golden}");
             let d = astra_game_launcher::Descriptor::from_toml(&fs::read_to_string(&path).unwrap())
                 .unwrap();
-            assert_eq!(report["verdict"], "pass", "{golden}");
             assert_eq!(report["descriptor"]["sha256"], d.digest(), "{golden}");
-            let n = report["notices"].as_array().unwrap();
-            assert_eq!(n.len(), 1, "{golden}: {report:#}");
-            assert_eq!(
-                (&n[0]["code"], &n[0]["step"], &n[0]["field"]),
-                (&json!("mods-not-evaluated"), &json!(1), &json!("mods")),
-                "{golden}"
-            );
+            let loaders = d
+                .mods()
+                .map(|m| json!(m.loaders().iter().map(|l| l.id()).collect::<Vec<_>>()))
+                .unwrap_or(json!([]));
+            assert_eq!(report["descriptor"]["mods_loaders"], loaders, "{golden}");
             let mut plain: Value = serde_json::from_str(d.canonical_json()).unwrap();
             plain.as_object_mut().unwrap().remove("mods").unwrap();
             let (exit_plain, plain) = validate(&tmp, "plain.json", &plain.to_string(), &[]);
             assert_eq!(exit_plain, 0, "{golden}: {plain:#}");
-            assert_eq!(plain["notices"], json!([]), "{golden}");
+            assert_eq!(not_mods_invalid(&report), Vec::<Value>::new(), "{golden}");
+            assert_eq!(report["notices"], json!([]), "{golden}");
             assert_eq!(
                 report["negative_folders"], plain["negative_folders"],
                 "{golden}"
             );
-            passed += 1;
+            passed += usize::from(found.is_empty());
+            judged += 1;
         }
     }
     assert!(out.is_empty(), "\n{}", out.join("\n"));
     assert_eq!(skipped, 1, "not-a-table");
-    assert!(passed >= 27, "{passed} mods goldens passed");
+    assert_eq!(passed, 1, "source2-with-mods");
+    assert!(judged >= 31, "{judged} mods goldens judged");
+
+    for r in v["descriptors"]["mods"]["builtin"].as_array().unwrap() {
+        let name = r["name"].as_str().unwrap();
+        let fragment = spec_goldens::golden_text(r["file"].as_str().unwrap());
+        let at = fragment.find("[[mods.loader]]").unwrap();
+        let ours = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("src/engines/builtin/{name}.toml")),
+        )
+        .unwrap();
+        let (_, report) = validate(
+            &tmp,
+            &format!("{name}.toml"),
+            &format!("{ours}\n{}", &fragment[at..]),
+            &["--first-party"],
+        );
+        assert_eq!(mods_invalid(&report), [], "{name}: {report:#}");
+        assert_eq!(report["descriptor"]["mods_loaders"], r["loaders"], "{name}");
+    }
 }
 
 fn reason_of(r: &Value) -> Vec<(String, String)> {

@@ -74,7 +74,8 @@ USAGE
                 reserved profile names); a community release's id and name are not Astra's own;
                 ${bridge_token} only with the companion capability \"presentation\" declared;
                 [integration.link] within Astra Link v1's limits, its files in the zip;
-                [integration.engine] a descriptor Pass B admits, claiming no negative folder;
+                [integration.engine] a descriptor Pass B admits, claiming no negative folder,
+                nothing wrong inside its mods (mods-invalid);
                 a community release places a loader's name only when [integration.loader]
                 declares it, game files beside the program or below a folder named after its
                 id, and no [launch] env, foreign overrides or path arguments outside
@@ -89,8 +90,9 @@ USAGE
   validate-descriptor
                 an astra.engine/1 descriptor (TOML, JSON, or a manifest's [integration.engine]):
                 it parses, Pass B admits it, and it claims none of the spec's negative folders.
-                A `mods` table (reserved for launcher 0.5.1) is a notice, never a finding: it
-                is not evaluated by this version.
+                Its `mods` (the player's own mod loaders, spec §7): everything wrong inside it
+                is a finding, mods-invalid with its field and reason (§7.9), as ingest refuses
+                it; the rest is judged as without it.
                 --corpus: every recording (*.json, astra.list-shape/1) in the folder is laid
                 below TMPDIR and detected with the descriptor alone; claiming recordings of two
                 or more engines (their labels; `unknown` names none) is too broad.

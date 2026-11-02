@@ -54,54 +54,81 @@ In the library: `EngineSet::build` admits descriptors, `detect_with_engines` ask
 only where the built-ins found nothing), and `plan_install_in` asks the same ones when it
 plans.
 
-## Reserved for launcher 0.5.1: `mods`
+## `mods`: the player's own mod loaders
 
 `mods` is the optional top-level member of `astra.engine/1` that the specification defines in
 [§7](https://github.com/mihailinl/AstraPlugins/blob/db52804689bb7ed785c67cac9dc31b15da590477/spec/games/engine-descriptor-v1.md#7-mods-the-players-own-mod-loaders-optional)
 at the pin above, with `$defs/mods` in its schema: how the player's own mod loader is
-recognised, where its mods are, which of them are enabled and how Astra runs beside it. §7.1
-names this launcher as the reader that accepts `mods` and reads nothing in it; launcher 0.5.1
-evaluates it. It is accepted now because the specification's §0 rule 5 skips the whole of a
-descriptor holding a field the reader does not know: without it, every 0.5.0 would drop every
-foundation that carries one.
+recognised, where its mods are, which of them are enabled and how Astra runs beside it.
+Launcher 0.5.0 accepted it and read nothing in it; 0.5.1 reads it (`engines::mods`).
 
-Launcher 0.5.0:
-
-- **accepts it** — inline or as a `[mods]` table in a file, in the catalogue's JSON, and as
-  `[integration.engine.mods]` in a foundation's manifest. It must be a table (anything else is
-  `descriptor-invalid`, `field` = `mods`, and skips the whole descriptor, as §7.1 says), only at
-  the top level, and what it holds keeps to the rules every member keeps to (no float, datetime
-  or `null`, no integer past 2^53 − 1). No key inside it is checked, so §7.9's `mods-invalid`
-  is never raised.
-- **reads nothing in it.** It is part of the canonical form, so of the digest (the catalogue's
-  copy without it is another descriptor: `descriptor-mismatch`) and of the 16 KiB size limit,
-  and of nothing else: it never reaches the model the evaluator reads
-  (`Descriptor::carries_mods` only says it is there), so detection, Pass B's admission, the
-  offers, planning and narrow-only are exactly what they are without it. Canary C1c holds that
-  over every folder the tests detect, with the hostile set's descriptors each carrying a `mods`
-  table that spells the grammar's own keys (`tests/common/identity.rs` `hostile_mods_set`).
-- **says so**: `gi-probe validate-descriptor` reports it as the notice `mods-not-evaluated`
-  ("mods: not evaluated by this version"), never a finding, and `gi-probe check` gives the same
-  notice at step 4.
+- **Accepted** inline or as a `[mods]` table in a file, in the catalogue's JSON, and as
+  `[integration.engine.mods]` in a foundation's manifest. It must be a table: anything else is
+  `descriptor-invalid`, `field` = `mods`, and skips the whole descriptor (§7.1), as do the value
+  rules every member keeps to (no float, datetime or `null`, no integer past 2^53 − 1). It is
+  part of the canonical form, so of the digest (the catalogue's copy without it is another
+  descriptor: `descriptor-mismatch`) and of the 16 KiB size limit.
+- **Validated** (`Descriptor::mods_refusals`): everything wrong inside it is
+  `mods-invalid{field, reason}`, `field` the member (`mods.loader[1].root`), `reason` one of
+  §7.9's (`engines::mods::reasons`), each derived from the grammar as the specification's checker
+  derives it (`tools/check-games-goldens.py` `mods_reasons`): the closed sets, the shapes and
+  counts, the jail and the component rules (8.3 short names and device names included), the
+  placeholders (§2.4's and the descriptor's own captures), the loader anchor (never a proxy, a
+  ubiquitous runtime, the program or a name the descriptor's own detection looks up; a
+  root-anchored loader only when passive: no `chain`, no `via-manager`, no `tell`), the chain
+  entry (a `.dll`, one of the loader's own top-level file lookups), `codes`, unique ids, the
+  version template and `versions`, §7.8's per-member budget and §7.1's nesting, and no mod
+  manager named anywhere (§7.7).
+- **Dropped alone when refused.** A descriptor whose `mods` is refused inside detects, offers and
+  plans exactly as without it; `Descriptor::mods` is then `None`, and a client says so once.
+  Ingest refuses it: `Manifest::lint` (and so `gi-probe check`, step 2) and `gi-probe
+  validate-descriptor` (step 1) report each `mods-invalid`.
+- **Never read by detection** (§7.1): the validated model (`Descriptor::mods`) is kept beside
+  the model the evaluator reads, never in it, so detection, Pass B's admission, the offers,
+  planning and narrow-only are exactly what they are without it. Canary C1c holds that over every
+  folder the tests detect, twice: with the hostile set's descriptors each carrying a `mods`
+  refused inside that spells the grammar's own keys, and each carrying a valid one that uses every
+  member §7 has (`tests/common/identity.rs` `hostile_mods_set`, `hostile_valid_mods_set`).
+- **Evaluated** for one source at a time (`engines::mods::evaluate`, `evaluate_one`): the game
+  folder, the active profile of the one manager an adapter reports (never another of its
+  profiles), the folder the player picked — the caller chooses each, a descriptor never does.
+  `{source}` is the jail: a path is resolved one component at a time, never through a link,
+  and a probe opens only a regular file. `listed` and `child` read one listing per folder per
+  evaluation; `stat` is the exact spelling. A placeholder takes the value the placing rule bound
+  (`engines::mods::Bindings`), and a value that does not substitute to a §7.3 path makes the
+  loader yield nothing. §7.8's per-evaluation bounds are counted, never timed: 5,000 entries
+  in any one folder, 1,024 mods in a root, 2,048 lookups (every `require` lookup, every folder
+  listed, one marker check per mod folder whatever the list says), 128 KiB read (a `version`
+  probe 32 KiB, a list 16 KiB). Over any, that loader yields nothing for that source
+  (`LoaderOutcome::OverBudget`), never a partial list. A loader recognised whose `versions` do
+  not hold, unknown included, is recognised but unsupported, and the player is told what Astra
+  needs. Nothing is opened for writing, and nothing found is logged (§7.10): what an evaluation
+  returns is for the player's install sheet and that one start, and a runner is handed a chain's
+  `entry` and its `tell`, never the list of mods.
+- **Not yet what a start asks.** "With your mods" still runs on `src/mods/**` (0.4.0's
+  discovery: BepInEx, the r2modman, Gale and Thunderstore Mod Manager adapters); its loaders
+  becoming this data, held to today's answers by an identity canary, is 0.5.1's next step (debt
+  row 46).
 
 The specification's `mods` goldens (`testdata/games/descriptors/mods/`, `vectors.json`
-`descriptors.mods`, §7.11) say what such a reader answers (`reader_ignoring_mods`), and
-`tests/goldens.rs` holds the launcher to it: each compat golden and each hostile one is accepted
-and places a Source 2 folder exactly as the same descriptor without `mods`
-(`the_mods_goldens_change_no_detection`), `not-a-table` skips the descriptor
-(`a_mods_that_is_not_a_table_skips_the_descriptor`), the built-in loaders ride on the launcher's
-own built-ins (`the_builtin_mods_fragments_ride_on_the_launchers_builtins`), and
-`tests/gi_probe.rs` `validate_descriptor_does_not_evaluate_the_mods_goldens` holds
-`validate-descriptor` to the notice. §7.9 has lint refuse the hostile ones; that is 0.5.1's.
-The TOML of every one of them parses at this pin: `hostile/mods-deep-nesting.toml` nests `any`
-in `any` 39 deep, where 40 was one past the toml crate's fixed recursion limit (80 nested tables
-and arrays; AstraPlugins #133, whose §7.1 now says that a `mods` nested past a TOML reader's
-own limit makes the whole file unreadable).
+`descriptors.mods`, §7.11) hold the launcher to it: every hostile and compat golden is refused
+for exactly the `reasons` it records and the valid one is not
+(`tests/goldens.rs` `every_mods_golden_is_refused_for_exactly_its_reasons`), each places a Source 2
+folder exactly as the same descriptor without `mods` (`the_mods_goldens_change_no_detection`),
+`not-a-table` skips the descriptor (`a_mods_that_is_not_a_table_skips_the_descriptor`), the
+built-in fragments are valid on the launcher's own built-ins
+(`the_builtin_mods_fragments_ride_on_the_launchers_builtins`), `paths.json` is §7.3's
+(`the_mods_paths_and_substitutions_are_the_specs`), and `tests/gi_probe.rs`
+`validate_descriptor_refuses_each_mods_golden_for_exactly_its_reasons` holds
+`validate-descriptor` to the same reasons. `hostile/mods-deep-nesting.toml` nests `any` in `any`
+39 deep, one level under the toml crate's fixed recursion limit (80 nested tables and arrays;
+AstraPlugins #133); a `mods` nested past it makes the whole file unreadable, as §7.1 says.
 
-§7.1 keeps `mods` in the shape this version checks: a table (never `[[mods]]`), at the top
-level only, within the value rules above, nesting at most 11 levels. Launcher 0.3.1 drops
-`[integration.engine]` unread (the specification's §1), so a manifest it reads is unaffected,
-and no first-party manifest carries `[integration.engine]` at all. Debt row 46.
+§7.1 keeps `mods` in the shape launcher 0.5.0 checks: a table (never `[[mods]]`), at the top
+level only, within the value rules above, nesting at most 11 levels, so a 0.5.0 still detects
+with every descriptor written for 0.5.1. Launcher 0.3.1 drops `[integration.engine]` unread (the
+specification's §1), so a manifest it reads is unaffected, and no first-party manifest carries
+`[integration.engine]` at all.
 
 ## Launcher-only notes
 
@@ -157,3 +184,29 @@ request to the specification to say the same.
     case; no placeholder; needs a program.
 - **Budgets.** One pool of lookups per game, shared by every standing (debt row 4); an
   `engine-ambiguous` result carries the codes only (debt row 6).
+- **`mods`, read more strictly than the checker.** Each of these is refused where the
+  specification's checker (`mods_reasons`) names no reason:
+  - a loader's `name` keeps to the characters a display name may hold (§2.1, as
+    `descriptor::name_char_allowed` reads it), trimmed (`shape`); the schema bounds only its
+    length;
+  - a `require` entry that is not a table, and an `any`/`all`/`none` that holds anything beside
+    its one list, or an empty list (`shape`, `unknown`), as the schema refuses them;
+  - a `tail` without `equals` (1 to 16 bytes, `bytes` its length when given; `shape`), which
+    the schema leaves optional although a `tail` compares nothing without it;
+  - a code, id, template or `versions` followed by a line break, which the checker's Python `$`
+    lets through (`shape`, `version-invalid`) and the schema's patterns refuse;
+  - a component longer than 255 BYTES, as §7.3 says (`path-invalid`), where the checker and the
+    schema count characters.
+- **`mods`, names compared as §7.4 says.** A detection name's `*` and placeholders match any
+  run of characters, and nothing else does, ignoring ASCII case: the checker's `fnmatch` also
+  reads `?` and `[…]` as wildcards (no detection name the launcher parses holds a `?`; a `[…]`
+  it may), and its `.lower()` folds case beyond ASCII (`Ä` and `ä` are one name to it, two
+  here). Where the checker's `re.IGNORECASE` folds a non-ASCII letter onto an ASCII one
+  (`İ` and `ı` onto `i`, `ſ` onto `s`, the Kelvin sign onto `k`), so does the launcher, in the
+  manager names (§7.7) and the ubiquitous runtime names (§2.4); its `$` stands before one final
+  line break there too.
+- **`mods`, at evaluation.** A `version` probe that would read past its 32 KiB is over a
+  per-evaluation bound (the loader yields nothing for that source), not a version unknown: the
+  player is told why there are no mods, never that their loader is too old. The loader's
+  version is the value of the first key in `key` that reads in the template. A marker is checked
+  in every mod folder, enabled by the list or not, and each check counts one lookup.

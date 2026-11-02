@@ -18,8 +18,9 @@ use std::path::Path;
 
 /// `path`, opened as described above, with its length. Anything that is not a regular file when
 /// looked at (a link, a FIFO, a device node) is not opened at all; one swapped in between the
-/// look and the open is refused by the checks on what was opened.
-fn open_regular(path: &Path) -> Option<(File, u64)> {
+/// look and the open is refused by the checks on what was opened. The mods evaluation's bounded
+/// probes (`super::mods`) open through it too.
+pub(crate) fn open_regular(path: &Path) -> Option<(File, u64)> {
     if !std::fs::symlink_metadata(path).ok()?.is_file() {
         return None;
     }

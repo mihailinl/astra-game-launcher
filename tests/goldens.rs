@@ -14,10 +14,12 @@
 //!   accepted or refused as labelled by [`Manifest::parse_and_lint`] — `runner-builtin` as
 //!   Astra's own, the rest as community. The content goldens (`testdata/games/content/`) are
 //!   `tests/content.rs`'s.
-//! - **`mods`** (`descriptors.mods`, engine-descriptor-v1.md §7). This launcher accepts `mods`
-//!   and reads nothing in it: each compat and hostile golden is answered as `vectors.json`'s
-//!   `reader_ignoring_mods` says, and one it accepts places a folder exactly as the same
-//!   descriptor without `mods`. Evaluating it, and refusing the hostile ones, is 0.5.1's.
+//! - **`mods`** (`descriptors.mods`, engine-descriptor-v1.md §7). Every hostile golden is
+//!   refused for exactly its `vectors.json` `reasons` (`mods-invalid`), every compat one as its
+//!   `client` says (`detects-with-mods`, `mods-dropped`), `not-a-table` skips the descriptor, the
+//!   built-in fragments are valid on the launcher's own built-ins, and `paths.json`'s paths and
+//!   substitutions are §7.3's. Whatever `mods` holds, valid or not, a golden places a folder
+//!   exactly as the same descriptor without it (§7.1).
 //! - **K13.** `reserved.yaml`'s profile file names, id prefixes, name substrings and reserved
 //!   `[integration.*]` keys are [`reserved`]'s, and every engine code it reserves the launcher
 //!   refuses to descriptors.
@@ -175,8 +177,7 @@ fn k17_the_owner_of_a_code_is_admitted_alone() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// `descriptors.mods` (engine-descriptor-v1.md §7): what this launcher, a reader that accepts
-// `mods` and reads nothing in it, answers. Launcher 0.5.1 evaluates it (debt row 46).
+// `descriptors.mods` (engine-descriptor-v1.md §7).
 // ---------------------------------------------------------------------------------------------
 
 /// `d` with its `mods` taken out, through the catalogue's JSON spelling.
@@ -194,6 +195,35 @@ fn mods_records(key: &str) -> &'static Vec<Value> {
     vectors()["descriptors"]["mods"][key]
         .as_array()
         .unwrap_or_else(|| panic!("vectors.json has no descriptors.mods.{key}"))
+}
+
+/// The §7.9 reasons a record names, sorted.
+fn record_reasons(r: &Value) -> Vec<String> {
+    let mut v: Vec<String> = r["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap().to_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+/// The distinct §7.9 reasons the launcher refuses `d`'s `mods` for, sorted.
+fn mods_reasons(d: &Descriptor) -> Vec<String> {
+    let reasons: BTreeSet<String> = d
+        .mods_refusals()
+        .iter()
+        .map(|e| {
+            assert_eq!(e.code, codes::MODS_INVALID, "{e}");
+            assert!(
+                e.param("field").is_some_and(|f| f.starts_with("mods")),
+                "{e}"
+            );
+            e.param("reason").unwrap().to_owned()
+        })
+        .collect();
+    reasons.into_iter().collect()
 }
 
 /// A Source 2 folder, which the `mods` goldens' detection half places and Pass A does not.
@@ -221,16 +251,74 @@ fn alone(d: &Descriptor) -> EngineSet {
     EngineSet::build([(community("community"), Ok(d.clone()))])
 }
 
+/// §7.9, golden by golden: every hostile one and every compat one is refused inside `mods` for
+/// EXACTLY the reasons `vectors.json` records (each `mods-invalid{field, reason}`, its field a
+/// member of `mods`), the valid compat one is not; `client` = `mods-dropped` reads as carrying
+/// no `mods` ([`Descriptor::mods`] is `None`), `detects-with-mods` carries its loaders. Ingest's
+/// and lint's `verdict` is `refuse` exactly where something is refused, the descriptor's own
+/// detection half admitted alike (Pass B, as a community descriptor).
+#[test]
+fn every_mods_golden_is_refused_for_exactly_its_reasons() {
+    let mut out = Vec::new();
+    let mut asked = 0;
+    for (list, r) in mods_records("compat")
+        .iter()
+        .map(|r| ("compat", r))
+        .chain(mods_records("hostile").iter().map(|r| ("hostile", r)))
+    {
+        if r["client"] == "descriptor-skipped" {
+            continue; // a_mods_that_is_not_a_table_skips_the_descriptor
+        }
+        let file = r["file"].as_str().unwrap();
+        let golden = format!("testdata/games/{file}");
+        let d = Descriptor::from_toml(&golden_text(file))
+            .unwrap_or_else(|e| panic!("{golden}: the descriptor itself is refused: {e}"));
+        assert_eq!(d.check_pass_b(false), Ok(()), "{golden}");
+        let got = mods_reasons(&d);
+        let want = record_reasons(r);
+        if got != want {
+            out.push(format!(
+                "{golden}: refused for {got:?}, the golden names {want:?}"
+            ));
+        }
+        let refused = !got.is_empty();
+        assert_eq!(r["verdict"] == "refuse", refused, "{golden}: verdict");
+        if list == "hostile" {
+            assert_eq!(r["verdict"], "refuse", "{golden}");
+        } else {
+            assert_eq!(
+                r["mods_verdict"] == "refuse",
+                refused,
+                "{golden}: mods_verdict"
+            );
+        }
+        match r["client"].as_str() {
+            Some("mods-dropped") => {
+                assert!(d.carries_mods() && d.mods().is_none(), "{golden}");
+            }
+            Some("detects-with-mods") => {
+                let m = d.mods().unwrap_or_else(|| panic!("{golden}: no mods"));
+                assert!(!m.loaders().is_empty(), "{golden}");
+                assert!(d.mods_refusals().is_empty(), "{golden}");
+            }
+            other => panic!("{golden}: client = {other:?}"),
+        }
+        // The descriptor's JSON spelling is refused alike.
+        let json = Descriptor::from_json(d.canonical_json().as_bytes()).unwrap();
+        assert_eq!(json.mods_findings(), d.mods_findings(), "{golden}");
+        asked += 1;
+    }
+    failures(out);
+    assert!(asked >= 31, "{asked} mods goldens asked");
+}
+
 /// §7.1: a descriptor with `mods` and the same descriptor without it place every folder
-/// identically. Every compat and hostile golden whose `reader_ignoring_mods` is `accept` is
-/// accepted by the parser and by Pass B's admission, its detection half is the compat twin's
-/// (`manifests/valid/foundation-owns-engine.toml`'s `[integration.engine]`, member for member),
-/// and it places the Source 2 folder exactly as that twin does, digest aside. The hostile ones
-/// are refused by ingest and lint (`verdict`) and drop only `mods` in a client that reads it
-/// (`client` = `mods-dropped`); 0.5.0 reads nothing in `mods`, so it detects with them as
-/// with any other, which is what this asserts, and 0.5.1 refuses them (debt row 46). A golden
-/// the parser refuses all the same would be an entry of `SPEC_DEFECTS_AT_PIN`; none is at this
-/// pin (`mods-deep-nesting` nests 39 deep since AstraPlugins #133, under the toml crate's limit).
+/// identically, whatever `mods` holds — valid (`source2-with-mods`) or refused inside (every
+/// hostile golden, and the one from a later version). Every compat and hostile golden whose
+/// `reader_ignoring_mods` is `accept` is accepted by the parser and by Pass B's admission, its
+/// detection half is the compat twin's (`manifests/valid/foundation-owns-engine.toml`'s
+/// `[integration.engine]`, member for member), and it places the Source 2 folder exactly as that
+/// twin does, digest aside.
 #[test]
 fn the_mods_goldens_change_no_detection() {
     let compat = mods_records("compat");
@@ -252,7 +340,7 @@ fn the_mods_goldens_change_no_detection() {
     assert_ne!(nothing[0].engine, "source2");
 
     let mut out = Vec::new();
-    let (mut compat_held, mut hostile_held) = (0, 0);
+    let (mut compat_held, mut hostile_held, mut valid_held) = (0, 0, 0);
     for (list, r) in compat
         .iter()
         .map(|r| ("compat", r))
@@ -290,6 +378,7 @@ fn the_mods_goldens_change_no_detection() {
             _ => continue, // refused exactly as its SPEC_DEFECTS_AT_PIN entry records
         };
         assert!(d.carries_mods(), "{golden}");
+        valid_held += usize::from(d.mods().is_some());
         assert_ne!(
             d.digest(),
             twin.digest(),
@@ -324,6 +413,10 @@ fn the_mods_goldens_change_no_detection() {
     failures(out);
     assert_eq!(compat_held, compat.len(), "every compat golden");
     assert!(hostile_held >= 25, "{hostile_held} hostile mods goldens");
+    assert_eq!(
+        valid_held, 1,
+        "source2-with-mods, valid, detects as without it"
+    );
 }
 
 /// §7.1: a `mods` that is not a table is `descriptor-invalid` (field `mods`) and skips the
@@ -345,6 +438,7 @@ fn a_mods_that_is_not_a_table_skips_the_descriptor() {
         if !skipped {
             continue;
         }
+        assert_eq!(record_reasons(r), ["descriptor-invalid"], "{r}");
         let file = r["file"].as_str().unwrap();
         let text = golden_text(file);
         let e = Descriptor::from_toml(&text).expect_err(file);
@@ -377,9 +471,11 @@ fn a_mods_that_is_not_a_table_skips_the_descriptor() {
 }
 
 /// The built-in loaders as data (`descriptors.mods.builtin`), on the launcher's own built-in
-/// descriptor: accepted, carrying the loaders `vectors.json` names, and without them exactly
-/// that built-in. (The spec's `descriptors/builtin/*.toml` they name as `engine` are not the
-/// launcher's: `SPEC_DEFECTS_AT_PIN`.)
+/// descriptor: valid there (no `mods-invalid`), carrying the loaders `vectors.json` names, in
+/// order, the chain-incapable ones with no `chain` strategy, every `versions` read in its
+/// template's shape; and without them exactly that built-in. (The spec's
+/// `descriptors/builtin/*.toml` they name as `engine` are not the launcher's:
+/// `SPEC_DEFECTS_AT_PIN`.)
 #[test]
 fn the_builtin_mods_fragments_ride_on_the_launchers_builtins() {
     let builtin = mods_records("builtin");
@@ -388,6 +484,7 @@ fn the_builtin_mods_fragments_ride_on_the_launchers_builtins() {
         let name = r["name"].as_str().unwrap();
         let file = r["file"].as_str().unwrap();
         assert_eq!(r["verdict"], "accept", "{file}");
+        assert_eq!(record_reasons(r), Vec::<String>::new(), "{file}");
         let fragment = golden_text(file);
         // Its `schema` line and the comments above it, then nothing but `[[mods.loader]]` tables.
         let at = fragment
@@ -409,13 +506,9 @@ fn the_builtin_mods_fragments_ride_on_the_launchers_builtins() {
             .unwrap_or_else(|e| panic!("{file} on {name}.toml: {e}"));
         assert!(with.carries_mods() && !ours.carries_mods(), "{file}");
         assert_eq!(without_mods(&with).digest(), ours.digest(), "{file}");
-        let v: Value = serde_json::from_str(with.canonical_json()).unwrap();
-        let ids: Vec<&str> = v["mods"]["loader"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|l| l["id"].as_str().unwrap())
-            .collect();
+        assert_eq!(with.mods_refusals(), [], "{file} on {name}.toml");
+        let m = with.mods().unwrap();
+        let ids: Vec<&str> = m.loaders().iter().map(|l| l.id()).collect();
         let named: Vec<&str> = r["loaders"]
             .as_array()
             .unwrap()
@@ -423,11 +516,67 @@ fn the_builtin_mods_fragments_ride_on_the_launchers_builtins() {
             .map(|l| l.as_str().unwrap())
             .collect();
         assert_eq!(ids, named, "{file}");
+        for id in r["chain_incapable"].as_array().into_iter().flatten() {
+            let l = m.loader(id.as_str().unwrap()).unwrap();
+            assert!(
+                !l.coexist().iter().any(|s| matches!(
+                    s,
+                    astra_game_launcher::engines::mods::Coexist::Chain { .. }
+                )),
+                "{file}: {id}"
+            );
+        }
+        // Every `versions` holds for a version in its own shape, and the detection half is the
+        // built-in's: the same model, so the same answers (§7.1).
+        assert_eq!(with.check_pass_b(true), ours.check_pass_b(true), "{file}");
     }
 }
 
-/// Every vendored `descriptors/mods/` golden is one record of `descriptors.mods`, so a new one
-/// cannot arrive at a re-pin unasked. (`paths.json` is §7.3's, which 0.5.0 never evaluates.)
+/// `paths.json` (§7.3): each path's §7.9 reason (`null`: a §7.3 path), and each substitution's
+/// components after every placeholder is replaced and every component checked again (`null`:
+/// the loader yields nothing).
+#[test]
+fn the_mods_paths_and_substitutions_are_the_specs() {
+    use astra_game_launcher::engines::mods::{path_reason, substitute};
+    let rel = vectors()["descriptors"]["mods"]["paths"].as_str().unwrap();
+    let cases: Value = serde_json::from_str(&golden_text(rel)).unwrap();
+    let mut out = Vec::new();
+    let paths = cases["paths"].as_array().unwrap();
+    for c in paths {
+        let p = c["path"].as_str().unwrap();
+        let got = path_reason(p);
+        if got != c["reason"].as_str() {
+            out.push(format!("{p:?}: {got:?}, the golden says {}", c["reason"]));
+        }
+    }
+    let subs = cases["substitution"].as_array().unwrap();
+    for c in subs {
+        let p = c["path"].as_str().unwrap();
+        let values: BTreeMap<String, String> = c["values"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_owned()))
+            .collect();
+        let got = substitute(p, &values);
+        let want: Option<Vec<String>> = serde_json::from_value(c["components"].clone()).unwrap();
+        if got != want {
+            out.push(format!(
+                "{p:?} {values:?}: {got:?}, the golden says {want:?}"
+            ));
+        }
+    }
+    failures(out);
+    assert!(
+        paths.len() >= 50 && subs.len() >= 10,
+        "{} {}",
+        paths.len(),
+        subs.len()
+    );
+}
+
+/// Every vendored `descriptors/mods/` golden is one record of `descriptors.mods` (or its
+/// `paths`), so a new one cannot arrive at a re-pin unasked.
 #[test]
 fn every_mods_golden_is_asked() {
     let mut listed: BTreeSet<String> = ["builtin", "compat", "hostile"]

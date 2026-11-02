@@ -31,9 +31,12 @@
 //!    Two or more is `descriptor-too-broad{reason=two-engines, labels}` (spec §5,
 //!    `E_DESCRIPTOR_TOO_BROAD`, which this launcher spells as its own refusal: debt row 13).
 //!
-//! A descriptor carrying `mods` (reserved for launcher 0.5.1's mods section) is a notice,
-//! `mods-not-evaluated` (step 1, field `mods`: "mods: not evaluated by this version"), never a
-//! finding: this version accepts the table and reads nothing in it ([`mods_notice`]).
+//! Step 1 also judges the descriptor's `mods` (spec §7): everything wrong inside it is a finding,
+//! `mods-invalid` with its `field` (the member, `mods.loader[1].root`) and §7.9's `reason`
+//! ([`mods_findings`]), and the descriptor is refused for it as ingest refuses it; steps 2 to 4
+//! still judge the rest, which a client keeps (it drops only `mods`). The report's
+//! `descriptor.mods_loaders` names the loaders of a valid one. A `mods` that is not a table is no
+//! descriptor at all (`descriptor-invalid`, field `mods`).
 //!
 //! The report gives the descriptor's digest, `sha256(JCS(descriptor))`, which the catalogue
 //! entry's `descriptor_sha256` must equal. The input is the descriptor as TOML or JSON, or a
@@ -473,29 +476,34 @@ pub fn corpus(d: &Descriptor, set: &EngineSet, dir: &Path) -> Result<(Value, Vec
     Ok((report, findings))
 }
 
-/// The notice (never a finding) for a descriptor carrying `mods`: reserved for launcher 0.5.1's
-/// mods section, which this version accepts and never reads, so nothing here judged it.
-pub fn mods_notice(d: &Descriptor) -> Option<Finding> {
-    d.carries_mods().then(|| {
-        Finding::new(
-            MODS_NOT_EVALUATED,
-            format!(
-                "mods: not evaluated by this version (launcher {}): reserved for launcher 0.5.1's mods section; accepted, part of the digest, and read by no detection, offer or plan",
-                astra_game_launcher::VERSION
-            ),
-        )
-        .field("mods")
-    })
+/// Everything wrong inside the descriptor's `mods` (spec §7.9), one finding each:
+/// `mods-invalid`, its `field` the member (`mods.loader[1].root`) and its `reason` §7.9's. Ingest
+/// refuses the descriptor for any of them; a client only drops its `mods` and detects with it as
+/// without.
+pub fn mods_findings(d: &Descriptor) -> Vec<Finding> {
+    d.mods_refusals()
+        .iter()
+        .map(|e| {
+            refusal(
+                e,
+                "mods (spec §7.9): ingest refuses the descriptor; a client drops only its mods and detects with it as without",
+            )
+        })
+        .collect()
 }
 
-/// [`mods_notice`]'s code.
-pub const MODS_NOT_EVALUATED: &str = "mods-not-evaluated";
-
-/// The report's `descriptor`: its digest and codes.
+/// The report's `descriptor`: its digest and codes, and the ids of its `mods` loaders in order
+/// (`null` without `mods`, `[]` for a `mods` refused: [`mods_findings`] says why).
 pub fn summary(d: &Descriptor) -> Value {
+    let loaders = match d.mods() {
+        Some(m) => json!(m.loaders().iter().map(|l| l.id()).collect::<Vec<_>>()),
+        None if d.carries_mods() => json!([]),
+        None => Value::Null,
+    };
     json!({
         "sha256": d.digest(),
         "codes": d.codes().map(|(c, n)| (c.as_str().to_owned(), json!(n))).collect::<serde_json::Map<_, _>>(),
+        "mods_loaders": loaders,
     })
 }
 
@@ -509,7 +517,8 @@ pub fn run(
     let text = String::from_utf8(bytes).map_err(|_| Fatal::io(file, "not UTF-8"))?;
     let (input, parsed) = parse(&text);
     let mut findings = Vec::new();
-    let mut notices = Vec::new();
+    // None at this version: kept so a report keeps one shape.
+    let notices: Vec<Finding> = Vec::new();
     let mut folders = Vec::new();
     let mut descriptor = Value::Null;
     let mut corpus_report = None;
@@ -517,7 +526,7 @@ pub fn run(
         Err(e) => findings.push(refusal(&e, "not an astra.engine/1 descriptor").step(1)),
         Ok(d) => {
             descriptor = summary(&d);
-            notices.extend(mods_notice(&d).map(|n| n.step(1)));
+            findings.extend(mods_findings(&d).into_iter().map(|f| f.step(1)));
             if let Err(e) = d.check_pass_b(first_party) {
                 findings.push(refusal(&e, "Pass B does not admit this descriptor").step(2));
             }

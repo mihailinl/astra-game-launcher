@@ -514,9 +514,12 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
   the folder (below) is laid below `TMPDIR` and detected with the descriptor alone, with no hint
   and with the recording's own: claiming recordings labelled with two or more engines is
   `descriptor-too-broad`, `reason=two-engines` (`unknown` names no engine). The report gives its
-  digest, `sha256(JCS(descriptor))`. A `mods` table (reserved for launcher 0.5.1; see
-  [`docs/ENGINE-DESCRIPTOR.md`](docs/ENGINE-DESCRIPTOR.md)) is the notice `mods-not-evaluated`
-  ("mods: not evaluated by this version"), never a finding; `check` says the same at step 4.
+  digest, `sha256(JCS(descriptor))`. Its `mods` (the player's own mod loaders, spec §7; see
+  [`docs/ENGINE-DESCRIPTOR.md`](docs/ENGINE-DESCRIPTOR.md)) is judged at step 1: everything
+  wrong inside it is a finding, `mods-invalid` with its `field` (`mods.loader[1].root`) and the
+  spec's `reason` (§7.9), as ingest refuses it, while steps 2 to 4 judge the rest as without it;
+  a valid one's loaders are named in `descriptor.mods_loaders`. `check` refuses the same at
+  step 2.
 - **`capture`** records a real game folder as `astra.list-shape/1` (merged plan R29; the format
   and its replay are `tests/corpus/replay.rs`): every name, kind and size the detection walk and
   the reads near a program list — the walk's folders, then around each program and Steam's hint

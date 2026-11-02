@@ -46,7 +46,7 @@ comes off this file only in the commit that closes it.
 | 43 | **A restore leaves the packs in the companion.** `restore_game_files` (a withdrawn integration) puts the game's files back and keeps the profile, its `pack_inbox` record and its hold: the packs the integration handed the companion stay installed there until the uninstall, which writes their tombstones. | Whether a withdrawn integration's animations leave the companion at once is the withdrawal policy's (marketplace plan A§4.4), which names game files only. | plan owner, then L | `src/install.rs` `restore_game_files` |
 | 44 | **The companion's design says `<uid>.remove` (§2), its engine reads `<uid tail>.remove`.** `docs/animation-packs.md` §2 lists "`<uid>.remove` tombstones" in `inbox/packs/<integration>/`, and a uid holds a `/` (`astra.peak/climb`); §5 (b) ("the launcher writes `astra.peak/climb.remove` there") and the engine (`inbox.rs`: `<tail>.remove` trashes `<integration>/<tail>`) agree on the tail, which is what the launcher writes. The tail is the uid's as the archive's `animpack.toml` says it, never the archive's file name: §5 (b)'s own example is `peak-climb.astrapack` with uid `astra.peak/climb`. | Not the launcher's text. | astra-companion (one word in §2) | `tests/pack_inbox.rs` `uninstall_writes_the_tombstone_into_the_inbox` |
 | 45 | **Astra passes no companion root yet: every release that uses `${astra_pack_inbox}` is `pack-inbox-unavailable` in the daemon.** The daemon plans with `plan_install` / `plan_install_in`, which name none. | Lane D's: the daemon must call `plan_install_with_user_pack_root` with `CompanionLocation`'s pack root (below, "For the daemon"). Nothing first-party uses the placeholder yet. | D | `tests/pack_inbox.rs` `without_a_root_the_plan_is_refused` |
-| 46 | **`mods` is accepted and not evaluated.** `astra.engine/1` takes an optional top-level `mods` table (L3b step 5; `docs/ENGINE-DESCRIPTOR.md`, "Reserved for launcher 0.5.1"), which the specification defines in `engine-descriptor-v1.md` §7 at the pin: a table, anything inside it within the value rules, part of the digest and of the size limit, read by nothing (it never reaches the evaluator's model); `gi-probe validate-descriptor` and `check` report the notice `mods-not-evaluated`. What it says — the player's own mod loader, the mods root, which mods are enabled, how Astra coexists with them — is not implemented, so §7.9's `mods-invalid` is never raised: the spec's hostile `mods` goldens (`descriptors/mods/hostile/`, `verdict` = `refuse`, each with its §7.9 reasons) are accepted for detection, as a reader ignoring `mods` (`reader_ignoring_mods` = `accept`), and pass `validate-descriptor` with the notice, where §7.9 has lint refuse them. | Reserved before the 0.5.0 tag so that a 0.5.0 does not skip whole every descriptor written for 0.5.1 (the spec's §0 rule 5); evaluating it is 0.5.1's. | L (0.5.1: evaluate `mods` per spec §7; refuse the hostile mods goldens with their reasons) | `tests/goldens.rs` `the_mods_goldens_change_no_detection`, `a_mods_that_is_not_a_table_skips_the_descriptor`, `the_builtin_mods_fragments_ride_on_the_launchers_builtins`, `every_mods_golden_is_asked`; `tests/gi_probe.rs` `validate_descriptor_does_not_evaluate_the_mods_goldens`, `validate_descriptor_takes_mods_as_a_notice_and_judges_the_rest_alike`; `tests/engines.rs` `a_mods_table_is_accepted_and_never_read`; `src/engines/descriptor.rs` `a_mods_table_never_reaches_the_model`; C1c, `tests/common/identity.rs` `hostile_mods_set` |
+| 46 | **A valid `mods` is evaluated, and no start asks it yet.** Since 0.5.1 B the launcher reads `astra.engine/1`'s `mods` (`engines::mods`; `docs/ENGINE-DESCRIPTOR.md`, "`mods`"): it refuses what is wrong inside it with §7.9's reasons (`mods-invalid{field, reason}`: every hostile golden for exactly its `reasons`, in the library, in `Manifest::lint` and in `gi-probe`), drops only `mods` in a client, and evaluates a valid one for one source within §7.8's bounds (`engines::mods::evaluate`). Nothing calls `evaluate` yet: "with your mods" still runs on `src/mods/**` (0.4.0's BepInEx discovery and its r2modman, Gale and Thunderstore Mod Manager adapters); the built-in loaders are not yet data on the built-in descriptors (the spec's `descriptors/mods/builtin/*.mods.toml` are held valid on them, and are not compiled in); and nothing turns a `Detection` into the `Bindings` a mods path's placeholders take. | Evaluating `mods` is 0.5.1's step B; the built-ins as data, and the discovery answering through `evaluate`, are its step C. | L (0.5.1 step C: the built-in loaders as data, `src/mods/**` answering through `evaluate`, held to today's answers by an identity canary) | `tests/goldens.rs` `every_mods_golden_is_refused_for_exactly_its_reasons`, `the_builtin_mods_fragments_ride_on_the_launchers_builtins`; `src/engines/mods/eval.rs` tests; `tests/mods.rs`, `tests/play_with_mods.rs` (today's discovery) |
 | 47 | **The content check bounds its work by the content catalogue's caps alone, never the release's.** Since 0.5.1 a release's every file is read by its bytes, each embedded bundle walked within the content contract's limits (4,096 entries, 128 MiB) and each game archive within §2.7.1's (65,536 entries, 512 MiB, at most 100 : 1 per deflated entry), the glTF JSON of the whole release within 32 MiB and the per-character sniff within 64 MiB. 0.5.0 also counted every `.astrachar` it unpacked against the release's own 1 GiB (`Limits::max_uncompressed_bytes`, `GiPackage::open_with_limits`); no longer: a release of many archives each up to 512 MiB makes the check inflate each of them in turn (one at a time, so memory stays one archive's), as the spec's own checker does. | One budget across a release would refuse a release the catalogue accepts. Every file inside is read once and dropped, so only the time grows with the number of archives; `gi-probe check` runs on the author's machine, the daemon on a developer's own import. | plan owner (accepted unless a release-wide cap is asked for, which the spec would have to adopt) | `src/content.rs` `judge`; `src/content/zipwalk.rs` `BUNDLE`, `GAME_ARCHIVE` |
 
 ## For the daemon (D1)
@@ -133,6 +133,20 @@ install reports the progress stage `pack-inbox`; `UninstallReport::pack_inbox` s
 there (`tombstones`, `held` for another profile's install, `removed`, `skipped`). A ledger with
 packs is schema 5. The engine imports the packs at its start and on its watcher; nothing needs
 sending to it.
+
+`mods` (0.5.1 B, `engines::mods`; `ENGINE-DESCRIPTOR.md`, "`mods`"): `mods-invalid` is new in
+`codes::ALL`, K15 words for it (its `reason` is one of §7.9's, `engines::mods::reasons::ALL`; its
+`field` the member). A catalogue entry has passed it at ingest (`Manifest::lint`, `gi-probe`); a
+developer-mode folder import has not, and `Manifest::lint(false)` shows it. Wherever the daemon
+holds a descriptor, `Descriptor::mods_refusals` non-empty means it carries no `mods` for this
+client: say so once, and keep detecting, offering and planning with it. Nothing the daemon calls
+evaluates `mods` yet (row 46). When it does (`engines::mods::evaluate`), §7.10 binds the daemon
+too: what an evaluation finds (which loaders, their versions, the mods, how many, the folders, the
+picked one) goes to the player's install sheet and that one start only — never a log a problem
+report or a support bundle attaches (not even "with mods" or "without"), never a rating, Link, the
+companion's bridge, an AI tool or another plugin; a runner gets a chain's `entry` and its `tell`
+alone; and the picked folder and the "with your mods" choice stay in Astra's profile on this PC,
+never synced.
 
 ## For the specification (K13)
 
@@ -269,14 +283,17 @@ Also for the spec, not pinned by a golden:
   straight in the folder, its `[animpack] uid` the integration's, an id the companion reads,
   `[a-z0-9._-]{1,64}` not dot-led) and the codes, `pack-inbox-invalid{reason}` and
   `pack-inbox-unavailable`.
-- **`mods` is reserved in `astra.engine/1`** (row 46, L3b step 5): the launcher accepts an
-  optional top-level `mods` table and reads none of it, where the schema at this pin refuses any
-  member it does not name. Add `"mods": { "type": "object" }` to
-  `engine-descriptor-v1.schema.json`, say in §1 that a reader that does not evaluate it ignores
-  it (it is still in the digest), and add the golden: a descriptor with `mods` detects as the
-  same descriptor without it. The mods section itself must keep `mods` a table, never
-  `[[mods]]`, with values the value rules allow (no float, datetime or `null`): a 0.5.0 refuses
-  anything else, and that is the whole descriptor skipped.
+- **`mods` (§7): what L3b asked for is in the spec at db52804** (§7.1, `$defs/mods`, the compat
+  goldens). What the launcher reads otherwise than the checker (`tools/check-games-goldens.py`
+  `mods_reasons`), each a launcher-only note in [`ENGINE-DESCRIPTOR.md`](ENGINE-DESCRIPTOR.md):
+  the checker counts a component's 255 in characters where §7.3 says bytes; its `$` lets a code,
+  id, template or `versions` end in a line break; it names no reason for a loader `name` outside
+  §2.1's characters, a `tail` without `equals`, a `require` entry that is no table, or an
+  `any`/`all`/`none` holding more than its list; and its `fnmatch` reads `?` and `[…]` in a
+  detection name as wildcards, and its `.lower()` folds case beyond ASCII, where §7.4 says only
+  `*` and placeholders are wildcards and case is ignored as ASCII's. Say each in §7, and
+  give the checker the same reading; a differential over 28,514 mutated goldens at 0.5.1 B
+  found no reason the checker names that the launcher does not.
 
 ### The grammar
 
