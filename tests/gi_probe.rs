@@ -2726,6 +2726,62 @@ fn check_holds_the_links_files_to_the_zip() {
     assert_eq!(r["findings"][0]["params"]["path"], "astra/tools/gone.json");
 }
 
+/// `link.digest` (spec `manifest.md` §2.6.1, AstraPlugins PR #134): the library's
+/// `link_digest`, which `tests/link_digest.rs` holds to the spec's vectors; `link` is null with
+/// no table; a table it cannot digest is no digest and a finding of step 2.
+#[test]
+fn check_reports_the_links_consent_digest() {
+    // The vector: the golden at the pin is #134's input byte for byte (`tests/link_digest.rs`).
+    let golden =
+        spec_goldens::root().join("testdata/games/manifests/valid/game-specific-link.toml");
+    let (_, r) = check(golden.to_str().unwrap(), &[]);
+    assert_eq!(
+        r["link"]["digest"], "e26a440ebf1c3cacc9891fc8b031d9c0d8cbde9276ceeba68d1866a972a35ea2",
+        "{r:#}"
+    );
+
+    // A release zip: the digest of the manifest it holds.
+    let tmp = Tmp::new("check-link-digest");
+    let z = community_release("someone.example", &[]);
+    let pkg = astra_game_launcher::GiPackage::open(&z, &sha(&z)).unwrap();
+    let want = astra_game_launcher::link_digest(pkg.manifest().link())
+        .unwrap()
+        .unwrap();
+    let (exit, r) = check(&put(&tmp, "r", "astra-gi.zip", &z), &[]);
+    assert_eq!(exit, 0, "{r:#}");
+    assert_eq!(r["link"]["digest"], want.as_str());
+
+    // No [integration.link]: `link` is null, not an object with a null digest.
+    let peak = format!("{ROOT}/tests/fixtures/manifests/peak.astra-gi.toml");
+    let (_, r) = check(&peak, &["--provenance", "first-party"]);
+    assert!(!r["integration"].is_null(), "{r:#}");
+    assert!(r["link"].is_null(), "{r:#}");
+
+    // A number in the table: no digest, refused at step 2 (beside the lint's own `shape`).
+    let text = spec_goldens::golden_text("manifests/valid/game-specific-link.toml")
+        .replace("context = true", "context = 1");
+    let file = tmp.join("number").join("astra-gi.toml");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, text).unwrap();
+    let (exit, r) = check(file.to_str().unwrap(), &[]);
+    assert_eq!(exit, 1, "{r:#}");
+    assert!(
+        r["link"].is_object() && r["link"]["digest"].is_null(),
+        "{r:#}"
+    );
+    let refused: Vec<&Value> = r["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["params"]["reason"] == "not-digestable")
+        .collect();
+    assert_eq!(refused.len(), 1, "{r:#}");
+    assert_eq!(refused[0]["code"], "link-invalid");
+    assert_eq!(refused[0]["field"], "integration.link.context");
+    assert_eq!(refused[0]["params"]["type"], "integer");
+    assert_eq!(refused[0]["step"], 2);
+}
+
 #[test]
 fn check_reserves_astras_ids_to_its_own_provenance() {
     let tmp = Tmp::new("check-reserved");

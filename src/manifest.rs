@@ -26,7 +26,8 @@
 //! - `[integration.foundation]` ([`Manifest::foundation`]): a claim, read and shown, never acted
 //!   on; unknown keys in it are [`Manifest::lint`]'s to name.
 //! - `[integration.link]` ([`Manifest::link`]): read as it is, never refused here; the launcher
-//!   acts on none of it, and [`Manifest::lint`] holds it to Astra Link v1's limits.
+//!   acts on none of it, and [`Manifest::lint`] holds it to Astra Link v1's limits. Its consent
+//!   digest, a catalogue entry's `link.digest`, is [`link_digest`]'s.
 //! - `[integration] sdk` ([`Manifest::sdk`]): an `https://` URL, metadata.
 //! - `[[integration.content]]` ([`Manifest::content`]): the integration's own animations,
 //!   characters, art and audio, one entry each ([`crate::content`]). Its shape and a path declared
@@ -50,7 +51,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::content::{self, ContentPart};
 use crate::detect::Engine;
-use crate::digest::normalize_hex;
+use crate::digest::{jcs, normalize_hex, sha256_hex};
 use crate::engines::{Descriptor, EngineCode};
 use crate::error::{LauncherError, Result, codes};
 use crate::mods::ModsDecl;
@@ -1232,6 +1233,61 @@ fn lint_link(link: &toml::Value, out: &mut Vec<LauncherError>) {
             }
         }
     }
+}
+
+/// `[integration.link]`'s consent digest: what a catalogue entry carries as `link.digest`, and a
+/// client asks the player to consent again when it changes (AstraPlugins `spec/games/manifest.md`
+/// §2.6.1, PR #134). Pass [`Manifest::link`]; `None` (no table) is `None`, the entry's
+/// `link: null`.
+///
+/// The table exactly as parsed, **no default added**: a key it leaves out (`skill`, `tools`,
+/// `triggers`, `events`) is absent from what is hashed, never `false`, `[]` or `null`, so writing
+/// a default out changes the digest. Mapped to JSON (a string, a boolean, an array, a table: the
+/// only values the table's schema admits), canonicalised by RFC 8785 (the one JCS of this crate,
+/// an engine descriptor's: [`Descriptor::canonical_json`]), hashed with SHA-256, lowercase hex.
+///
+/// Anything else — an integer, a float, a datetime, or a `link` that is not a table — is refused
+/// (`link-invalid{field, reason=not-digestable, type}`) rather than written in a form two
+/// implementations might not agree on. [`Manifest::lint`] refuses each of those too; this is the
+/// digest's own refusal, so no digest is ever made of them.
+pub fn link_digest(link: Option<&toml::Value>) -> Result<Option<String>> {
+    const FIELD: &str = "integration.link";
+    let Some(link) = link else {
+        return Ok(None);
+    };
+    if !link.is_table() {
+        return Err(not_digestable(FIELD, link));
+    }
+    let mut canonical = String::new();
+    jcs(&link_json(link, FIELD)?, &mut canonical);
+    Ok(Some(sha256_hex(canonical.as_bytes())))
+}
+
+fn not_digestable(field: &str, v: &toml::Value) -> LauncherError {
+    link_invalid(field, "not-digestable").with("type", v.type_str())
+}
+
+/// [`link_digest`]'s mapping: the table's own keys and values, nothing added, nothing dropped.
+fn link_json(v: &toml::Value, field: &str) -> Result<serde_json::Value> {
+    use serde_json::Value as J;
+    Ok(match v {
+        toml::Value::String(s) => J::String(s.clone()),
+        toml::Value::Boolean(b) => J::Bool(*b),
+        toml::Value::Array(a) => J::Array(
+            a.iter()
+                .enumerate()
+                .map(|(i, v)| link_json(v, &format!("{field}[{i}]")))
+                .collect::<Result<_>>()?,
+        ),
+        toml::Value::Table(t) => J::Object(
+            t.iter()
+                .map(|(k, v)| Ok((k.clone(), link_json(v, &format!("{field}.{k}"))?)))
+                .collect::<Result<_>>()?,
+        ),
+        toml::Value::Integer(_) | toml::Value::Float(_) | toml::Value::Datetime(_) => {
+            return Err(not_digestable(field, v));
+        }
+    })
 }
 
 /// True when a name is a component a zip entry or a manifest may use.

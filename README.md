@@ -311,7 +311,7 @@ restore_game_files(&profile_dir, &game)?;                // a withdrawn integrat
 | what | items |
 |---|---|
 | detection | `detect_with_engines`, `EngineSet` (`build`, `empty`, `with_anti_cheat_markers`, `skipped`, `descriptors`, `engine_name`), `Descriptor` (`from_json`, `from_toml`, `digest`, `canonical_json`, `codes`, `check_pass_b`), `Origin`, `Moderation`, `AntiCheatMarker`, `AntiCheatMarkerKind`, `EngineCode`, `Detection::{version, engine_candidates, descriptor_sha256, open_to_descriptors, is_ambiguous}`, `ANTI_CHEAT_SIGNATURES`, `ANTI_CHEAT_CODES`, `engines::BUILTIN` |
-| planning | `plan_install_in(pkg, game, profile, &EngineSet, Provenance, pick)`, `Provenance::{FirstParty, Community}`, `InstallPlan::{engine_descriptor, provenance}` (`PinnedDescriptor`), `HIJACK_NAMES`, `is_hijack_name`, `Manifest::parse` (`engine-undeclared`), `Manifest::lint(first_party)`, `Manifest::parse_and_lint`, `LoaderDecl`, `FoundationClaim`, `link_limits`, `KEEP_EXTENSIONS` |
+| planning | `plan_install_in(pkg, game, profile, &EngineSet, Provenance, pick)`, `Provenance::{FirstParty, Community}`, `InstallPlan::{engine_descriptor, provenance}` (`PinnedDescriptor`), `HIJACK_NAMES`, `is_hijack_name`, `Manifest::parse` (`engine-undeclared`), `Manifest::lint(first_party)`, `Manifest::parse_and_lint`, `LoaderDecl`, `FoundationClaim`, `link_limits`, `link_digest` (0.5.1), `KEEP_EXTENSIONS` |
 | install and restore | `restore_game_files`, `UninstallReport::{kept_reasons, warnings}`, `KEPT_FOLDER_GAINED_FILES`, `Ledger::{provenance, descriptor_sha256, proxy_folders}`, `LEDGER_SCHEMA` 4 (`restored`) |
 | Steam | `store_categories`, `store_categories_of`, `online_game`, `online_codes`, `ONLINE_CATEGORIES`, `VAC_CATEGORY` |
 | reserved names | `reserved` (one list, held to the spec's `reserved.yaml`, canary K13): `PROFILE_FILE_NAMES`, `INTEGRATION_ID_PREFIXES` (`astra.`, `minice.`), `INTEGRATION_NAME_SUBSTRINGS`, `INTEGRATION_RESERVED_KEYS` (`uses`), `engine_codes`, `id_is_reserved`, `integration_name_is_reserved`, `profile_name_is_reserved`, `check_identity`; `is_reserved_code`, `is_valid_engine_code` |
@@ -491,7 +491,11 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
      `community-limit`) — `--provenance first-party` skips these —, `${bridge_token}` only with
      `[integration.capabilities] companion = ["presentation"]` (`capability-undeclared`), Astra
      Link v1's counts, names and lengths (`link-invalid`), and `[integration.engine]` a
-     descriptor Pass B admits;
+     descriptor Pass B admits. The report's `link.digest` is the link's consent digest
+     (`link_digest`: SHA-256 of the RFC 8785 JCS of `[integration.link]` exactly as written, no
+     default added; AstraPlugins `manifest.md` §2.6.1, PR #134), `link` itself `null` with no
+     table; a number, float or datetime in the table is no digest and
+     `link-invalid{reason=not-digestable}`;
   3. every file `[integration.link]` names is in the zip (schemas ≤4 KiB, the skill ≤16 KiB);
      holding the schemas to `link-v1.md` §6's restricted profile waits for `link-v1` to freeze;
   4. the descriptor claims none of the spec's negative folders (as `validate-descriptor`);

@@ -15,8 +15,11 @@
 //!    is skipped, and says so;
 //! 2. [`Manifest::lint`]: a community integration's identity (`reserved-id`, `reserved-name`),
 //!    `capability-undeclared`, Astra Link v1's counts, names and lengths (`link-invalid`), the
-//!    foundation claim's keys, `[integration.engine]` and Pass B's admission of it, and
-//!    everything wrong inside `[integration.engine.mods]` (`mods-invalid{field, reason}`, spec
+//!    link's consent digest (`link.digest`: [`astra_game_launcher::link_digest`], spec
+//!    `manifest.md` §2.6.1 as AstraPlugins PR #134 writes it; a table it cannot digest is
+//!    `link-invalid{reason=not-digestable}`, and the digest `null`), the foundation claim's keys,
+//!    `[integration.engine]` and Pass B's admission of it, and everything wrong inside
+//!    `[integration.engine.mods]` (`mods-invalid{field, reason}`, spec
 //!    `engine-descriptor-v1.md` §7.9: refused here as at ingest, dropped alone by a client) —
 //!    with `--provenance first-party`, Astra's own ids and names and the first-party grammar are
 //!    allowed. When the manifest does not parse, `[integration.engine]` is still asked;
@@ -71,7 +74,7 @@ use std::path::{Path, PathBuf};
 
 use astra_game_launcher::{
     GiPackage, HIJACK_NAMES, LauncherError, Limits, MANIFEST_FILE, Manifest, PlacedFile, codes,
-    is_hijack_name, link_limits,
+    is_hijack_name, link_digest, link_limits,
 };
 use serde_json::{Value, json};
 use zip::ZipArchive;
@@ -251,12 +254,19 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
         .is_some_and(|e| e.code == codes::ZIP_INCONSISTENT);
     let unread = |why: &'static str| if two_archives { TWO_ARCHIVES } else { why };
 
+    // `[integration.link]`'s consent digest (spec `manifest.md` §2.6.1): the report's
+    // `link.digest`. A table it cannot digest is step 2's finding: never a release without one.
+    let digest = manifest.as_ref().map(|m| link_digest(m.link()));
+
     // 2. Lint.
     match &parsed {
         None => p.skip(2, unread("the zip holds no readable astra-gi.toml")),
         Some((_, lint)) => {
             let (f0, n0) = (p.findings.len(), p.notices.len());
             for e in lint {
+                p.finding(2, refusal(e));
+            }
+            if let Some(Err(e)) = &digest {
                 p.finding(2, refusal(e));
             }
             p.close(2, f0, n0, Value::Null);
@@ -273,6 +283,10 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
         && m.link().is_some()
     {
         link = json!({
+            "digest": match &digest {
+                Some(Ok(Some(d))) => Value::String(d.clone()),
+                _ => Value::Null,
+            },
             "files": link_files.len(),
             "schemas_validated": false,
             "why": "validating params/data schemas against link-v1.md §6's restricted profile waits for link-v1 to freeze",

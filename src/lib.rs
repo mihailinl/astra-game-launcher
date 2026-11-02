@@ -79,7 +79,7 @@ pub use ledger::{
 pub use manifest::{
     BRIDGE_TOKEN_VARIABLE, COMPANION_PRESENTATION, ConfigWrite, FileRule, FoundationClaim,
     GameFileRule, IntegrationInfo, KEEP_EXTENSIONS, Launch, LoaderDecl, MANIFEST_FILE, Manifest,
-    SCHEMA, Target, link_limits, wine_dll_overrides,
+    SCHEMA, Target, link_digest, link_limits, wine_dll_overrides,
 };
 pub use mods::{
     ArmedBy, Choice, ChoiceKind, ChoiceSource, Coexistence, LOADER_STATUS_FILE_NAME, LastRun,

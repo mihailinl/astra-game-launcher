@@ -100,7 +100,7 @@ fn own(path: &str) -> bool {
 }
 
 /// What git names an object of `kind` holding `data`: SHA-1 of `<kind> <len>\0<data>`.
-fn git_id(kind: &str, data: &[u8]) -> String {
+pub fn git_id(kind: &str, data: &[u8]) -> String {
     let mut framed = format!("{kind} {}\0", data.len()).into_bytes();
     framed.extend_from_slice(data);
     hex::encode(sha1(&framed))

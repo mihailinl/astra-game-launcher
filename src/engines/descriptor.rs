@@ -78,6 +78,7 @@ use sha2::{Digest, Sha256};
 use super::EngineCode;
 use super::mods::{Mods, ModsFinding};
 use crate::detect::{Confidence, Engine, is_wrapper_name};
+use crate::digest::jcs;
 use crate::error::{LauncherError, Result, codes};
 use crate::paths::check_component;
 
@@ -584,59 +585,6 @@ fn toml_to_json(v: &toml::Value, path: &str) -> Result<Value> {
                 .collect::<Result<_>>()?,
         ),
     })
-}
-
-/// RFC 8785 (JCS) for a value [`check_value`] accepts: object keys sorted by their UTF-16 code
-/// units, no whitespace, integers in decimal, strings with only `"`, `\` and controls escaped.
-pub(crate) fn jcs(v: &Value, out: &mut String) {
-    match v {
-        Value::Null => out.push_str("null"),
-        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-        Value::Number(n) => out.push_str(&n.to_string()),
-        Value::String(s) => jcs_string(s, out),
-        Value::Array(a) => {
-            out.push('[');
-            for (i, v) in a.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                jcs(v, out);
-            }
-            out.push(']');
-        }
-        Value::Object(o) => {
-            let mut keys: Vec<&String> = o.keys().collect();
-            keys.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
-            out.push('{');
-            for (i, k) in keys.into_iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                jcs_string(k, out);
-                out.push(':');
-                jcs(&o[k], out);
-            }
-            out.push('}');
-        }
-    }
-}
-
-fn jcs_string(s: &str, out: &mut String) {
-    out.push('"');
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
 }
 
 // ---- The schema, as serde reads it. Every struct denies unknown fields. ----
@@ -2645,32 +2593,6 @@ impl Descriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// RFC 8785 sorts keys by UTF-16 code units: U+10000 (a surrogate pair, D800 DC00) before
-    /// U+E000, the other way round from UTF-8 and from a `BTreeMap<String, _>`.
-    #[test]
-    fn jcs_sorts_object_keys_by_utf16() {
-        let v: Value = serde_json::from_str(
-            r#"{"b":1,"\ue000":2,"\ud800\udc00":3,"a":[true,"x\u0001\"\\"],"B":{"z":0,"y":-5}}"#,
-        )
-        .unwrap();
-        let mut out = String::new();
-        jcs(&v, &mut out);
-        assert_eq!(
-            out,
-            "{\"B\":{\"y\":-5,\"z\":0},\"a\":[true,\"x\\u0001\\\"\\\\\"],\"b\":1,\"\u{10000}\":3,\"\u{e000}\":2}"
-        );
-    }
-
-    /// RFC 8785 §3.2.2.2: a control with no short escape is `\u` and four LOWER-case hex digits;
-    /// DEL and everything past it are written as themselves.
-    #[test]
-    fn jcs_writes_controls_in_lower_case_hex() {
-        let v = Value::String("\u{000b}\u{001f}\u{001e}\u{007f}\u{0080}".into());
-        let mut out = String::new();
-        jcs(&v, &mut out);
-        assert_eq!(out, "\"\\u000b\\u001f\\u001e\u{7f}\u{80}\"");
-    }
 
     /// A `mods` table that would change answers were it read: it spells the descriptor's own
     /// grammar (a code, a rule claiming every program, the walk's depth bound). It is refused
