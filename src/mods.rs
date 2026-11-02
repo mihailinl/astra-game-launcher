@@ -551,6 +551,7 @@ fn other_bepinex_at(root: &Path, b: &Budget) -> Option<ModLoader> {
         b.bytes(len)
             .then(|| version::version_string_of_file(&p, "ProductVersion"))
             .flatten()
+            .and_then(|v| crate::engines::mods::printable(&v))
     });
     Some(ModLoader {
         kind,

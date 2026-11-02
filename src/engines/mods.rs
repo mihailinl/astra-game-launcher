@@ -49,6 +49,8 @@ use crate::plan::HIJACK_NAMES;
 mod eval;
 mod pe;
 
+pub(crate) use pe::printable;
+
 pub use eval::{
     Bound, Evaluation, LoaderOutcome, Meter, Mod, Recognised, Sources, Strategy, evaluate,
     evaluate_one, evaluate_one_within,

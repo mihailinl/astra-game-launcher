@@ -13,7 +13,8 @@
 //! `u16 wLength, u16 wValueLength, u16 wType, WCHAR szKey[]` (NUL-terminated), padding to a
 //! 32-bit boundary, the value, padding, then its children. A `String`'s value is read up to its
 //! NUL or its block's end, whichever is first, whatever its `wValueLength` counts (writers
-//! disagree: characters or bytes).
+//! disagree: characters or bytes). A value longer than [`MAX_VALUE_UNITS`] is no version (unknown,
+//! as launcher 0.5.0 read it); what is shown of one has no control character ([`printable`]).
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -25,6 +26,17 @@ const RT_VERSION: u32 = 16;
 /// Sections and resource-directory entries read at most (a real DLL has a handful of each).
 const MAX_SECTIONS: usize = 96;
 const MAX_DIR_ENTRIES: usize = 128;
+/// More than any version string (launcher 0.5.0's `src/mods/version.rs` bound): a longer value is
+/// none. A mod's DLL is downloaded content, and its value reaches the player's screen.
+pub(crate) const MAX_VALUE_UNITS: usize = 512;
+
+/// What is shown of a value read from a player's file: its control characters (C0, DEL, C1: a
+/// terminal escape, a line break) dropped. `None` when nothing is left.
+pub(crate) fn printable(value: &str) -> Option<String> {
+    let v: String = value.chars().filter(|c| !c.is_control()).collect();
+    let v = v.trim();
+    (!v.is_empty()).then(|| v.to_owned())
+}
 
 /// Reads at offsets of one open file, every byte counted against `budget`.
 pub(crate) struct Counted {
@@ -230,7 +242,7 @@ fn children<'b>(b: &'b [u8], parent: &Block<'_>) -> Vec<Block<'b>> {
 }
 
 /// The value of the first `String` named `key` in `data`'s `StringFileInfo`, trimmed; `None`
-/// when there is none, or it is empty.
+/// when there is none, it is empty, or it is longer than [`MAX_VALUE_UNITS`].
 fn string_value(data: &[u8], key: &str) -> Option<String> {
     let root = block(data, 0)?;
     if root.key != "VS_VERSION_INFO" {
@@ -254,6 +266,9 @@ fn string_value(data: &[u8], key: &str) -> Option<String> {
                     .take(s.value_units)
                     .take_while(|u| *u != 0)
                     .collect();
+                if units.len() > MAX_VALUE_UNITS {
+                    return None;
+                }
                 let v = String::from_utf16(&units).ok()?;
                 let v = v.trim();
                 return (!v.is_empty()).then(|| v.to_owned());

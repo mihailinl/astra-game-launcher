@@ -105,11 +105,12 @@ pub struct Recognised {
     pub id: String,
     pub name: String,
     /// The version its `version` probe read (the value of the first key whose value reads in
-    /// the template), `None` when unknown or not asked.
+    /// the template), its control characters dropped; `None` when unknown or not asked.
     pub version: Option<String>,
     /// What the same probe found as written, for the player to read: the value of the first key
     /// that has one, whether or not it reads in the template (`6.0.0-dev+3a12d18`, which is no
-    /// `-be.N` build). Never what decides support: that is [`Recognised::version`].
+    /// `-be.N` build), its control characters dropped. Never what decides support: that is
+    /// [`Recognised::version`].
     pub written: Option<String>,
     /// Whether its `versions` hold (`true` when it declares none). Recognised but unsupported:
     /// the player is told which loader was found and what Astra needs ([`Recognised::need`]),
@@ -643,7 +644,7 @@ impl Ctx<'_> {
                 });
             }
             let strings: Vec<String> = strings.into_iter().flatten().flatten().collect();
-            written = strings.first().cloned();
+            written = strings.first().and_then(|s| pe::printable(s));
             read = strings
                 .into_iter()
                 .find_map(|s| v.template.read(&s).map(|(runs, _)| (s, runs)));
@@ -653,7 +654,11 @@ impl Ctx<'_> {
             (Some(want), Some((_, runs))) => want.holds(runs),
             (Some(_), None) => false,
         };
-        Ok((read.map(|(s, _)| s), written, supported))
+        Ok((
+            read.and_then(|(s, _)| pe::printable(&s)),
+            written,
+            supported,
+        ))
     }
 
     /// The loader's root as found (its components below the source), and the mods in it, each
@@ -1070,11 +1075,15 @@ mod tests {
             .collect();
         let mods = mods_of(&three);
         let root = tmp("eval-bytes");
-        let value = format!("3.0.1 {}", "x".repeat(15_000));
+        // A resource of 30 KB: a long string no probe asks for, and a short version.
+        let comments = "x".repeat(15_000);
         put(
             &root,
             "Pal/bin/ue4ss/UE4SS.dll",
-            &pe::build::pe(&[("ProductVersion", value.as_str())], 0),
+            &pe::build::pe(
+                &[("Comments", comments.as_str()), ("ProductVersion", "3.0.1")],
+                0,
+            ),
         );
         let mut list = String::new();
         let mut i = 0;
@@ -1162,6 +1171,48 @@ mod tests {
                 ..
             }]
         ));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_version_longer_than_any_is_unknown_and_none_is_shown_with_a_control_character() {
+        let mods = mods_of(UE);
+        let root = tmp("versiontext");
+        let b = Bindings::new().with("project", "Pal");
+        let at = |strings: &[(&str, &str)]| {
+            put(&root, "Pal/bin/ue4ss/UE4SS.dll", &pe::build::pe(strings, 0));
+            match &game(&mods, &root, &b)[..] {
+                [LoaderOutcome::Recognised(r)] => {
+                    (r.version.clone(), r.written.clone(), r.supported)
+                }
+                other => panic!("{other:?}"),
+            }
+        };
+        // 512 characters: read. 513: no value, so unknown (launcher 0.5.0's bound).
+        let longest = format!("3.0.1 {}", "x".repeat(506));
+        assert_eq!(longest.len(), pe::MAX_VALUE_UNITS);
+        assert_eq!(
+            at(&[("ProductVersion", longest.as_str())]),
+            (Some(longest.clone()), Some(longest.clone()), true)
+        );
+        let long = format!("{longest}x");
+        assert_eq!(
+            at(&[("ProductVersion", long.as_str())]),
+            (None, None, false)
+        );
+        // A terminal escape, a line break: never shown, and never what decides.
+        assert_eq!(
+            at(&[("ProductVersion", "3.0.1\u{1b}[2J\r\nok")]),
+            (
+                Some("3.0.1[2Jok".to_owned()),
+                Some("3.0.1[2Jok".to_owned()),
+                true
+            )
+        );
+        assert_eq!(
+            at(&[("ProductVersion", "\u{7}\u{9b}")]),
+            (None, None, false)
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
