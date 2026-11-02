@@ -311,7 +311,7 @@ restore_game_files(&profile_dir, &game)?;                // a withdrawn integrat
 | what | items |
 |---|---|
 | detection | `detect_with_engines`, `EngineSet` (`build`, `empty`, `with_anti_cheat_markers`, `skipped`, `descriptors`, `engine_name`), `Descriptor` (`from_json`, `from_toml`, `digest`, `canonical_json`, `codes`, `check_pass_b`), `Origin`, `Moderation`, `AntiCheatMarker`, `AntiCheatMarkerKind`, `EngineCode`, `Detection::{version, engine_candidates, descriptor_sha256, open_to_descriptors, is_ambiguous}`, `ANTI_CHEAT_SIGNATURES`, `ANTI_CHEAT_CODES`, `engines::BUILTIN` |
-| planning | `plan_install_in(pkg, game, profile, &EngineSet, Provenance, pick)`, `Provenance::{FirstParty, Community}`, `InstallPlan::{engine_descriptor, provenance}` (`PinnedDescriptor`), `HIJACK_NAMES`, `is_hijack_name`, `Manifest::parse` (`engine-undeclared`), `Manifest::lint(first_party)`, `Manifest::parse_and_lint`, `LoaderDecl`, `FoundationClaim`, `link_limits`, `link_digest` (0.5.1), `KEEP_EXTENSIONS` |
+| planning | `plan_install_in(pkg, game, profile, &EngineSet, Provenance, pick)`, `Provenance::{FirstParty, Community}`, `InstallPlan::{engine_descriptor, provenance}` (`PinnedDescriptor`), `HIJACK_NAMES`, `is_hijack_name`, `Manifest::parse` (`engine-undeclared`), `Manifest::lint(first_party)`, `Manifest::parse_and_lint`, `LoaderDecl`, `FoundationClaim`, `link_limits`, `link_digest` (0.5.1), `toml_newlines` (0.5.1: a TOML text as a digest reads it, CRLF as LF), `KEEP_EXTENSIONS` |
 | install and restore | `restore_game_files`, `UninstallReport::{kept_reasons, warnings}`, `KEPT_FOLDER_GAINED_FILES`, `Ledger::{provenance, descriptor_sha256, proxy_folders}`, `LEDGER_SCHEMA` 4 (`restored`) |
 | Steam | `store_categories`, `store_categories_of`, `online_game`, `online_codes`, `ONLINE_CATEGORIES`, `VAC_CATEGORY` |
 | reserved names | `reserved` (one list, held to the spec's `reserved.yaml`, canary K13): `PROFILE_FILE_NAMES`, `INTEGRATION_ID_PREFIXES` (`astra.`, `minice.`), `INTEGRATION_NAME_SUBSTRINGS`, `INTEGRATION_RESERVED_KEYS` (`uses`), `engine_codes`, `id_is_reserved`, `integration_name_is_reserved`, `profile_name_is_reserved`, `check_identity`; `is_reserved_code`, `is_valid_engine_code` |
@@ -485,7 +485,11 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
   1. the launcher opens the zip (one archive to every reader, its hygiene, the manifest, every
      file it names, no reserved profile name placed — `src/reserved.rs`, the one list, canary
      K13). A zip refused as two archives (`zip-inconsistent`) is read no further: no later step
-     reads anything out of it, and each says so;
+     reads anything out of it, and each says so. The manifest is TOML 1.0, as the specification
+     parses it (`manifest.md` §2.6.1; the launcher's own `toml` reads TOML 1.1): one that uses
+     TOML 1.1 (`\e`, `\xHH`, newlines or a trailing comma in an inline table, a time without
+     seconds) or starts with a byte-order mark is `manifest-invalid{reason=toml-1.0}`, and the
+     report's digests are `null` — ingest computes none;
   2. `Manifest::lint`: a community release's id and name are not Astra's own (`reserved-id`,
      `reserved-name`) and what it may place and launch (`loader-undeclared`, K18;
      `community-limit`) — `--provenance first-party` skips these —, `${bridge_token}` only with
@@ -495,7 +499,10 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
      (`link_digest`: SHA-256 of the RFC 8785 JCS of `[integration.link]` exactly as written, no
      default added; AstraPlugins `manifest.md` §2.6.1, PR #134), `link` itself `null` with no
      table; a number, float or datetime in the table is no digest and
-     `link-invalid{reason=not-digestable}`;
+     `link-invalid{reason=not-digestable}`. A raw CRLF inside a multi-line string is LF in it,
+     as the spec's reference (`tomllib`) reads it: a release checked out with CRLF has the LF
+     file's digest (`toml_newlines`, which `Manifest::parse` and `Descriptor::from_toml` read
+     through);
   3. every file `[integration.link]` names is in the zip (schemas ≤4 KiB, the skill ≤16 KiB);
      holding the schemas to `link-v1.md` §6's restricted profile waits for `link-v1` to freeze;
   4. the descriptor claims none of the spec's negative folders (as `validate-descriptor`);
@@ -533,7 +540,9 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
   the folder (below) is laid below `TMPDIR` and detected with the descriptor alone, with no hint
   and with the recording's own: claiming recordings labelled with two or more engines is
   `descriptor-too-broad`, `reason=two-engines` (`unknown` names no engine). The report gives its
-  digest, `sha256(JCS(descriptor))`. Its `mods` (the player's own mod loaders, spec §7; see
+  digest, `sha256(JCS(descriptor))`, a raw CRLF read as LF as in `check`; TOML that is not TOML
+  1.0 (as in `check`) is `descriptor-invalid{reason=toml-1.0}` at step 1, its digest `null`. Its
+  `mods` (the player's own mod loaders, spec §7; see
   [`docs/ENGINE-DESCRIPTOR.md`](docs/ENGINE-DESCRIPTOR.md)) is judged at step 1: everything
   wrong inside it is a finding, `mods-invalid` with its `field` (`mods.loader[1].root`) and the
   spec's `reason` (§7.9), as ingest refuses it, while steps 2 to 4 judge the rest as without it;

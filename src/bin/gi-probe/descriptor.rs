@@ -7,7 +7,10 @@
 //! parses may still be refused before it ever reaches a moderator:
 //!
 //! 1. it parses as `astra.engine/1` ([`Descriptor`]'s refusals: an unknown schema or key, a
-//!    float, one over its size);
+//!    float, one over its size); TOML is TOML 1.0, as the specification parses it: one the
+//!    launcher reads that uses TOML 1.1 or starts with a byte-order mark is
+//!    `descriptor-invalid{reason=toml-1.0}` ([`crate::toml10`]), and its digest `null`. A raw
+//!    CRLF is read as LF, as the specification's reference reads it;
 //! 2. Pass B admits it ([`Descriptor::check_pass_b`]): no reserved code or name, the first-party
 //!    parts of the grammar only with `--first-party`, and every rule anchored on a literal name
 //!    that is no program, wrapper, ubiquitous runtime or generic name
@@ -46,12 +49,13 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use astra_game_launcher::{
-    Descriptor, Detection, EngineSet, LauncherError, Moderation, Origin, codes, detect_with_engines,
+    Descriptor, Detection, EngineSet, LauncherError, Moderation, Origin, codes,
+    detect_with_engines, toml_newlines,
 };
 use serde_json::{Value, json};
 
 use crate::replay::{self, Recording};
-use crate::{Fatal, Finding, Scratch, report};
+use crate::{Fatal, Finding, Scratch, report, toml10};
 
 /// The AstraPlugins commit whose `spec/games/` this probe follows (PR #117), and whose goldens
 /// `tests/goldens/astraplugins/` holds: read from that copy's `PIN`, so a re-pin is
@@ -265,8 +269,9 @@ fn parse(text: &str) -> (Input, astra_game_launcher::Result<Descriptor>) {
     if text.trim_start().starts_with('{') {
         return (Input::Json, Descriptor::from_json(text.as_bytes()));
     }
-    // A foundation's manifest (schema 1, an integer) holds it as [integration.engine].
-    if let Ok(t) = toml::from_str::<toml::Table>(text)
+    // A foundation's manifest (schema 1, an integer) holds it as [integration.engine], read as
+    // `Manifest::parse` reads it (a raw CRLF as LF), as `Descriptor::from_toml` reads the rest.
+    if let Ok(t) = toml::from_str::<toml::Table>(&toml_newlines(text))
         && matches!(t.get("schema"), Some(toml::Value::Integer(_)))
     {
         let engine = t.get("integration").and_then(|i| i.get("engine")).cloned();
@@ -517,6 +522,19 @@ pub fn run(
     let text = String::from_utf8(bytes).map_err(|_| Fatal::io(file, "not UTF-8"))?;
     let (input, parsed) = parse(&text);
     let mut findings = Vec::new();
+    // TOML 1.0, as the specification parses a descriptor (`toml10`): one the launcher reads and
+    // ingest does not is refused there, and has no digest there.
+    let not_toml_1_0 = match input {
+        Input::Json => None,
+        Input::Toml | Input::Manifest => toml10::refusal(&text),
+    };
+    if let Some(detail) = &not_toml_1_0 {
+        let e = LauncherError::new(codes::DESCRIPTOR_INVALID)
+            .with("field", "")
+            .with("reason", "toml-1.0")
+            .with("detail", detail.clone());
+        findings.push(refusal(&e, "not TOML 1.0, which the specification reads").step(1));
+    }
     // None at this version: kept so a report keeps one shape.
     let notices: Vec<Finding> = Vec::new();
     let mut folders = Vec::new();
@@ -526,6 +544,9 @@ pub fn run(
         Err(e) => findings.push(refusal(&e, "not an astra.engine/1 descriptor").step(1)),
         Ok(d) => {
             descriptor = summary(&d);
+            if not_toml_1_0.is_some() {
+                descriptor["sha256"] = Value::Null;
+            }
             findings.extend(mods_findings(&d).into_iter().map(|f| f.step(1)));
             if let Err(e) = d.check_pass_b(first_party) {
                 findings.push(refusal(&e, "Pass B does not admit this descriptor").step(2));

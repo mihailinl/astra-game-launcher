@@ -34,7 +34,7 @@ cli = ["dep:ureq"]
 # `gi-probe` links launcher 0.3.1 (what Astra 0.2.7 ships) as a normal dependency, so it is never
 # a default: the daemon and the CLI never build 0.3.1 (`cargo tree -e normal --no-default-features`
 # names no 9aa7874). `toml/display` rewrites a manifest without its `[integration.*]` tables.
-gi-probe = ["dep:launcher_031", "dep:semver", "toml/display"]
+gi-probe = ["dep:launcher_031", "dep:semver", "dep:toml_edit", "toml/display"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -60,6 +60,12 @@ ureq = { version = "3", optional = true, default-features = false, features = ["
 launcher_031 = { package = "astra-game-launcher", git = "https://github.com/mihailinl/astra-game-launcher", rev = "9aa7874b60f6b10bd67411b7aad40fcc968b78bc", default-features = false, optional = true }
 # gi-probe only: Astra 0.2.7's tag rule (`releases::version_after`) is semver's.
 semver = { version = "1", optional = true }
+# gi-probe only: TOML 1.0, what the specification parses a manifest and a descriptor as
+# (AstraPlugins `manifest.md` §2.6.1), beside `toml`, which reads TOML 1.1 (`gi-probe`'s
+# `toml10`). 0.22 is the last toml_edit with a parser of its own: 0.23 parses through
+# `toml_parser`, whose 1.1 releases read TOML 1.1 in the same semver range. `unbounded`: no
+# nesting limit of its own; it reads only a text `toml` has read, so 80 deep at most.
+toml_edit = { version = "0.22.27", default-features = false, features = ["parse", "unbounded"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 # O_NOFOLLOW / O_NONBLOCK for reading a play-arm that may have been swapped for a link or a FIFO.

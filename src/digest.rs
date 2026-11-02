@@ -2,8 +2,10 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! SHA-256 helpers, and RFC 8785 (JCS): the canonical JSON a digest of a JSON value is of.
+//! SHA-256 helpers, RFC 8785 (JCS): the canonical JSON a digest of a JSON value is of, and the
+//! one reading of a TOML text's newlines a digest of what is parsed out of it needs.
 
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
@@ -34,6 +36,27 @@ pub(crate) fn sha256_file(path: &Path) -> io::Result<String> {
 pub(crate) fn normalize_hex(s: &str) -> Option<String> {
     let s = s.trim();
     (s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())).then(|| s.to_ascii_lowercase())
+}
+
+/// A TOML text as a digest of what is parsed out of it reads it: every raw CRLF made LF before
+/// the parse. [`crate::Manifest::parse`] (so [`crate::link_digest`] and `[integration.engine]`'s
+/// digest) and [`crate::Descriptor::from_toml`] parse this, and any other reader whose values
+/// reach a digest must too.
+///
+/// TOML 1.0 leaves a newline inside a multi-line string to the parser, and git's `autocrlf`
+/// checks a release's `astra-gi.toml` out with CRLF on Windows. The `toml` crate keeps the CRLF
+/// in the string; the specification's reference (Python's `tomllib`, AstraPlugins
+/// `tools/check-games-goldens.py`) reads it as LF, because it replaces every CRLF of the text
+/// before it parses — this is that replacement. Without it the same shipped bytes were two
+/// consent digests, the catalogue's and the launcher's (`manifest.md` §2.6.1). A raw CR is legal
+/// in TOML only before an LF, so only raw newlines change: `\r\n` written as escapes keeps its
+/// CR, and a lone CR is still the parse's refusal.
+pub fn toml_newlines(text: &str) -> Cow<'_, str> {
+    if text.contains("\r\n") {
+        Cow::Owned(text.replace("\r\n", "\n"))
+    } else {
+        Cow::Borrowed(text)
+    }
 }
 
 /// RFC 8785 (JCS), the one canonical JSON in this crate: an engine descriptor's (its digest,

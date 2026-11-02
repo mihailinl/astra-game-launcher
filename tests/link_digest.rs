@@ -18,10 +18,11 @@
 #[path = "common/spec_goldens.rs"]
 mod spec_goldens;
 
+use std::borrow::Cow;
 use std::fs;
 use std::path::Path;
 
-use astra_game_launcher::{LauncherError, Manifest, codes, link_digest};
+use astra_game_launcher::{LauncherError, Manifest, codes, link_digest, toml_newlines};
 
 /// AstraPlugins PR #134's head: the commit the vendored inputs are copied from.
 const PR_HEAD: &str = "7aaa37bb36d7f36662a2f88ef75c3dbafb3f3327";
@@ -232,4 +233,54 @@ fn a_number_float_or_datetime_is_refused_never_digested() {
         assert_eq!(e.params["reason"], "not-digestable", "{text}");
         assert_eq!(e.params["type"], ty, "{text}");
     }
+}
+
+/// A raw newline inside a multi-line string is LF in the digest, as the spec's reference reads it
+/// (`tomllib` replaces every CRLF of the text before it parses; the `toml` crate keeps it): a
+/// release checked out with git's `autocrlf` on Windows has the LF file's digest. A `\r` written
+/// as an escape keeps its CR either way. The game-specific-link vector, its tool's description
+/// rewritten; each expected digest is #134's reference (`tomllib` and `tools/contentlite.py`'s
+/// JCS) and JavaScript's JCS over the same parse.
+#[test]
+fn a_crlf_checkout_is_the_lf_files_digest() {
+    const LF_IN_THE_STRING: &str =
+        "24cc58cc7f228aecde0af2c009ba96b45b1dec8840010b9ce625c1398abc8de1";
+    const CRLF_IN_THE_STRING: &str =
+        "6980874cd460b6f7eb37b074eb03fcb8d22fabea552c8c6404444dc355b3052f";
+    let golden = String::from_utf8(fixture(VECTORS[0].file)).unwrap();
+    let line = "description = \"Drop the item the player holds\"";
+    assert_eq!(golden.matches(line).count(), 1);
+    assert!(!golden.contains('\r'));
+    for (spelling, want) in [
+        (
+            "description = \"\"\"\nDrop the item\nthe player holds\"\"\"",
+            LF_IN_THE_STRING,
+        ),
+        (
+            "description = '''\nDrop the item\nthe player holds'''",
+            LF_IN_THE_STRING,
+        ),
+        (
+            "description = \"Drop the item\\r\\nthe player holds\"",
+            CRLF_IN_THE_STRING,
+        ),
+        (
+            "description = \"\"\"\nDrop the item\\r\nthe player holds\"\"\"",
+            CRLF_IN_THE_STRING,
+        ),
+    ] {
+        let lf = golden.replace(line, spelling);
+        let crlf = lf.replace('\n', "\r\n");
+        for (newline, text) in [("LF", &lf), ("CRLF", &crlf)] {
+            let m = Manifest::parse(text).unwrap_or_else(|e| panic!("{newline} {spelling}: {e}"));
+            assert_eq!(
+                link_digest(m.link()).unwrap().as_deref(),
+                Some(want),
+                "{newline} {spelling}"
+            );
+        }
+    }
+    // Only a raw CRLF changes: a lone CR (the parse's own refusal) and escapes stay as they are.
+    assert_eq!(toml_newlines("a\r\nb\rc\\r\\n"), "a\nb\rc\\r\\n");
+    assert!(matches!(toml_newlines("a\nb"), Cow::Borrowed("a\nb")));
 }

@@ -1849,15 +1849,7 @@ fn validate_descriptor_passes_the_source2_descriptor() {
         .collect();
     assert_eq!(programs, ["Game.exe", "Game/bin/win64/Game.exe"], "{r:#}");
 
-    let manifest = format!(
-        "schema = 1\n\n[integration]\nid = \"community.source2\"\nname = \"Source 2\"\nversion = \"1.0.0\"\n\n{}\n[target]\nengine = \"source2\"\nexe = \"*\"\nplatforms = [\"windows-x64\"]\nanti_cheat = \"none\"\n",
-        SOURCE2
-            .replace(
-                "schema = \"astra.engine/1\"\nengine =",
-                "[integration.engine]\nschema = \"astra.engine/1\"\nengine ="
-            )
-            .replace("[[rule]]", "[[integration.engine.rule]]")
-    );
+    let manifest = source2_manifest(SOURCE2);
     let (exit, r) = validate(&tmp, "astra-gi.toml", &manifest, &[]);
     assert_eq!(exit, 0, "{r:#}");
     assert_eq!(r["input"]["kind"], "manifest-integration-engine");
@@ -1872,6 +1864,106 @@ fn validate_descriptor_passes_the_source2_descriptor() {
     assert_eq!(exit, 0, "{r:#}");
     assert_eq!(r["input"]["kind"], "descriptor-json");
     assert_eq!(r["descriptor"]["sha256"], digest);
+}
+
+/// [`SOURCE2`] as a foundation's `astra-gi.toml` (`community.source2`).
+fn source2_manifest(descriptor: &str) -> String {
+    format!(
+        "schema = 1\n\n[integration]\nid = \"community.source2\"\nname = \"Source 2\"\nversion = \"1.0.0\"\n\n{}\n[target]\nengine = \"source2\"\nexe = \"*\"\nplatforms = [\"windows-x64\"]\nanti_cheat = \"none\"\n",
+        descriptor
+            .replace(
+                "schema = \"astra.engine/1\"\nengine =",
+                "[integration.engine]\nschema = \"astra.engine/1\"\nengine ="
+            )
+            .replace("[[rule]]", "[[integration.engine.rule]]")
+    )
+}
+
+/// The descriptor as the spec reads it (`tomllib`). A raw CRLF is LF: a Windows checkout is the
+/// LF file's descriptor, with its digest, standalone and as a foundation's
+/// `[integration.engine]` (`validate-descriptor`; `check`, through `Manifest::parse`; the
+/// library), and that digest is `tomllib` + RFC 8785's (and JavaScript's JCS). Before, the CRLF
+/// file's `equals` was five bytes and refused. And a TOML text the launcher reads that is not
+/// TOML 1.0 is refused at step 1 (`descriptor-invalid{reason=toml-1.0}`; `check`'s
+/// `manifest-invalid`), its digest `null`; `tomllib` refuses it too.
+#[test]
+fn validate_descriptor_reads_the_descriptor_as_the_spec_does() {
+    const DIGEST: &str = "e4603c8d412ff32d5fc483083115b44a86c96f8d71cc3c2a2ef8e516c8928336";
+    let tmp = Tmp::new("validate-toml-1-0");
+    // A third anchor: the program's last four bytes, `S2\n!`, written as a multi-line string.
+    let anchor = "as = \"core\" } ]";
+    assert_eq!(SOURCE2.matches(anchor).count(), 1);
+    let tail = SOURCE2.replace(
+        anchor,
+        "as = \"core\" },\n            { tail = \"{program}\", bytes = 4, equals = \"\"\"\nS2\n!\"\"\", min_len = 12 } ]",
+    );
+    let manifest = source2_manifest(&tail);
+    for (name, crlf) in [("lf", false), ("crlf", true)] {
+        let newlines = |t: &str| {
+            if crlf {
+                t.replace('\n', "\r\n")
+            } else {
+                t.to_owned()
+            }
+        };
+        let text = newlines(&tail);
+        assert_eq!(
+            astra_game_launcher::Descriptor::from_toml(&text)
+                .unwrap()
+                .digest(),
+            DIGEST,
+            "{name}"
+        );
+        let (exit, r) = validate(&tmp, &format!("{name}.toml"), &text, &[]);
+        assert_eq!(exit, 0, "{name}: {r:#}");
+        assert_eq!(r["descriptor"]["sha256"], DIGEST, "{name}");
+        let dir = tmp.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        let (exit, r) = validate(
+            &tmp,
+            &format!("{name}/astra-gi.toml"),
+            &newlines(&manifest),
+            &[],
+        );
+        assert_eq!(exit, 0, "{name}: {r:#}");
+        assert_eq!(r["input"]["kind"], "manifest-integration-engine");
+        assert_eq!(r["descriptor"]["sha256"], DIGEST, "{name}");
+        let (_, r) = check(dir.join("astra-gi.toml").to_str().unwrap(), &[]);
+        assert_eq!(r["descriptor"]["sha256"], DIGEST, "{name}: {r:#}");
+    }
+
+    // TOML 1.1's trailing comma in an inline table: the launcher reads it, the spec does not.
+    let comma = SOURCE2.replace("kind = \"file\" }", "kind = \"file\", }");
+    assert_ne!(comma, SOURCE2);
+    let foundation = source2_manifest(&comma);
+    for (name, text, kind) in [
+        ("comma.toml", comma.as_str(), "descriptor-toml"),
+        (
+            "comma/astra-gi.toml",
+            foundation.as_str(),
+            "manifest-integration-engine",
+        ),
+    ] {
+        fs::create_dir_all(tmp.join("comma")).unwrap();
+        let (exit, r) = validate(&tmp, name, text, &[]);
+        assert_eq!(exit, 1, "{name}: {r:#}");
+        assert_eq!(r["input"]["kind"], kind);
+        assert_eq!(r["findings"].as_array().unwrap().len(), 1, "{name}: {r:#}");
+        let f = &r["findings"][0];
+        assert_eq!(f["code"], "descriptor-invalid", "{name}");
+        assert_eq!(f["params"]["reason"], "toml-1.0", "{name}");
+        assert_eq!(f["step"], 1, "{name}");
+        assert!(r["descriptor"]["sha256"].is_null(), "{name}: {r:#}");
+        assert_eq!(r["descriptor"]["codes"], json!({ "source2": "Source 2" }));
+    }
+    let (exit, r) = check(tmp.join("comma/astra-gi.toml").to_str().unwrap(), &[]);
+    assert_eq!(exit, 1, "{r:#}");
+    assert_eq!(r["findings"][0]["code"], "manifest-invalid", "{r:#}");
+    assert_eq!(r["findings"][0]["params"]["reason"], "toml-1.0", "{r:#}");
+    assert!(
+        r["descriptor"].is_object() && r["descriptor"]["sha256"].is_null(),
+        "{r:#}"
+    );
 }
 
 /// A valid `mods` for [`SOURCE2`] (the compat golden's loader, inline): a loader of its own,
@@ -2780,6 +2872,105 @@ fn check_reports_the_links_consent_digest() {
     assert_eq!(refused[0]["field"], "integration.link.context");
     assert_eq!(refused[0]["params"]["type"], "integer");
     assert_eq!(refused[0]["step"], 2);
+}
+
+/// `check` reads the manifest as the spec does (`manifest.md` §2.6.1 step 1, its reference
+/// `tomllib`): a raw CRLF is LF in the digest, so a Windows checkout reports the LF file's
+/// `link.digest`; and a text the launcher reads that is not TOML 1.0 is refused at step 1
+/// (`manifest-invalid{reason=toml-1.0}`) with no digest, since ingest computes none. Each
+/// variant of the vector's golden below is refused by `tomllib` (Python 3.14), and the CRLF one's
+/// digest is the reference's (`tests/link_digest.rs`).
+#[test]
+fn check_reads_the_manifest_as_the_spec_does() {
+    let tmp = Tmp::new("check-toml-1-0");
+    let golden = spec_goldens::golden_text("manifests/valid/game-specific-link.toml");
+    let put_text = |name: &str, text: &str| {
+        let file = tmp.join(name).join("astra-gi.toml");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, text).unwrap();
+        file.to_str().unwrap().to_owned()
+    };
+    let toml_1_0 = |r: &Value| -> Vec<Value> {
+        r["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["params"]["reason"] == "toml-1.0")
+            .cloned()
+            .collect()
+    };
+
+    let description = "description = \"Drop the item the player holds\"";
+    let multi_line = golden.replace(
+        description,
+        "description = \"\"\"\nDrop the item\nthe player holds\"\"\"",
+    );
+    for (name, text) in [
+        ("lf", multi_line.clone()),
+        ("crlf", multi_line.replace('\n', "\r\n")),
+    ] {
+        let (_, r) = check(&put_text(name, &text), &[]);
+        assert_eq!(
+            r["link"]["digest"], "24cc58cc7f228aecde0af2c009ba96b45b1dec8840010b9ce625c1398abc8de1",
+            "{name}: {r:#}"
+        );
+        assert!(toml_1_0(&r).is_empty(), "{name}: {r:#}");
+    }
+    let (_, r) = check(&put_text("golden", &golden), &[]);
+    assert!(toml_1_0(&r).is_empty(), "{r:#}");
+
+    let tool = "[[integration.link.tools]]\nname = \"drop_item\"\ndescription = \"Drop the item the player holds\"\nparams = \"astra/tools/drop_item.json\"\n";
+    assert_eq!(golden.matches(tool).count(), 1);
+    let inline = golden.replace(
+        tool,
+        "tools = [\n  {\n    name = \"drop_item\",\n    description = \"Drop the item the player holds\",\n    params = \"astra/tools/drop_item.json\",\n  },\n]\n",
+    );
+    let escaped = golden.replace("name = \"drop_item\"", "name = \"drop\\x5Fitem\"");
+    let line_of =
+        |text: &str, what: &str| text[..text.find(what).unwrap()].matches('\n').count() + 1;
+    for (name, text, line) in [
+        // TOML 1.1's newlines and trailing commas in an inline table: refused at its `{`.
+        (
+            "inline-table",
+            inline.clone(),
+            Some(line_of(&inline, "  {\n")),
+        ),
+        // TOML 1.1's `\xHH`: `drop_item` to the launcher, so the lint passes it.
+        (
+            "escape",
+            escaped.clone(),
+            Some(line_of(&escaped, "drop\\x5F")),
+        ),
+        ("bom", format!("\u{FEFF}{golden}"), None),
+    ] {
+        let (exit, r) = check(&put_text(name, &text), &[]);
+        assert_eq!(exit, 1, "{name}: {r:#}");
+        let refused = toml_1_0(&r);
+        assert_eq!(refused.len(), 1, "{name}: {r:#}");
+        assert_eq!(refused[0]["code"], "manifest-invalid", "{name}");
+        assert_eq!(refused[0]["step"], 1, "{name}");
+        let detail = refused[0]["params"]["detail"].as_str().unwrap();
+        match line {
+            Some(n) => assert!(
+                detail.starts_with(&format!("not TOML 1.0 (line {n})")),
+                "{name}: {detail}"
+            ),
+            None => assert!(detail.contains("byte-order mark"), "{name}: {detail}"),
+        }
+        assert!(
+            r["link"].is_object() && r["link"]["digest"].is_null(),
+            "{name}: {r:#}"
+        );
+        // Nothing else is refused for it: the launcher reads the text as the golden.
+        assert!(
+            r["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|f| f["step"] != 1 || f["params"]["reason"] == "toml-1.0"),
+            "{name}: {r:#}"
+        );
+    }
 }
 
 #[test]

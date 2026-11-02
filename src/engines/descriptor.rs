@@ -78,7 +78,7 @@ use sha2::{Digest, Sha256};
 use super::EngineCode;
 use super::mods::{Mods, ModsFinding};
 use crate::detect::{Confidence, Engine, is_wrapper_name};
-use crate::digest::jcs;
+use crate::digest::{jcs, toml_newlines};
 use crate::error::{LauncherError, Result, codes};
 use crate::paths::check_component;
 
@@ -2379,13 +2379,16 @@ impl Descriptor {
         Descriptor::from_value(v.clone())
     }
 
-    /// From TOML (a file, or `[integration.engine]` as text).
+    /// From TOML (a file, or `[integration.engine]` as text). Every raw CRLF is read as LF
+    /// ([`crate::toml_newlines`]), as [`crate::Manifest::parse`] reads the manifest that holds
+    /// one: a descriptor checked out with CRLF is the same descriptor, with the same digest.
     pub fn from_toml(text: &str) -> Result<Descriptor> {
         if text.len() > limits::INPUT_BYTES {
             return Err(LauncherError::new(codes::DESCRIPTOR_TOO_LARGE)
                 .with("bytes", text.len().to_string()));
         }
-        let table: toml::Table = toml::from_str(text).map_err(|e| invalid("", e.message()))?;
+        let table: toml::Table =
+            toml::from_str(&toml_newlines(text)).map_err(|e| invalid("", e.message()))?;
         Descriptor::from_toml_value(&toml::Value::Table(table))
     }
 

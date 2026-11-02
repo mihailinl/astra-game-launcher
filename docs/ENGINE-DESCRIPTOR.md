@@ -183,6 +183,11 @@ request to the specification to say the same.
 - **`strong-fallback`.** `passes` defaults to false.
 - **JCS.** A control character with no short escape is written as `\u` followed by four
   lower-case hex digits.
+- **TOML.** A descriptor in TOML is TOML 1.0, and a raw newline inside a multi-line string is
+  LF, CRLF included (`toml_newlines`; the reference, Python's `tomllib`, reads it so): a
+  descriptor checked out with CRLF has the LF file's digest. The launcher's parser reads TOML
+  1.1; `validate-descriptor` and `check` refuse what TOML 1.0 does not
+  (`descriptor-invalid{reason=toml-1.0}`, `manifest-invalid{reason=toml-1.0}`). Debt row 54.
 - **Lint codes.** `validate-descriptor` reports the launcher's own refusals:
   `descriptor-too-broad` with `reason` = `no-anchor`, `ubiquitous-runtime`, `program`, …, for
   what §5 calls `descriptor-anchor-invalid`, and `descriptor-too-broad` with `reason` =

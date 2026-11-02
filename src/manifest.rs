@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::content::{self, ContentPart};
 use crate::detect::Engine;
-use crate::digest::{jcs, normalize_hex, sha256_hex};
+use crate::digest::{jcs, normalize_hex, sha256_hex, toml_newlines};
 use crate::engines::{Descriptor, EngineCode};
 use crate::error::{LauncherError, Result, codes};
 use crate::mods::ModsDecl;
@@ -681,7 +681,12 @@ pub(crate) fn from_pattern(from: &str, key: &str) -> Result<FromPattern> {
 
 impl Manifest {
     /// Reads and checks a manifest. Every refusal carries a code.
+    ///
+    /// Every raw CRLF of `text` is read as LF ([`toml_newlines`]): a release checked out with
+    /// CRLF is the same manifest, with the same digests, as the LF file.
     pub fn parse(text: &str) -> Result<Manifest> {
+        let text = toml_newlines(text);
+        let text: &str = &text;
         let table: toml::Table =
             toml::from_str(text).map_err(|e| invalid("", e.message().to_owned()))?;
 
@@ -901,7 +906,7 @@ impl Manifest {
                 (Ok(m), lint)
             }
             Err(e) => {
-                let raw = toml::from_str::<toml::Table>(text)
+                let raw = toml::from_str::<toml::Table>(&toml_newlines(text))
                     .ok()
                     .and_then(|t| t.get("integration")?.get("engine").cloned());
                 let lint = match raw.map(|v| Descriptor::from_toml_value(&v)) {
@@ -1238,7 +1243,9 @@ fn lint_link(link: &toml::Value, out: &mut Vec<LauncherError>) {
 /// `[integration.link]`'s consent digest: what a catalogue entry carries as `link.digest`, and a
 /// client asks the player to consent again when it changes (AstraPlugins `spec/games/manifest.md`
 /// §2.6.1, PR #134). Pass [`Manifest::link`]; `None` (no table) is `None`, the entry's
-/// `link: null`.
+/// `link: null`. A table parsed some other way must have been parsed from [`toml_newlines`]'
+/// text: a raw CRLF inside a multi-line string is LF in the digest, as the spec's reference
+/// reads it.
 ///
 /// The table exactly as parsed, **no default added**: a key it leaves out (`skill`, `tools`,
 /// `triggers`, `events`) is absent from what is hashed, never `false`, `[]` or `null`, so writing

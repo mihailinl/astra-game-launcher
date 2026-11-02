@@ -12,11 +12,15 @@
 //!    profile name placed, a `**` expansion included). Given a bare `astra-gi.toml` instead of a
 //!    zip, only [`Manifest::parse`]; the zip's checks are said not to be made. A zip refused as
 //!    two archives (`zip-inconsistent`) is read no further: every later step that would read it
-//!    is skipped, and says so;
+//!    is skipped, and says so. The manifest is TOML 1.0, as the specification parses it
+//!    (`manifest.md` §2.6.1): one the launcher reads that uses TOML 1.1 or starts with a
+//!    byte-order mark is `manifest-invalid{reason=toml-1.0}` ([`crate::toml10`]), and the
+//!    report's digests (`link.digest`, `descriptor.sha256`) `null`;
 //! 2. [`Manifest::lint`]: a community integration's identity (`reserved-id`, `reserved-name`),
 //!    `capability-undeclared`, Astra Link v1's counts, names and lengths (`link-invalid`), the
 //!    link's consent digest (`link.digest`: [`astra_game_launcher::link_digest`], spec
-//!    `manifest.md` §2.6.1 as AstraPlugins PR #134 writes it; a table it cannot digest is
+//!    `manifest.md` §2.6.1 as AstraPlugins PR #134 writes it, a raw CRLF read as LF as its
+//!    reference reads it; a table it cannot digest is
 //!    `link-invalid{reason=not-digestable}`, and the digest `null`), the foundation claim's keys,
 //!    `[integration.engine]` and Pass B's admission of it, and everything wrong inside
 //!    `[integration.engine.mods]` (`mods-invalid{field, reason}`, spec
@@ -81,7 +85,7 @@ use zip::ZipArchive;
 
 use crate::compat::sha256_hex;
 use crate::descriptor::{negative_folders, summary};
-use crate::{Fatal, Finding, Probe, report};
+use crate::{Fatal, Finding, Probe, report, toml10};
 
 const STEPS: [&str; 8] = [
     "the launcher opens the zip and parses its manifest",
@@ -237,6 +241,17 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
     {
         p.finding(1, refusal(e));
     }
+    // TOML 1.0, as the specification parses the manifest (`manifest.md` §2.6.1 step 1): a text
+    // the launcher reads and ingest does not (`toml10`) is no release, and has no digest there.
+    let not_toml_1_0 = text.as_deref().and_then(toml10::refusal).map(|detail| {
+        LauncherError::new(codes::MANIFEST_INVALID)
+            .with("key", "")
+            .with("reason", "toml-1.0")
+            .with("detail", detail)
+    });
+    if let Some(e) = &not_toml_1_0 {
+        p.finding(1, refusal(e));
+    }
     p.close(
         1,
         0,
@@ -256,7 +271,11 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
 
     // `[integration.link]`'s consent digest (spec `manifest.md` §2.6.1): the report's
     // `link.digest`. A table it cannot digest is step 2's finding: never a release without one.
-    let digest = manifest.as_ref().map(|m| link_digest(m.link()));
+    // None of a text that is not TOML 1.0: ingest computes none.
+    let digest = match &not_toml_1_0 {
+        Some(_) => None,
+        None => manifest.as_ref().map(|m| link_digest(m.link())),
+    };
 
     // 2. Lint.
     match &parsed {
@@ -338,6 +357,10 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
         Some(Err(_)) => p.skip(4, "[integration.engine] is not a descriptor (step 2)"),
         Some(Ok(d)) => {
             descriptor = summary(d);
+            // Not TOML 1.0: ingest has no descriptor, so no digest, of it.
+            if not_toml_1_0.is_some() {
+                descriptor["sha256"] = Value::Null;
+            }
             match negative_folders(d, a.first_party)? {
                 Err(_) => p.skip(4, "Pass B does not admit the descriptor (step 2)"),
                 Ok((rows, claims)) => {

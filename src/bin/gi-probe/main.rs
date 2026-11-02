@@ -32,6 +32,7 @@ mod compat;
 mod descriptor;
 #[path = "../../../tests/corpus/replay.rs"]
 mod replay;
+mod toml10;
 mod trees;
 mod v027;
 

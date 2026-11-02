@@ -53,6 +53,7 @@ pub use detect::{
     ANTI_CHEAT_CODES, ANTI_CHEAT_SIGNATURES, AntiCheatSignature, Binary, Confidence, Detection,
     Engine, ExePick, SignatureName, detect, detect_with, detect_with_engines, unity_version_parts,
 };
+pub use digest::toml_newlines;
 pub use engines::{
     AntiCheatMarker, AntiCheatMarkerKind, Descriptor, EngineCode, EngineSet, Moderation, Origin,
     Skipped, is_reserved_code, is_valid_engine_code,
