@@ -8,9 +8,9 @@ reads the places the definition leaves open. It is not a second copy of the defi
 ## The definition
 
 The normative text is AstraPlugins'
-[`spec/games/engine-descriptor-v1.md`](https://github.com/mihailinl/AstraPlugins/blob/c07b3ad470daced3c1ae94ce7a309692c6ad16c7/spec/games/engine-descriptor-v1.md)
-at commit **`c07b3ad470daced3c1ae94ce7a309692c6ad16c7`**, with its schema,
-[`spec/games/schemas/engine-descriptor-v1.schema.json`](https://github.com/mihailinl/AstraPlugins/blob/c07b3ad470daced3c1ae94ce7a309692c6ad16c7/spec/games/schemas/engine-descriptor-v1.schema.json),
+[`spec/games/engine-descriptor-v1.md`](https://github.com/mihailinl/AstraPlugins/blob/db52804689bb7ed785c67cac9dc31b15da590477/spec/games/engine-descriptor-v1.md)
+at commit **`db52804689bb7ed785c67cac9dc31b15da590477`**, with its schema,
+[`spec/games/schemas/engine-descriptor-v1.schema.json`](https://github.com/mihailinl/AstraPlugins/blob/db52804689bb7ed785c67cac9dc31b15da590477/spec/games/schemas/engine-descriptor-v1.schema.json),
 and its goldens, `testdata/games/descriptors/`. That commit is the one in
 `tests/goldens/astraplugins/PIN`: the launcher's copy of the goldens is vendored from it, and
 `tests/goldens.rs` holds the commit named here equal to `PIN`. A re-pin
@@ -57,7 +57,7 @@ plans.
 ## Reserved for launcher 0.5.1: `mods`
 
 `mods` is the optional top-level member of `astra.engine/1` that the specification defines in
-[§7](https://github.com/mihailinl/AstraPlugins/blob/c07b3ad470daced3c1ae94ce7a309692c6ad16c7/spec/games/engine-descriptor-v1.md#7-mods-the-players-own-mod-loaders-optional)
+[§7](https://github.com/mihailinl/AstraPlugins/blob/db52804689bb7ed785c67cac9dc31b15da590477/spec/games/engine-descriptor-v1.md#7-mods-the-players-own-mod-loaders-optional)
 at the pin above, with `$defs/mods` in its schema: how the player's own mod loader is
 recognised, where its mods are, which of them are enabled and how Astra runs beside it. §7.1
 names this launcher as the reader that accepts `mods` and reads nothing in it; launcher 0.5.1
@@ -93,8 +93,10 @@ and places a Source 2 folder exactly as the same descriptor without `mods`
 own built-ins (`the_builtin_mods_fragments_ride_on_the_launchers_builtins`), and
 `tests/gi_probe.rs` `validate_descriptor_does_not_evaluate_the_mods_goldens` holds
 `validate-descriptor` to the notice. §7.9 has lint refuse the hostile ones; that is 0.5.1's.
-One golden is answered otherwise, `hostile/mods-deep-nesting.toml`: its TOML nests past the
-toml crate's recursion limit, so the whole document is refused (`SPEC_DEFECTS_AT_PIN`).
+The TOML of every one of them parses at this pin: `hostile/mods-deep-nesting.toml` nests `any`
+in `any` 39 deep, where 40 was one past the toml crate's fixed recursion limit (80 nested tables
+and arrays; AstraPlugins #133, whose §7.1 now says that a `mods` nested past a TOML reader's
+own limit makes the whole file unreadable).
 
 §7.1 keeps `mods` in the shape this version checks: a table (never `[[mods]]`), at the top
 level only, within the value rules above, nesting at most 11 levels. Launcher 0.3.1 drops

@@ -172,8 +172,10 @@ pub mod codes {
     pub const CONTENT_MISSING: &str = "content-missing";
     /// Two entries declare one `path` (`field` the second, `first` the first).
     pub const CONTENT_DUPLICATE: &str = "content-duplicate";
-    /// A GLB or `.gltf` part (or an `.astrachar`'s body or bundle) that breaks the format rules
-    /// (`reason`): not whole, JSON that does not parse or names a member twice, an external URI.
+    /// A file of the release (`path`; in a game's archive `<archive>!<inner>`) that breaks the
+    /// format rules (`reason`): a GLB or `.gltf` not whole, over a cap, JSON that does not parse
+    /// or names a member twice, an external URI; a GLB, glTF or bundle under another name; a
+    /// bundle the content catalogue's code cannot read or whose file breaks them.
     pub const CONTENT_FORMAT: &str = "content-format";
     /// The VRM licence gate refuses a part: its meta (`meta`, its `value` as JSON, `defaulted`
     /// when absent) refuses redistribution or names who alone may use the avatar.
@@ -182,6 +184,42 @@ pub mod codes {
     pub const CONTENT_LICENCE_CONFLICT: &str = "content-licence-conflict";
     /// A part with no readable VRM licence and no `licence` of its own.
     pub const CONTENT_LICENCE_UNDECLARED: &str = "content-licence-undeclared";
+    // The content catalogue's own codes (AstraPlugins `spec/content/ingest-v1.md` §3), raised for
+    // an embedded `.astrachar`/`.astrapack` and a game's own archive inside a release (`path` the
+    // part or the archive, `detail` content's words as `<path>!<detail>`, `inner` the file inside
+    // it a refusal names).
+    /// A bundle's body is over 50 MiB.
+    pub const CONTENT_TOO_LARGE: &str = "content-too-large";
+    /// A bundle holds a file that is in no part (the body, a pack, an accessory, an image, a sound).
+    pub const CONTENT_FILE_OUTSIDE_PARTS: &str = "content-file-outside-parts";
+    /// An archive's end record is not one every reader finds, or it needs zip64.
+    pub const ZIP_END_RECORD: &str = "zip-end-record";
+    /// An archive's headers disagree, or its entries do not tile the file: two readers read two
+    /// archives.
+    pub const ZIP_HEADERS_INCONSISTENT: &str = "zip-headers-inconsistent";
+    /// A bundle holds more than 4,096 entries.
+    pub const ARCHIVE_TOO_MANY_ENTRIES: &str = "archive-too-many-entries";
+    /// A bundle holds an encrypted entry.
+    pub const ARCHIVE_ENCRYPTED: &str = "archive-encrypted";
+    /// A bundle holds an entry neither Stored nor Deflated.
+    pub const ARCHIVE_METHOD: &str = "archive-method";
+    /// A bundle holds a link.
+    pub const ARCHIVE_LINK: &str = "archive-link";
+    /// A bundle holds a name no file system may take as it is (not UTF-8, a device, two names
+    /// that fold together, a file and a folder at one path).
+    pub const ARCHIVE_NAME_UNSAFE: &str = "archive-name-unsafe";
+    /// A bundle unpacks to more than 128 MiB, or holds more than 32 MiB of glTF JSON.
+    pub const ARCHIVE_TOO_LARGE: &str = "archive-too-large";
+    /// A bundle's entry inflates more than 100 times its size.
+    pub const ARCHIVE_RATIO: &str = "archive-ratio";
+    /// A bundle's model or picture is compressed where it must be Stored.
+    pub const ARCHIVE_MUST_BE_STORED: &str = "archive-must-be-stored";
+    /// A bundle's `astrachar.json` is not last, not an object, or not a format it may be.
+    pub const BUNDLE_MANIFEST: &str = "bundle-manifest";
+    /// A bundle holds a file its `astrachar.json` does not list, or lists one it does not hold.
+    pub const BUNDLE_FILE_UNLISTED: &str = "bundle-file-unlisted";
+    /// A bundle's file is not the digest and size its `astrachar.json` lists.
+    pub const BUNDLE_FILE_DIGEST: &str = "bundle-file-digest";
     // `${astra_pack_inbox}`: the integration's own animation packs, handed to the desktop
     // companion (`crate::pack_inbox`).
     /// The plan has nowhere to put them (`reason` = `no-user-root`: the caller named no companion
@@ -274,6 +312,21 @@ pub mod codes {
         CONTENT_LICENCE_REFUSED,
         CONTENT_LICENCE_CONFLICT,
         CONTENT_LICENCE_UNDECLARED,
+        CONTENT_TOO_LARGE,
+        CONTENT_FILE_OUTSIDE_PARTS,
+        ZIP_END_RECORD,
+        ZIP_HEADERS_INCONSISTENT,
+        ARCHIVE_TOO_MANY_ENTRIES,
+        ARCHIVE_ENCRYPTED,
+        ARCHIVE_METHOD,
+        ARCHIVE_LINK,
+        ARCHIVE_NAME_UNSAFE,
+        ARCHIVE_TOO_LARGE,
+        ARCHIVE_RATIO,
+        ARCHIVE_MUST_BE_STORED,
+        BUNDLE_MANIFEST,
+        BUNDLE_FILE_UNLISTED,
+        BUNDLE_FILE_DIGEST,
         PACK_INBOX_UNAVAILABLE,
         PACK_INBOX_INVALID,
         MISSING_VARIABLE,
@@ -452,6 +505,47 @@ impl LauncherError {
             }
             codes::CONTENT_LICENCE_UNDECLARED => {
                 "a content file of the release has no licence: neither its own nor a declared one"
+            }
+            codes::CONTENT_TOO_LARGE => "a character's model in the release is larger than allowed",
+            codes::CONTENT_FILE_OUTSIDE_PARTS => {
+                "a character or animation pack in the release holds a file that belongs to none of its parts"
+            }
+            codes::ZIP_END_RECORD => {
+                "an archive in the release does not end the way every reader reads it"
+            }
+            codes::ZIP_HEADERS_INCONSISTENT => {
+                "an archive in the release reads as two different archives, depending on the reader"
+            }
+            codes::ARCHIVE_TOO_MANY_ENTRIES => {
+                "a character or animation pack in the release holds too many files"
+            }
+            codes::ARCHIVE_ENCRYPTED => {
+                "a character or animation pack in the release holds an encrypted file"
+            }
+            codes::ARCHIVE_METHOD => {
+                "a character or animation pack in the release is compressed in a way that is not allowed"
+            }
+            codes::ARCHIVE_LINK => "a character or animation pack in the release holds a link",
+            codes::ARCHIVE_NAME_UNSAFE => {
+                "a character or animation pack in the release holds a file name that is not allowed"
+            }
+            codes::ARCHIVE_TOO_LARGE => {
+                "a character or animation pack in the release unpacks to more than allowed"
+            }
+            codes::ARCHIVE_RATIO => {
+                "a character or animation pack in the release is compressed far more than allowed"
+            }
+            codes::ARCHIVE_MUST_BE_STORED => {
+                "a character or animation pack in the release compresses a model or picture that must be stored as it is"
+            }
+            codes::BUNDLE_MANIFEST => {
+                "a character or animation pack in the release has no valid astrachar.json"
+            }
+            codes::BUNDLE_FILE_UNLISTED => {
+                "a character or animation pack in the release holds a file its astrachar.json does not list"
+            }
+            codes::BUNDLE_FILE_DIGEST => {
+                "a file of a character or animation pack in the release is not the one its astrachar.json lists"
             }
             codes::PACK_INBOX_UNAVAILABLE => {
                 "the integration brings animations for the desktop companion, and no companion folder was given to put them in"

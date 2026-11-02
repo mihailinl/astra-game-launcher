@@ -300,7 +300,7 @@ restore_game_files(&profile_dir, &game)?;                // a withdrawn integrat
 | install and restore | `restore_game_files`, `UninstallReport::{kept_reasons, warnings}`, `KEPT_FOLDER_GAINED_FILES`, `Ledger::{provenance, descriptor_sha256, proxy_folders}`, `LEDGER_SCHEMA` 4 (`restored`) |
 | Steam | `store_categories`, `store_categories_of`, `online_game`, `online_codes`, `ONLINE_CATEGORIES`, `VAC_CATEGORY` |
 | reserved names | `reserved` (one list, held to the spec's `reserved.yaml`, canary K13): `PROFILE_FILE_NAMES`, `INTEGRATION_ID_PREFIXES` (`astra.`, `minice.`), `INTEGRATION_NAME_SUBSTRINGS`, `INTEGRATION_RESERVED_KEYS` (`uses`), `engine_codes`, `id_is_reserved`, `integration_name_is_reserved`, `profile_name_is_reserved`, `check_identity`; `is_reserved_code`, `is_valid_engine_code` |
-| a release's own content | `Manifest::content` (`ContentPart`, `ContentKind`), `GiPackage::content` (a `content::Report`: `content_files`, `parts`, `refusals`, `flags`), `content::{judge, vrm_gate, meta_verdict, class_of, format_problem, is_content_typed, SPEC_CODES, launcher_code, FLAG_VRM_META_UNKNOWN, FLAG_ASTRACHAR_UNREADABLE}` (below) |
+| a release's own content | `Manifest::content` (`ContentPart`, `ContentKind`), `GiPackage::content` (a `content::Report`: `content_files`, `parts`, `refusals`, `flags`), `content::{judge, vrm_gate, meta_verdict, class_of, format_problem, is_content_typed, SPEC_CODES, launcher_code, FLAG_VRM_META_UNKNOWN, FLAG_ARCHIVE_UNSCANNED}` (below; 0.5.1 judges every file by its bytes, a game's own archives and every bundle by the content catalogue's code, with its codes: `archive-encrypted`, `archive-link`, `archive-method`, `archive-must-be-stored`, `archive-name-unsafe`, `archive-ratio`, `archive-too-large`, `archive-too-many-entries`, `bundle-file-digest`, `bundle-file-unlisted`, `bundle-manifest`, `content-file-outside-parts`, `content-too-large`, `zip-end-record`, `zip-headers-inconsistent`) |
 | new codes (`codes::ALL`) | `anti-cheat-unknown`, `capability-undeclared`, `community-limit`, `content-duplicate`, `content-format`, `content-licence-conflict`, `content-licence-refused`, `content-licence-undeclared`, `content-missing`, `content-undeclared`, `descriptor-duplicate`, `descriptor-first-party-only`, `descriptor-invalid`, `descriptor-mismatch`, `descriptor-over-limit`, `descriptor-schema-unknown`, `descriptor-too-broad`, `descriptor-too-large`, `descriptor-unsupported`, `engine-ambiguous`, `engine-code-reserved`, `engine-code-taken`, `engine-name-reserved`, `engine-undeclared`, `foreign-file`, `kernel-anti-cheat`, `link-invalid`, `listed-anti-cheat`, `loader-policy-conflict`, `loader-undeclared`, `needs-newer-astra`, `reserved-id`, `reserved-name` |
 | new warnings | `foreign-loader-in-backup` (a plan), `restore-partial` (an uninstall or restore) |
 | `gi-probe` | `compat`, `check`, `validate-descriptor [--corpus]`, `capture`, `pick` (below) |
@@ -392,17 +392,25 @@ restore_game_files(&profile_dir, &game)?;                // a withdrawn integrat
   each at publication. `Manifest::parse` reads the table and refuses a path declared twice
   (`content-duplicate`) and a `builtin:` reference (no `:` in a path); launcher 0.3.1 ignores the
   table. `GiPackage::content` holds the zip to it, which `gi-probe check` (step 8) and a
-  catalogue's ingest ask before a release is listed, never an install: every file whose
-  extension AND first bytes make it content (`.astrapack .astrachar .vrma .glb .vrm .gltf .fbx`,
-  images, audio; code never) is one declared part (`content-undeclared`, `content-missing`);
-  every GLB and `.gltf` whole, its JSON naming no member twice, with no external URI
-  (`content-format`); the VRM licence gate on what its glTF extensions make an avatar, never its
-  name, in any part (and a plain glTF in a `character` part, and the body of an `.astrachar`),
-  every VRM meta read by its own spec's defaults, an unrecognised token unknown and never
+  catalogue's ingest ask before a release is listed, never an install: every file of it is read
+  by its bytes, never its name — a GLB, a text glTF (a UTF-16 one too) or a content bundle under
+  another name is `content-format`; every GLB and `.gltf` whole, at most 16 MiB of JSON nested
+  at most 128 deep (and 32 MiB in the whole release), its JSON naming no member twice, with no
+  external URI, a `.gltf`'s decoded exactly once (`content-format`); a game's own archive (a
+  `.jar`, a mod `.zip`) opened one level deep with the content catalogue's own reader — two
+  readings of it refused (`zip-headers-inconsistent`, `zip-end-record`), one it cannot open the
+  flag `content-archive-unscanned` — whose GLBs, glTFs and bundles are parts declared as
+  `<archive>!<inner>`; every file whose extension AND first bytes make it content
+  (`.astrapack .astrachar .vrma .glb .vrm .gltf .fbx`, images, audio; code never) one declared
+  part (`content-undeclared`, `content-missing`); the VRM licence gate on what its glTF
+  extensions make an avatar, never its name, in any part (and a plain glTF in a `character`
+  part), every VRM meta read by its own spec's defaults, an unrecognised token unknown and never
   allowed (`content-licence-refused`, `content-licence-conflict`; unknown is the flag
-  `content-vrm-meta-unknown`); and a licence for every part, the VRM meta's or the entry's own
-  (`content-licence-undeclared`). The codes are the spec's `E_CONTENT_*` in this launcher's
-  spelling (`content::SPEC_CODES`), held to the spec's goldens (`tests/content.rs`).
+  `content-vrm-meta-unknown`); every `.astrachar` and `.astrapack` judged whole by the content
+  catalogue's own code, refused with its codes (`bundle-manifest`, `archive-must-be-stored`, …);
+  and a licence for every part, the VRM meta's or the entry's own (`content-licence-undeclared`).
+  The codes are the spec's in this launcher's spelling (`content::SPEC_CODES`), held to the
+  spec's goldens (`tests/content.rs`).
 - **`[[integration.uses]]` is reserved** (spec `manifest.md` §2.8, `reserved.yaml`): a later
   schema's reference to a catalogue item. `Manifest::parse` refuses it whatever its shape
   (`unknown-key{key=integration.uses, reason=reserved}`).
@@ -481,8 +489,10 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
      `loader-other`). Labels only: the allowlist never permits what the manifest does not
      declare;
   8. `content`: the release's own animations, characters, art and audio against
-     `[[integration.content]]` (`GiPackage::content`, above): coverage, the format of every GLB
-     and `.gltf`, the VRM licence gate and a licence for every part; `content.parts` is what a
+     `[[integration.content]]` (`GiPackage::content`, above): every file by its bytes,
+     coverage, the format of every GLB and `.gltf`, a game's archives one level deep, every
+     bundle by the content catalogue's own code, the VRM licence gate and a licence for every
+     part (a notice for `content-vrm-meta-unknown` and `content-archive-unscanned`); `content.parts` is what a
      catalogue entry's `content[]` carries (`sha256`, `licence_source`, `vrm_licence`: the
      schema's `contentPart`, nothing else), and `content.classes` what each glTF part is
      (`avatar`, `animation`, `plain`). A path declared twice is step 1's (`content-duplicate`).
@@ -595,9 +605,10 @@ to = "${astra_pack_inbox}/"
   `zip-inconsistent` ("zip cloaking"; `src/zip_consistency.rs`, AstraPlugins'
   `testdata/zip-cloaking/` vectors, vendored at the pinned commit in
   `tests/goldens/astraplugins/`).
-- **The zip.** At most 256 MiB compressed, 1 GiB uncompressed (counting what the checks unpack
-  of every archive inside it too: its packs, its `.astrachar` bundles, each held to the same
-  rules), 20 000 entries. Symbolic links,
+- **The zip.** At most 256 MiB compressed, 1 GiB uncompressed (counting what an install unpacks
+  of every pack inside it for the companion too, each held to the same rules; the content check
+  holds each bundle and archive inside it to the content catalogue's own limits), 20 000
+  entries. Symbolic links,
   absolute paths, `..`, drive letters, encrypted entries and duplicate names are refused
   outright, whether the manifest names them or not. Only the files the manifest names are
   extracted, and an entry is never read past the size it declares.

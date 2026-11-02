@@ -5,7 +5,7 @@
 //! `astra-gi.zip`: verified against its SHA-256, every entry checked, the manifest read, and
 //! the files the manifest names resolved. Only those files are ever extracted.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read};
 
 use serde::Serialize;
@@ -78,8 +78,6 @@ pub struct GiPackage {
     pub(crate) inbox_files: Vec<crate::pack_inbox::InboxPack>,
     /// Every file of the zip, folders left out: (index, name, size), in the zip's order.
     entries: Vec<(usize, String, u64)>,
-    /// What it was opened with: [`GiPackage::content`] reads the bundles inside it within them.
-    limits: Limits,
 }
 
 impl std::fmt::Debug for GiPackage {
@@ -418,7 +416,6 @@ impl GiPackage {
             game_files,
             inbox_files,
             entries: files,
-            limits: limits.clone(),
         })
     }
 
@@ -503,38 +500,39 @@ impl GiPackage {
     }
 
     /// `[[integration.content]]` against this release's files ([`crate::content::judge`]): every
-    /// file of the zip is one it may name, each with a content-typed extension has its first bytes
-    /// read ([`crate::content::is_content_typed`]), and each declared part is read whole; the
-    /// `.astrachar` bundles inside it within one budget of the limits it was opened with. Never
+    /// file of the zip, read by its bytes — the first of them for all, the whole file where the
+    /// rules need it (a GLB, a `.gltf`, an archive, a JSON text), and each declared part. Never
     /// asked by an install: what a catalogue's ingest and `gi-probe check` ask before a release is
     /// listed.
     pub fn content(&self) -> Result<crate::content::Report> {
         let mut ar = self.archive()?;
-        let present: BTreeSet<String> = self.entries.iter().map(|(_, n, _)| n.clone()).collect();
-        let mut found = BTreeSet::new();
-        for (index, name, _) in &self.entries {
-            if !crate::content::has_content_extension(name) {
-                continue;
-            }
-            let f = ar
-                .by_index(*index)
-                .map_err(|e| unsafe_entry(name, "corrupt").with("detail", e.to_string()))?;
-            let mut head = Vec::with_capacity(crate::content::SNIFF_BYTES);
-            f.take(crate::content::SNIFF_BYTES as u64)
-                .read_to_end(&mut head)
-                .map_err(|e| unsafe_entry(name, "corrupt").with("detail", e.to_string()))?;
-            if crate::content::is_content_typed(name, &head) {
-                found.insert(name.clone());
-            }
-        }
-        let budget = self.limits.max_uncompressed_bytes;
-        crate::content::judge(self.manifest.content(), &found, &present, budget, |path| {
-            let &(index, ref name, size) = self
-                .entries
-                .iter()
-                .find(|(_, n, _)| n == path)
+        let files: Vec<(String, u64)> = self
+            .entries
+            .iter()
+            .map(|(_, n, size)| (n.clone(), *size))
+            .collect();
+        let by_name: HashMap<&str, (usize, u64)> = self
+            .entries
+            .iter()
+            .map(|(i, n, size)| (n.as_str(), (*i, *size)))
+            .collect();
+        crate::content::judge(self.manifest.content(), &files, |path, at_most| {
+            let &(index, size) = by_name
+                .get(path)
                 .ok_or_else(|| unsafe_entry(path, "missing"))?;
-            read_entry(&mut ar, index, name, size)
+            match at_most {
+                None => read_entry(&mut ar, index, path, size),
+                Some(n) => {
+                    let f = ar
+                        .by_index(index)
+                        .map_err(|e| unsafe_entry(path, "corrupt").with("detail", e.to_string()))?;
+                    let mut head = Vec::with_capacity(n.min(size as usize));
+                    f.take(n as u64)
+                        .read_to_end(&mut head)
+                        .map_err(|e| unsafe_entry(path, "corrupt").with("detail", e.to_string()))?;
+                    Ok(head)
+                }
+            }
         })
     }
 

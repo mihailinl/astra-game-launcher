@@ -1279,13 +1279,11 @@ fn compat_holds_a_pack_inbox_release_to_astra_0_2_8() {
         "[[integration.content]]\npath = \"packs/peak-climb.astrapack\"\nkind = \"animations\"\ntitle = \"Climb\"\ncredit = \"someone\"\nlicence = \"CC-BY-4.0\"\n\n[target]",
         1,
     ) + "\n[[files]]\nfrom = \"packs/**\"\nto = \"${astra_pack_inbox}/\"\n";
-    let pack = zip(&[
-        E::File(
-            "animpack.toml",
-            b"[animpack]\nname = \"Climb\"\nkind = \"vrm\"\nuid = \"astra.unity/climb\"\nversion = \"1.0.0\"\nowner = \"integration:astra.unity\"\ngames = [\"astra.unity\"]\n",
-        ),
-        E::File("clips/climb.vrma", b"glTF"),
-    ]);
+    // A pack the content catalogue reads (its `astrachar.json` last) and the companion's inbox
+    // too (its `animpack.toml`).
+    let pack = content_fixtures::astrapack(
+        b"[animpack]\nname = \"Climb\"\nkind = \"vrm\"\nuid = \"astra.unity/climb\"\nversion = \"1.0.0\"\nowner = \"integration:astra.unity\"\ngames = [\"astra.unity\"]\n",
+    );
     let mut entries = vec![
         E::File("astra-gi.toml", manifest.as_bytes()),
         E::File("astra-probe.dll", DLL),
@@ -2005,8 +2003,8 @@ fn validate_descriptor_takes_mods_as_a_notice_and_judges_the_rest_alike() {
 /// it and the negative folders of the same descriptor without `mods`; `not-a-table` is no
 /// descriptor (step 1, field `mods`, no notice). §7.9 has lint refuse every hostile one
 /// (`mods-invalid` with its reasons, `verdict` = `refuse`): that is launcher 0.5.1's (debt row
-/// 46), and this test is the one that changes with it. `mods-deep-nesting` is refused whole, as
-/// its `SPEC_DEFECTS_AT_PIN` entry records.
+/// 46), and this test is the one that changes with it. Every one of them parses at this pin
+/// (`mods-deep-nesting` nests 39 deep since AstraPlugins #133).
 #[test]
 fn validate_descriptor_does_not_evaluate_the_mods_goldens() {
     let tmp = Tmp::new("validate-mods-goldens");
@@ -2961,16 +2959,18 @@ fn content_check(
 fn check_gives_every_content_golden_its_verdict_and_code() {
     let tmp = Tmp::new("check-content-goldens");
     let mut out = Vec::new();
-    for (name, files, code) in content_fixtures::release_vectors() {
-        let (exit, r, refused, _) = content_check(&tmp, &name, &content_fixtures::zip_of(&files));
-        let codes: Vec<&str> = refused.iter().map(|(c, _)| c.as_str()).collect();
-        let ok = match code {
-            None => exit == 0 && codes.is_empty() && r["steps"][7]["status"] != "skipped",
-            Some(c) => exit == 1 && codes == [c],
-        };
+    for v in content_fixtures::release_vectors() {
+        let (exit, r, refused, flagged) =
+            content_check(&tmp, &v.name, &content_fixtures::zip_of(&v.files));
+        let ok = content_fixtures::release_answer_agrees(&v, &refused, &flagged)
+            && match v.code {
+                None => exit == 0 && r["steps"][7]["status"] != "skipped",
+                Some(_) => exit == 1,
+            };
         if !ok {
             out.push(format!(
-                "release {name}: {refused:?}; wants {code:?}: {r:#}"
+                "release {}: {refused:?} flagged {flagged:?}; wants {:?} flagged {:?}",
+                v.name, v.code, v.flags
             ));
         }
     }
@@ -3046,10 +3046,11 @@ fn check_refuses_every_hostile_content_fixture_and_passes_its_near_miss() {
 #[test]
 fn check_reports_the_parts_a_catalogue_entry_carries() {
     let tmp = Tmp::new("check-content-parts");
-    let (_, files, _) = content_fixtures::release_vectors()
+    let files = content_fixtures::release_vectors()
         .into_iter()
-        .find(|(n, _, _)| n == "allowed")
-        .unwrap();
+        .find(|v| v.name == "allowed")
+        .unwrap()
+        .files;
     let (exit, r, _, _) = content_check(&tmp, "allowed", &content_fixtures::zip_of(&files));
     assert_eq!(exit, 0, "{r:#}");
     assert_eq!(r["steps"][7]["status"], "pass");

@@ -14,66 +14,92 @@
 //!   `licence` are `manifest-invalid`; a `path` two entries declare is `content-duplicate`.
 //!   Launcher 0.3.1 ignores the table, as every `[integration.*]` one.
 //! - [`judge`] holds a release's files to it ([`crate::GiPackage::content`] over a zip; `gi-probe
-//!   check`'s step 8), in the spec's order:
-//!   1. **coverage.** A *content-typed* file is one whose extension AND first bytes both say so
+//!   check`'s step 8), in the order of AstraPlugins' `tools/check-games-goldens.py`
+//!   `release_findings`, over EVERY file of the release, declared or not:
+//!   1. **the release's glTF JSON**: every GLB's declared first-chunk length and every `.gltf`'s
+//!      size, read before anything is parsed, at most 32 MiB (`content-format{reason=
+//!      gltf-json-total}`); the embedded bundles and archives below charge the same budget;
+//!   2. **by bytes, never by name** (§2.7.1): a GLB not named `.vrm` `.glb` `.vrma`, a text glTF
+//!      (a JSON object naming a top-level `asset` object, a UTF-16/32 text sniffed as the text it
+//!      decodes to: `sniff`) not named `.gltf`, and a content bundle (a zip whose last entry is
+//!      `astrachar.json`) not named `.astrachar` `.astrapack` are `content-format{reason=
+//!      glb-misnamed | gltf-misnamed | bundle-misnamed}`; the manifest is `astra-gi.toml` at the
+//!      root only, a file of that name in a folder is judged like any other;
+//!   3. **the format** of every GLB (by its magic) and `.gltf` (by its name), in any part and of
+//!      any class ([`format_problem`]): the GLB whole, its JSON chunk or the `.gltf` at most
+//!      16 MiB, a `.gltf` with no byte-order mark, its glTF JSON parsing, nesting at most 128
+//!      deep, naming no member twice, and no external reference — `images` and `buffers` arrays
+//!      of objects, a GLB's every `uri` a `data:` one, a `.gltf`'s a `data:` one or a plain
+//!      relative path, percent-decoded exactly once (no raw `?` `#` `\`, no escape left), naming
+//!      a file the release holds (`content-format{reason}`);
+//!   4. **a game's own archives, one level deep**: a zip that is no bundle (a `.jar`, a mod
+//!      `.zip`), walked with the content catalogue's own reader (`zipwalk`, every cloaking check
+//!      included; 65,536 entries, 512 MiB): two readings of it are refused with content's code
+//!      (`zip-headers-inconsistent`, `zip-end-record`); one it cannot otherwise open (zip64, too
+//!      big, encrypted, another method, …) and an archive inside it are the flag
+//!      `content-archive-unscanned`; inside it every file is judged by steps 2 and 3, and each
+//!      GLB, `.gltf` and bundle is a part to declare as `<archive path>!<inner path>`;
+//!   5. **coverage.** A *content-typed* file is one whose extension AND first bytes both say so
 //!      ([`is_content_typed`]: `.astrapack` `.astrachar` a zip, `.vrma` `.glb` `.vrm` the GLB
 //!      magic, `.gltf` JSON text, `.fbx` a binary or ASCII FBX, `.png` `.jpg` `.jpeg` `.webp`
 //!      `.gif` and `.ogg` `.wav` `.mp3` `.flac` their signatures); code and loaders never are,
 //!      whatever they are called. Each is covered by exactly one entry: `content-undeclared`
 //!      names a file no entry covers, `content-missing` an entry no content-typed file is at (a
 //!      DLL renamed `climb.fbx` covers nothing);
-//!   2. **the format** of every GLB (by its magic, whatever it is called) and `.gltf` part
-//!      ([`format_problem`]): the GLB whole (its header's length the file's, its first chunk JSON
-//!      and inside the file), its glTF JSON parsing with no member named twice, and no external
-//!      reference (a GLB's `images[].uri` and `buffers[].uri` all `data:`; a `.gltf`'s `data:` or
-//!      a plain relative path to a file the release holds) — `content-format{reason}`;
-//!   3. **the VRM licence gate** ([`vrm_gate`]), on what is judged by its glTF JSON's extensions
+//!   6. **the VRM licence gate** ([`vrm_gate`]), on what is judged by its glTF JSON's extensions
 //!      and never by its name ([`class_of`]): an avatar (`VRM`, `VRMC_vrm`) in any part, a plain
-//!      glTF in a `character` part, and the `.vrm` body of a readable `.astrachar` (its
-//!      `astrachar.json` names `body.file`, a `.vrm` it holds; the bundle itself held to what
-//!      the release is, every bundle of it within one budget). An animation
-//!      (`VRMC_vrm_animation` alone) gets no avatar verdict. Every VRM meta the file carries is
-//!      read, each by its own spec's defaults ([`meta_verdict`]; an unrecognised token is
-//!      unknown, never allowed; a non-bool `allowRedistribution` is prohibited): prohibited is
-//!      `content-licence-refused{meta, value, defaulted}`, two metas that disagree
-//!      `content-licence-conflict`, and unknown (no meta, an unrecognised token) the flag
-//!      `content-vrm-meta-unknown`, never a refusal. An `.astrachar` that cannot be read so is the
-//!      flag `content-astrachar-unreadable`;
-//!   4. **a licence for every covered part**: the VRM meta's when the gate read one
-//!      (`licence_source` `vrm`), else the entry's own `licence` (`declared`); with neither,
-//!      `content-licence-undeclared`.
+//!      glTF in a `character` part. An animation (`VRMC_vrm_animation` alone) gets no avatar
+//!      verdict. Every VRM meta the file carries is read, each by its own spec's defaults
+//!      ([`meta_verdict`]; an unrecognised token is unknown, never allowed; a non-bool
+//!      `allowRedistribution` is prohibited): prohibited is `content-licence-refused{meta, value,
+//!      defaulted}`, two metas that disagree `content-licence-conflict`, and unknown (no meta, an
+//!      unrecognised token) the flag `content-vrm-meta-unknown`, never a refusal. An
+//!      `.astrachar` or `.astrapack` part is judged whole by the content catalogue's own code
+//!      (`bundle`: its walk, its manifest, every file's format, every GLB's verdict, every file
+//!      in a part), refused with content's own code; the part's declared licence stands for every
+//!      part of the bundle, and a bundle the content catalogue holds is the same flag;
+//!   7. **a licence for every covered part**: the VRM meta's when the gate read one
+//!      (`licence_source` `vrm`; a bundle's, its body's), else the entry's own `licence`
+//!      (`declared`); with neither, `content-licence-undeclared`.
 //!
-//! The codes are the spec's `E_CONTENT_*` and `F_CONTENT_*` in this launcher's spelling (merged
-//! plan R32: kebab-case wire codes), one for one ([`SPEC_CODES`]). This is an implementation of
-//! the rule independent of AstraPlugins' `tools/check-games-goldens.py` and of the catalogue's
-//! `lib/content.mjs`, held to the same goldens (`testdata/games/content/`, `tests/content.rs`
-//! and, through `gi-probe check`, `tests/gi_probe.rs`).
+//! The codes are the spec's (`E_CONTENT_*`, the content contract's `E_ZIP_*`, `E_ARCHIVE_*`,
+//! `E_BUNDLE_*`) and flags (`F_CONTENT_*`) in this launcher's spelling (merged plan R32:
+//! kebab-case wire codes), one for one ([`SPEC_CODES`]). This is an implementation of the rule
+//! independent of AstraPlugins' checkers and of the catalogue's `lib/content.mjs`, held to the
+//! same goldens (`testdata/games/content/`, `tests/content.rs` and, through `gi-probe check`,
+//! `tests/gi_probe.rs`).
+
+mod bundle;
+mod sniff;
+mod zipwalk;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::io::{Cursor, Read};
 
 use serde::Serialize;
 use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value};
-use zip::ZipArchive;
 
 use crate::digest::sha256_hex;
 use crate::error::{LauncherError, Result, codes};
-use crate::package::Limits;
+
+use zipwalk::{GLB_MAGIC, MAX_GLTF_JSON, MAX_GLTF_JSON_TOTAL};
 
 /// The key of the table below `[integration]`.
 pub const TABLE: &str = "content";
 
 /// A flag (never a refusal): a part the VRM gate judges reads `unknown` — no VRM meta, or a token
-/// the gate does not recognise. It passes with its declared licence (`F_CONTENT_VRM_META_UNKNOWN`).
+/// the gate does not recognise — or a bundle the content catalogue would hold for it. It passes
+/// with its declared licence (`F_CONTENT_VRM_META_UNKNOWN`).
 pub const FLAG_VRM_META_UNKNOWN: &str = "content-vrm-meta-unknown";
 
-/// A flag (never a refusal): an `.astrachar` part whose body cannot be read as the spec reads it,
-/// so the gate never saw it (`F_CONTENT_ASTRACHAR_UNREADABLE`; `reason` says why).
-pub const FLAG_ASTRACHAR_UNREADABLE: &str = "content-astrachar-unreadable";
+/// A flag (never a refusal): a game's own archive the gate could not open (zip64, too large,
+/// encrypted, another method, …: `reason`), or an archive inside one (`reason` = `nested`), so
+/// nothing inside it was judged (`F_CONTENT_ARCHIVE_UNSCANNED`, shown to moderators).
+pub const FLAG_ARCHIVE_UNSCANNED: &str = "content-archive-unscanned";
 
-/// The spec's codes (`manifest.md` §2.7, `vectors.json`) and this launcher's, one for one.
+/// The spec's codes (`manifest.md` §2.7, the content contract's `ingest-v1.md` §3, `vectors.json`)
+/// and this launcher's, one for one.
 pub const SPEC_CODES: &[(&str, &str)] = &[
     ("E_CONTENT_UNDECLARED", codes::CONTENT_UNDECLARED),
     ("E_CONTENT_MISSING", codes::CONTENT_MISSING),
@@ -88,8 +114,32 @@ pub const SPEC_CODES: &[(&str, &str)] = &[
         "E_CONTENT_LICENCE_UNDECLARED",
         codes::CONTENT_LICENCE_UNDECLARED,
     ),
+    ("E_CONTENT_TOO_LARGE", codes::CONTENT_TOO_LARGE),
+    (
+        "E_CONTENT_FILE_OUTSIDE_PARTS",
+        codes::CONTENT_FILE_OUTSIDE_PARTS,
+    ),
+    ("E_ZIP_END_RECORD", codes::ZIP_END_RECORD),
+    (
+        "E_ZIP_HEADERS_INCONSISTENT",
+        codes::ZIP_HEADERS_INCONSISTENT,
+    ),
+    (
+        "E_ARCHIVE_TOO_MANY_ENTRIES",
+        codes::ARCHIVE_TOO_MANY_ENTRIES,
+    ),
+    ("E_ARCHIVE_ENCRYPTED", codes::ARCHIVE_ENCRYPTED),
+    ("E_ARCHIVE_METHOD", codes::ARCHIVE_METHOD),
+    ("E_ARCHIVE_LINK", codes::ARCHIVE_LINK),
+    ("E_ARCHIVE_NAME_UNSAFE", codes::ARCHIVE_NAME_UNSAFE),
+    ("E_ARCHIVE_TOO_LARGE", codes::ARCHIVE_TOO_LARGE),
+    ("E_ARCHIVE_RATIO", codes::ARCHIVE_RATIO),
+    ("E_ARCHIVE_MUST_BE_STORED", codes::ARCHIVE_MUST_BE_STORED),
+    ("E_BUNDLE_MANIFEST", codes::BUNDLE_MANIFEST),
+    ("E_BUNDLE_FILE_UNLISTED", codes::BUNDLE_FILE_UNLISTED),
+    ("E_BUNDLE_FILE_DIGEST", codes::BUNDLE_FILE_DIGEST),
     ("F_CONTENT_VRM_META_UNKNOWN", FLAG_VRM_META_UNKNOWN),
-    ("F_CONTENT_ASTRACHAR_UNREADABLE", FLAG_ASTRACHAR_UNREADABLE),
+    ("F_CONTENT_ARCHIVE_UNSCANNED", FLAG_ARCHIVE_UNSCANNED),
 ];
 
 /// The launcher's code for the spec's `spec_code`.
@@ -98,6 +148,11 @@ pub fn launcher_code(spec_code: &str) -> Option<&'static str> {
         .iter()
         .find(|(s, _)| *s == spec_code)
         .map(|(_, l)| *l)
+}
+
+/// [`launcher_code`] for a code this module itself raises, which always has one.
+fn ours(spec_code: &str) -> &'static str {
+    launcher_code(spec_code).unwrap_or(codes::CONTENT_FORMAT)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -137,7 +192,8 @@ impl ContentKind {
     }
 }
 
-/// One `[[integration.content]]` entry: a part, its id its `path` in the release zip.
+/// One `[[integration.content]]` entry: a part, its id its `path` in the release zip (a file in a
+/// game's own archive: `<archive path>!<inner path>`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ContentPart {
     pub path: String,
@@ -272,6 +328,13 @@ const EXTENSIONS: &[(&str, Magic)] = &[
     (".flac", Magic::Flac),
 ];
 
+/// The names a bundle carries.
+const BUNDLE_EXTS: &[&str] = &[".astrachar", ".astrapack"];
+/// The names a file in a game's own archive is a part to declare by: a GLB, a `.gltf`, a bundle.
+const INNER_PART_EXTS: &[&str] = &[".vrm", ".glb", ".vrma", ".gltf", ".astrachar", ".astrapack"];
+/// The manifest: `astra-gi.toml` at the release root, and nowhere else.
+const MANIFEST_NAME: &str = "astra-gi.toml";
+
 /// The extension of the last `/`-separated component of `path`, lower case with its dot, as the
 /// spec's checker reads one: from the last `.` that is neither the first nor the last character
 /// (`.png` and `cover.` have none).
@@ -288,10 +351,14 @@ fn magic_of(path: &str) -> Option<Magic> {
     EXTENSIONS.iter().find(|(e, _)| *e == ext).map(|(_, m)| *m)
 }
 
-/// Whether `path`'s extension is one a content-typed file may have: only those need their first
-/// bytes read.
+/// Whether `path`'s extension is one a content-typed file may have.
 pub fn has_content_extension(path: &str) -> bool {
     magic_of(path).is_some()
+}
+
+fn ends_with_any(path: &str, exts: &[&str]) -> bool {
+    let lower = path.to_lowercase();
+    exts.iter().any(|x| lower.ends_with(x))
 }
 
 fn starts(b: &[u8], with: &[u8]) -> bool {
@@ -302,13 +369,18 @@ fn at(b: &[u8], i: usize, with: &[u8]) -> bool {
     b.get(i..i + with.len()) == Some(with)
 }
 
+/// A zip by its magic: `PK` and 3, 5 or 7.
+fn is_zip(b: &[u8]) -> bool {
+    b.len() >= 4 && starts(b, b"PK") && matches!(b[2], 3 | 5 | 7)
+}
+
 impl Magic {
     /// Whether `head` (a file's first [`SNIFF_BYTES`]) is this format's, exactly as the spec's
     /// checker reads it.
     fn matches(self, b: &[u8]) -> bool {
         match self {
-            Magic::Zip => b.len() >= 4 && starts(b, b"PK") && matches!(b[2], 3 | 5 | 7),
-            Magic::Glb => starts(b, b"glTF"),
+            Magic::Zip => is_zip(b),
+            Magic::Glb => starts(b, GLB_MAGIC),
             Magic::GltfText => {
                 let rest = b
                     .iter()
@@ -337,7 +409,7 @@ impl Magic {
 /// never is.
 pub fn is_content_typed(path: &str, head: &[u8]) -> bool {
     let head = &head[..head.len().min(SNIFF_BYTES)];
-    magic_of(path).is_some_and(|m| m.matches(head))
+    path != MANIFEST_NAME && magic_of(path).is_some_and(|m| m.matches(head))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -345,20 +417,38 @@ pub fn is_content_typed(path: &str, head: &[u8]) -> bool {
 // ---------------------------------------------------------------------------------------------
 
 const DUPLICATE_MEMBER: &str = "the glTF JSON names a member twice: ";
+const TOO_DEEP: &str = "the JSON nests deeper than ";
+/// The deepest JSON read, the top-level value being depth 1 (the content catalogue's cap).
+pub(crate) const MAX_JSON_DEPTH: usize = 128;
 
-/// A JSON value, refused when an object names a member twice: one reader keeps the first, another
-/// the last.
-struct Strict;
+/// A JSON value, refused when an object names a member twice (one reader keeps the first, another
+/// the last) or when it nests deeper than [`MAX_JSON_DEPTH`].
+struct Strict {
+    depth: usize,
+}
 
 impl<'de> DeserializeSeed<'de> for Strict {
     type Value = Value;
 
     fn deserialize<D: Deserializer<'de>>(self, d: D) -> std::result::Result<Value, D::Error> {
-        d.deserialize_any(StrictVisitor)
+        d.deserialize_any(StrictVisitor { depth: self.depth })
     }
 }
 
-struct StrictVisitor;
+struct StrictVisitor {
+    depth: usize,
+}
+
+impl StrictVisitor {
+    fn deeper<E: de::Error>(&self) -> std::result::Result<Strict, E> {
+        if self.depth > MAX_JSON_DEPTH {
+            return Err(E::custom(format!("{TOO_DEEP}{MAX_JSON_DEPTH}")));
+        }
+        Ok(Strict {
+            depth: self.depth + 1,
+        })
+    }
+}
 
 impl<'de> Visitor<'de> for StrictVisitor {
     type Value = Value;
@@ -396,33 +486,72 @@ impl<'de> Visitor<'de> for StrictVisitor {
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Value, A::Error> {
+        let child = self.deeper()?;
         let mut out = Vec::new();
-        while let Some(v) = seq.next_element_seed(Strict)? {
+        while let Some(v) = seq.next_element_seed(Strict { depth: child.depth })? {
             out.push(v);
         }
         Ok(Value::Array(out))
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> std::result::Result<Value, A::Error> {
+        let child = self.deeper()?;
         let mut out = Map::new();
         while let Some(key) = map.next_key::<String>()? {
             if out.contains_key(&key) {
                 return Err(de::Error::custom(format!("{DUPLICATE_MEMBER}{key:?}")));
             }
-            let v = map.next_value_seed(Strict)?;
+            let v = map.next_value_seed(Strict { depth: child.depth })?;
             out.insert(key, v);
         }
         Ok(Value::Object(out))
     }
 }
 
+/// Why JSON is not read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StrictError {
+    /// An object names this member twice.
+    Duplicate(String),
+    /// Deeper than [`MAX_JSON_DEPTH`].
+    TooDeep,
+    /// Not JSON (or not UTF-8).
+    Invalid(String),
+}
+
+/// `bytes` as one JSON value, no member named twice, at most [`MAX_JSON_DEPTH`] deep (the top
+/// level is 1: `serde_json`'s own limit is lifted, so the visitor's is the only one).
+pub(crate) fn strict_value(bytes: &[u8]) -> std::result::Result<Value, StrictError> {
+    let mut de = serde_json::Deserializer::from_slice(bytes);
+    de.disable_recursion_limit();
+    let v = Strict { depth: 1 }
+        .deserialize(&mut de)
+        .and_then(|v| de.end().map(|()| v));
+    v.map_err(|e| {
+        let text = e.to_string();
+        if e.classify() == serde_json::error::Category::Data && text.starts_with(DUPLICATE_MEMBER) {
+            StrictError::Duplicate(text)
+        } else if e.classify() == serde_json::error::Category::Data && text.starts_with(TOO_DEEP) {
+            StrictError::TooDeep
+        } else {
+            StrictError::Invalid(text)
+        }
+    })
+}
+
 /// Why a GLB or a `.gltf` breaks the format rules: `content-format{reason, detail}`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormatProblem {
-    /// `truncated`, `length-mismatch`, `first-chunk-not-json`, `chunk-past-end`, `json-invalid`,
-    /// `duplicate-member`, `not-an-object`, `uri-not-a-string`, `external-uri` (a GLB's),
-    /// `uri-not-relative`, `uri-not-in-release` (a `.gltf`'s); `zip-inconsistent` and
-    /// `astrachar-json-duplicate-member` for an `.astrachar`'s own.
+    /// The rule. A GLB's container: `truncated`, `length-mismatch`, `first-chunk-not-json`,
+    /// `chunk-past-end`; its JSON: `json-over-16mib`, `bom` (a `.gltf`'s byte-order mark),
+    /// `json-invalid`, `json-too-deep`, `duplicate-member`, `not-an-object`; its references:
+    /// `gltf-array-shape` (`images`/`buffers` not an array of objects), `uri-not-a-string`,
+    /// `external-uri` (a GLB's), `uri-forbidden-character` (a raw `?` `#` `\`),
+    /// `uri-escape-invalid`, `uri-double-encoded`, `uri-not-relative`, `uri-not-in-release`,
+    /// `uri-outside-part` (a `.gltf`'s). By bytes: `glb-misnamed`, `gltf-misnamed`,
+    /// `bundle-misnamed`; the release's `gltf-json-total`; an archive's `archive-unreadable`
+    /// and `member-shadowed` (a file named like an archive's member beside it); a bundle's
+    /// `bundle-unreadable`, `nested-archive`, `name-magic`, `body-not-vrm`, `settings-invalid`.
     pub reason: &'static str,
     pub detail: String,
 }
@@ -434,25 +563,26 @@ fn problem(reason: &'static str, detail: impl Into<String>) -> FormatProblem {
     }
 }
 
-/// `bytes` as one JSON object, no member named twice.
+/// [`StrictError`] as a [`FormatProblem`].
+fn json_problem(e: StrictError) -> FormatProblem {
+    match e {
+        StrictError::Duplicate(d) => problem("duplicate-member", d),
+        StrictError::TooDeep => problem(
+            "json-too-deep",
+            format!("the glTF JSON nests deeper than {MAX_JSON_DEPTH}"),
+        ),
+        StrictError::Invalid(d) => {
+            problem("json-invalid", format!("the glTF JSON does not parse: {d}"))
+        }
+    }
+}
+
+/// `bytes` as one JSON object, no member named twice, at most 128 deep.
 fn strict_object(bytes: &[u8]) -> std::result::Result<Map<String, Value>, FormatProblem> {
-    let mut de = serde_json::Deserializer::from_slice(bytes);
-    let v = Strict
-        .deserialize(&mut de)
-        .and_then(|v| de.end().map(|()| v));
-    match v {
+    match strict_value(bytes) {
         Ok(Value::Object(m)) => Ok(m),
         Ok(_) => Err(problem("not-an-object", "the glTF JSON is not an object")),
-        Err(e)
-            if e.classify() == serde_json::error::Category::Data
-                && e.to_string().starts_with(DUPLICATE_MEMBER) =>
-        {
-            Err(problem("duplicate-member", e.to_string()))
-        }
-        Err(e) => Err(problem(
-            "json-invalid",
-            format!("the glTF JSON does not parse: {e}"),
-        )),
+        Err(e) => Err(json_problem(e)),
     }
 }
 
@@ -461,9 +591,9 @@ fn u32_le(b: &[u8], i: usize) -> u64 {
 }
 
 /// A GLB's glTF JSON, the container whole: its header's total length is the file's, its first
-/// chunk is JSON and ends inside the file, and the JSON is one object naming no member twice.
+/// chunk is JSON of at most 16 MiB and ends inside the file, and the JSON is one object.
 fn glb_json(raw: &[u8]) -> std::result::Result<Map<String, Value>, FormatProblem> {
-    if raw.len() < 20 || !starts(raw, b"glTF") {
+    if raw.len() < 20 || !starts(raw, GLB_MAGIC) {
         return Err(problem(
             "truncated",
             "not a GLB: shorter than its header and first chunk's",
@@ -492,7 +622,50 @@ fn glb_json(raw: &[u8]) -> std::result::Result<Map<String, Value>, FormatProblem
             "the GLB's JSON chunk runs past the end of the file",
         ));
     }
+    if len > MAX_GLTF_JSON {
+        return Err(problem(
+            "json-over-16mib",
+            format!("a JSON chunk of {len} bytes, over {MAX_GLTF_JSON}"),
+        ));
+    }
     strict_object(&raw[20..20 + len as usize])
+}
+
+/// The content catalogue's own `gltf_problem` (ingest-v1.md §3 step 10) for a bundle's GLB or
+/// `.gltf`: a first chunk that is not JSON, JSON over 16 MiB (checked before it is parsed), JSON
+/// that does not parse, is no object or nests deeper than 128. A member named twice is not this
+/// rule's.
+pub(crate) fn gltf_problem_content(b: &[u8]) -> Option<FormatProblem> {
+    let data = if starts(b, GLB_MAGIC) {
+        if b.get(16..20) != Some(b"JSON") {
+            return Some(problem(
+                "first-chunk-not-json",
+                "its first chunk is not JSON",
+            ));
+        }
+        let n = u32_le(b, 12);
+        if n > MAX_GLTF_JSON {
+            return Some(problem(
+                "json-over-16mib",
+                format!("a JSON chunk of {n} bytes, over {MAX_GLTF_JSON}"),
+            ));
+        }
+        &b[20.min(b.len())..(20 + n as usize).min(b.len())]
+    } else {
+        if b.len() as u64 > MAX_GLTF_JSON {
+            return Some(problem(
+                "json-over-16mib",
+                format!("a .gltf of {} bytes, over {MAX_GLTF_JSON}", b.len()),
+            ));
+        }
+        b
+    };
+    match strict_value(data) {
+        Err(StrictError::Duplicate(_)) => None,
+        Err(e) => Some(json_problem(e)),
+        Ok(Value::Object(_)) => None,
+        Ok(_) => Some(problem("not-an-object", "its JSON is not an object")),
+    }
 }
 
 /// Whether `u` begins with a URI scheme (`[A-Za-z][A-Za-z0-9+.-]*:`).
@@ -512,7 +685,8 @@ fn has_scheme(u: &str) -> bool {
     false
 }
 
-/// `uri` relative to the folder of `path` (which holds no `..`), `.` and empty components dropped.
+/// `uri` relative to the folder of `path` (which holds no `..`), `.` and empty components dropped
+/// (`posixpath.normpath(posixpath.join(posixpath.dirname(path), uri))`).
 fn resolve(path: &str, uri: &str) -> String {
     let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
     let joined = if dir.is_empty() {
@@ -531,19 +705,92 @@ fn resolve(path: &str, uri: &str) -> String {
     }
 }
 
-/// No external reference: in a GLB every `images[].uri` and `buffers[].uri` is a `data:` URI; in
-/// a `.gltf`, a `data:` URI or a plain relative path (no scheme, no `..`, no leading `/`, no
-/// backslash) naming a file of `present` (when given, with the part's `path`).
-fn uri_problem(
+/// A `.gltf` uri as a loader reads it (the content catalogue's `_decode_gltf_uri`, N2):
+/// percent-decoded exactly once, after no raw `?`, `#` or `\`; refused when an escape is
+/// malformed, the decoded bytes are no UTF-8 or hold a control character, or a `%` is left
+/// (double-encoded).
+fn decode_gltf_uri(u: &str) -> std::result::Result<String, FormatProblem> {
+    let bad: String = ['?', '#', '\\']
+        .iter()
+        .filter(|c| u.contains(**c))
+        .collect();
+    if !bad.is_empty() {
+        return Err(problem(
+            "uri-forbidden-character",
+            format!("a uri containing {bad:?}: {u:?}"),
+        ));
+    }
+    let src = u.as_bytes();
+    let mut out = Vec::with_capacity(src.len());
+    let mut i = 0;
+    while i < src.len() {
+        if src[i] == b'%' {
+            let two = src
+                .get(i + 1..i + 3)
+                .filter(|t| t.iter().all(u8::is_ascii_hexdigit));
+            let Some(two) = two else {
+                return Err(problem(
+                    "uri-escape-invalid",
+                    format!("a uri with a '%' not followed by two hex digits: {u:?}"),
+                ));
+            };
+            let hex = std::str::from_utf8(two).unwrap_or("00");
+            out.push(u8::from_str_radix(hex, 16).unwrap_or(0));
+            i += 3;
+        } else {
+            out.push(src[i]);
+            i += 1;
+        }
+    }
+    let Ok(decoded) = String::from_utf8(out) else {
+        return Err(problem(
+            "uri-escape-invalid",
+            format!("a uri not valid UTF-8 once percent-decoded: {u:?}"),
+        ));
+    };
+    if decoded.chars().any(|c| (c as u32) < 0x20 || c == '\u{7f}') {
+        return Err(problem(
+            "uri-escape-invalid",
+            format!("a uri with a control character once percent-decoded: {u:?}"),
+        ));
+    }
+    if decoded.contains('%') {
+        return Err(problem(
+            "uri-double-encoded",
+            format!("a uri still percent-encoded once decoded (double encoding): {u:?}"),
+        ));
+    }
+    Ok(decoded)
+}
+
+/// No external reference (the content catalogue's own `uri_refusal`): `images` and `buffers`,
+/// when there, are arrays of objects; in a GLB every `uri` is a `data:` URI; in a `.gltf` each is
+/// a `data:` URI or, decoded once, a plain relative path (no scheme, no `..`, no leading `/`, no
+/// backslash) naming a file `holds` holds, in the part `same_part` says is the file's own.
+pub(crate) fn uri_problem(
     doc: &Map<String, Value>,
     is_glb: bool,
-    path: Option<&str>,
-    present: Option<&BTreeSet<String>>,
+    path: &str,
+    holds: &dyn Fn(&str) -> bool,
+    same_part: &dyn Fn(&str) -> bool,
 ) -> Option<FormatProblem> {
     for key in ["images", "buffers"] {
-        let Some(Value::Array(items)) = doc.get(key) else {
-            continue;
+        let items = match doc.get(key) {
+            None | Some(Value::Null) => continue,
+            Some(Value::Array(items)) => items,
+            Some(other) => {
+                return Some(problem(
+                    "gltf-array-shape",
+                    format!("{key} is a JSON {}, not an array", json_kind(other)),
+                ));
+            }
         };
+        if let Some(x) = items.iter().find(|x| !x.is_object()) {
+            return Some(problem(
+                "gltf-array-shape",
+                format!("{key} contains an element that is not an object: {x}"),
+            ));
+        }
         for item in items {
             let Some(u) = item.as_object().and_then(|o| o.get("uri")) else {
                 continue;
@@ -563,24 +810,33 @@ fn uri_problem(
                     format!("a GLB names an external uri {u:?}"),
                 ));
             }
-            if has_scheme(u)
-                || u.starts_with('/')
-                || u.contains('\\')
-                || format!("/{u}/").contains("/../")
-                || u.is_empty()
-                || u == "."
+            let decoded = match decode_gltf_uri(u) {
+                Ok(d) => d,
+                Err(p) => return Some(p),
+            };
+            if has_scheme(&decoded)
+                || decoded.starts_with('/')
+                || decoded.contains('\\')
+                || format!("/{decoded}/").contains("/../")
+                || decoded.is_empty()
+                || decoded == "."
             {
                 return Some(problem(
                     "uri-not-relative",
-                    format!("a uri that is not a plain relative path: {u:?}"),
+                    format!("a uri that is not a plain relative path: {decoded:?}"),
                 ));
             }
-            if let (Some(present), Some(path)) = (present, path)
-                && !present.contains(&resolve(path, u))
-            {
+            let target = resolve(path, &decoded);
+            if !holds(&target) {
                 return Some(problem(
                     "uri-not-in-release",
-                    format!("a uri naming a file the release does not hold: {u:?}"),
+                    format!("a uri naming a file the release does not hold: {decoded:?}"),
+                ));
+            }
+            if !same_part(&target) {
+                return Some(problem(
+                    "uri-outside-part",
+                    format!("a uri resolving outside its own part: {decoded:?}"),
                 ));
             }
         }
@@ -588,37 +844,64 @@ fn uri_problem(
     None
 }
 
+fn json_kind(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
 /// Whether `path` names a `.gltf` (by its extension, any case).
 fn is_gltf_path(path: Option<&str>) -> bool {
-    path.is_some_and(|p| extension(p) == ".gltf")
+    path.is_some_and(|p| p.to_lowercase().ends_with(".gltf"))
 }
 
 /// The glTF JSON of a GLB (by its magic, whatever it is called) or of a `.gltf` (`path`), held
-/// to the format rules: `None` for any other file, else the document or why it breaks them.
+/// to the format rules (the games checker's `gltf_format_problem`): `None` for any other file,
+/// else the document or why it breaks them. `present` is every file a `.gltf`'s relative uri may
+/// name; with none, only the uri's shape is judged.
 pub fn gltf_document(
     raw: &[u8],
     path: Option<&str>,
     present: Option<&BTreeSet<String>>,
 ) -> Option<std::result::Result<Map<String, Value>, FormatProblem>> {
-    let is_glb = starts(raw, b"glTF");
+    let is_glb = starts(raw, GLB_MAGIC);
     if !is_glb && !is_gltf_path(path) {
         return None;
     }
     let doc = if is_glb {
         glb_json(raw)
     } else {
+        let p = path.unwrap_or_default();
+        if let Some(why) = sniff::bom_refusal(p, raw) {
+            return Some(Err(problem("bom", why)));
+        }
+        if raw.len() as u64 > MAX_GLTF_JSON {
+            return Some(Err(problem(
+                "json-over-16mib",
+                format!("a .gltf of {} bytes, over {MAX_GLTF_JSON}", raw.len()),
+            )));
+        }
         strict_object(raw)
     };
-    Some(
-        doc.and_then(|d| match uri_problem(&d, is_glb, path, present) {
+    let holds = |t: &str| match (present, path) {
+        (Some(present), Some(_)) => present.contains(t),
+        _ => true,
+    };
+    Some(doc.and_then(|d| {
+        match uri_problem(&d, is_glb, path.unwrap_or_default(), &holds, &|_| true) {
             Some(p) => Err(p),
             None => Ok(d),
-        }),
-    )
+        }
+    }))
 }
 
 /// Why `raw` (a GLB by its magic, or the `.gltf` at `path`) breaks the format rules, if it does:
-/// what every such part is held to before it is classified.
+/// what every such file is held to before it is classified.
 pub fn format_problem(
     raw: &[u8],
     path: Option<&str>,
@@ -917,101 +1200,81 @@ pub fn vrm_gate(raw: &[u8], path: Option<&str>, present: Option<&BTreeSet<String
 }
 
 // ---------------------------------------------------------------------------------------------
-// `.astrachar` bundles.
+// By bytes.
 // ---------------------------------------------------------------------------------------------
 
-/// The largest `astrachar.json` read (astra-companion's own cap).
-const ASTRACHAR_JSON_BYTES: u64 = 1024 * 1024;
+/// `astra-gi.toml`, `character.toml` and their caps (the content contract's settings file).
+pub(crate) const SETTINGS_NAME: &str = "character.toml";
+pub(crate) const MAX_SETTINGS: usize = 256 * 1024;
 
-/// What an `.astrachar`'s body is to the gate.
-enum Body {
-    /// Its `astrachar.json` names `body.file`, a `.vrm` the bundle holds: its name and bytes.
-    Readable(String, Vec<u8>),
-    /// Not readable as the spec reads a bundle (`reason`): the flag.
-    Unreadable(&'static str),
-    /// The bundle two readers read as two (or its manifest names a member twice): what is
-    /// inside is never believed, so it is refused.
-    Format(FormatProblem),
+/// Whether `raw` is a content bundle by the content catalogue's own definition: a zip whose LAST
+/// entry is `astrachar.json`, read with its own reader — only an archive Astra's importer would
+/// open as a bundle counts.
+fn is_bundle_bytes(raw: &[u8]) -> bool {
+    if !is_zip(raw) || memchr::memmem::find(raw, b"astrachar.json").is_none() {
+        return false;
+    }
+    zipwalk::walk(raw, zipwalk::BUNDLE, false)
+        .is_ok_and(|w| w.order().last() == Some("astrachar.json"))
 }
 
-fn read_inner(ar: &mut ZipArchive<Cursor<&[u8]>>, name: &str, most: u64) -> Option<Vec<u8>> {
-    let f = ar.by_name(name).ok()?;
-    let size = f.size();
-    if size > most {
+/// Why a file's name and its bytes disagree (`content-format`), or `None` — asked of every file
+/// of the release, declared or not (the games checker's `name_problem`).
+fn name_problem(path: &str, raw: &[u8], budget: &mut sniff::SniffBudget) -> Option<FormatProblem> {
+    if path == MANIFEST_NAME {
         return None;
     }
-    let mut out = Vec::with_capacity(size.min(64 * 1024 * 1024) as usize);
-    f.take(size.saturating_add(1)).read_to_end(&mut out).ok()?;
-    (out.len() as u64 == size).then_some(out)
+    if starts(raw, GLB_MAGIC) {
+        return (!ends_with_any(path, &[".vrm", ".glb", ".vrma"])).then(|| {
+            problem(
+                "glb-misnamed",
+                "a GLB (it begins with glTF) named something not .vrm, .glb or .vrma",
+            )
+        });
+    }
+    if !ends_with_any(path, &[".gltf"]) && sniff::is_text_gltf(raw, budget) {
+        return Some(problem(
+            "gltf-misnamed",
+            if raw.len() as u64 > MAX_GLTF_JSON {
+                format!(
+                    "a JSON text over 16 MiB ({} bytes) that names an asset key, named something not .gltf",
+                    raw.len()
+                )
+            } else {
+                "a text glTF (a JSON object with a top-level asset member) named something not .gltf"
+                    .to_owned()
+            },
+        ));
+    }
+    if is_zip(raw) && !ends_with_any(path, BUNDLE_EXTS) && is_bundle_bytes(raw) {
+        return Some(problem(
+            "bundle-misnamed",
+            "a content bundle (a zip whose last entry is astrachar.json) named something not .astrachar or .astrapack",
+        ));
+    }
+    None
 }
 
-/// The body of the `.astrachar` `raw` (astra-companion `docs/character-files-and-2d-editor.md`
-/// §1.3: `astrachar.json`'s `body` is `{"file": "models/<name>.vrm", …}`), read within `budget`,
-/// which every bundle of one release shares. The bundle is first held to what the release zip
-/// around it is ([`crate::zip_consistency::check_nested`]): one that two readers read as two, that
-/// holds an entry no reader may read, or that would take more than the budget left is never
-/// believed (`zip-inconsistent`, `zip-unsafe-entry`, `too-large`).
-fn astrachar_body(raw: &[u8], budget: &mut crate::zip_consistency::Budget) -> Body {
-    let Ok(mut ar) = ZipArchive::new(Cursor::new(raw)) else {
-        return Body::Unreadable("not-a-zip");
-    };
-    if ar.len() > Limits::default().max_entries {
-        return Body::Unreadable("too-many-entries");
+/// How much of a file is read first: whether it needs the rest is decided from it.
+const PREFIX: usize = 64 * 1024;
+
+/// Whether the by-bytes rules need all of a file whose first bytes are `head` (of `size`): a
+/// GLB under a GLB name (its format), a `.gltf`, a zip that is no bundle by name, and any text
+/// that is, or may yet be, JSON-looking. Anything else is decided by its first bytes.
+fn needs_whole(path: &str, head: &[u8], size: u64) -> bool {
+    if head.len() as u64 >= size {
+        return false; // it is whole
     }
-    if let Err(e) = crate::zip_consistency::check_nested(&mut ar, raw, budget) {
-        let (reason, what) = match e.code {
-            codes::ZIP_UNSAFE_ENTRY => ("zip-unsafe-entry", "holds an entry no reader may read"),
-            codes::TOO_LARGE => ("too-large", "unpacks to more than the release may"),
-            _ => ("zip-inconsistent", "reads as two archives"),
-        };
-        return Body::Format(problem(
-            reason,
-            format!(
-                "the bundle {what} ({})",
-                e.param("reason").or(e.param("entry")).unwrap_or("headers")
-            ),
-        ));
+    if starts(head, GLB_MAGIC) {
+        return ends_with_any(path, &[".vrm", ".glb", ".vrma"]);
     }
-    let Some(json) = read_inner(&mut ar, "astrachar.json", ASTRACHAR_JSON_BYTES) else {
-        return Body::Unreadable("no-astrachar-json");
-    };
-    let manifest = match strict_object(&json) {
-        Ok(m) => m,
-        Err(p) if p.reason == "duplicate-member" => {
-            return Body::Format(problem(
-                "astrachar-json-duplicate-member",
-                p.detail.replacen("glTF", "astrachar", 1),
-            ));
-        }
-        Err(_) => return Body::Unreadable("astrachar-json-invalid"),
-    };
-    let Some(file) = manifest
-        .get("body")
-        .and_then(Value::as_object)
-        .and_then(|b| b.get("file"))
-        .and_then(Value::as_str)
-    else {
-        return Body::Unreadable("no-file-body");
-    };
-    if extension(file) != ".vrm" {
-        return Body::Unreadable("body-not-vrm");
+    if ends_with_any(path, &[".gltf"]) {
+        return true;
     }
-    let Some(size) = ar.by_name(file).ok().map(|f| f.size()) else {
-        return Body::Unreadable("body-missing");
-    };
-    if budget.spend(size, file).is_err() {
-        return Body::Format(problem(
-            "too-large",
-            format!("the bundle's body {file} unpacks to more than the release may"),
-        ));
+    if is_zip(head) {
+        return !ends_with_any(path, BUNDLE_EXTS);
     }
-    let Some(bytes) = read_inner(&mut ar, file, size) else {
-        return Body::Unreadable("body-missing");
-    };
-    if !starts(&bytes, b"glTF") {
-        return Body::Unreadable("body-not-glb");
-    }
-    Body::Readable(file.to_owned(), bytes)
+    !matches!(sniff::first_char(head, false), Some(c) if c != b'{')
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1038,12 +1301,12 @@ pub struct PartReport {
     pub credit: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub licence: Option<String>,
-    /// `None` is `content-licence-undeclared`.
+    /// `None` is `content-licence-undeclared` (or a part the gate refused).
     pub licence_source: Option<LicenceSource>,
     pub sha256: String,
-    /// What the glTF's extensions make it, when it is a glTF (an `.astrachar`: its body's). Not
-    /// a `contentPart` member, so never in the part's JSON: [`Report::classes`] says it beside
-    /// the parts.
+    /// What the glTF's extensions make it, when it is a glTF (a bundle: its body's). Not a
+    /// `contentPart` member, so never in the part's JSON: [`Report::classes`] says it beside the
+    /// parts.
     #[serde(skip)]
     pub gltf: Option<GltfClass>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1060,11 +1323,13 @@ pub struct Flag {
 /// [`judge`]'s answer.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Report {
-    /// Every content-typed file of the release, sorted.
+    /// Every content-typed file of the release, sorted: a part inside a game's own archive by
+    /// `<archive path>!<inner path>`.
     pub content_files: Vec<String>,
     /// Each entry a content-typed file covers, in the manifest's order.
     pub parts: Vec<PartReport>,
-    /// Every refusal, in order: the files no entry covers, then each entry's.
+    /// Every refusal, in order: what the release's files are, then the files no entry covers and
+    /// the entries no file is at, then each entry's. One per code and path.
     pub refusals: Vec<LauncherError>,
     pub flags: Vec<Flag>,
 }
@@ -1091,150 +1356,480 @@ fn with_deciding(mut params: BTreeMap<String, String>, d: &Deciding) -> BTreeMap
     params
 }
 
-fn refusal(code: &'static str, params: &BTreeMap<String, String>) -> LauncherError {
-    let mut e = LauncherError::new(code);
-    e.params = params.clone();
-    e
+/// The refusals of one release: one per `(code, path)`, in the order they are found.
+struct Findings<'a> {
+    parts: &'a [ContentPart],
+    out: Vec<LauncherError>,
+    seen: BTreeSet<(&'static str, String)>,
 }
 
-/// Holds a release's files to its `[[integration.content]]` (the module's four steps).
-/// `found` is every content-typed file of the release ([`is_content_typed`]); `present` every file
-/// it holds (what a `.gltf`'s relative URI may name); `max_inflated` what every `.astrachar`
-/// bundle of it together may unpack to (`Limits::max_uncompressed_bytes`); `read` gives a file's
-/// bytes, asked once for each covered part.
-pub fn judge(
-    parts: &[ContentPart],
-    found: &BTreeSet<String>,
-    present: &BTreeSet<String>,
-    max_inflated: u64,
-    mut read: impl FnMut(&str) -> Result<Vec<u8>>,
-) -> Result<Report> {
-    let mut budget = crate::zip_consistency::Budget::new(max_inflated);
-    let table = format!("integration.{TABLE}");
-    let mut r = Report {
-        content_files: found.iter().cloned().collect(),
-        ..Report::default()
+impl Findings<'_> {
+    /// The `field` a refusal of `path` names: the entry that declares it, else the table.
+    fn field(&self, path: &str) -> String {
+        self.parts
+            .iter()
+            .position(|p| p.path == path)
+            .map_or(format!("integration.{TABLE}"), |i| {
+                format!("integration.{TABLE}[{i}]")
+            })
+    }
+
+    fn push(&mut self, code: &'static str, path: &str, mut params: BTreeMap<String, String>) {
+        if !self.seen.insert((code, path.to_owned())) {
+            return;
+        }
+        params
+            .entry("field".to_owned())
+            .or_insert_with(|| self.field(path));
+        params.insert("path".to_owned(), path.to_owned());
+        let mut e = LauncherError::new(code);
+        e.params = params;
+        self.out.push(e);
+    }
+
+    fn format(&mut self, path: &str, p: FormatProblem) {
+        let mut params = BTreeMap::new();
+        params.insert("reason".to_owned(), p.reason.to_owned());
+        params.insert("detail".to_owned(), p.detail);
+        self.push(codes::CONTENT_FORMAT, path, params);
+    }
+
+    fn holds(&self, code: &'static str, path: &str) -> bool {
+        self.seen.contains(&(code, path.to_owned()))
+    }
+}
+
+fn unscanned(path: &str, reason: &str, detail: impl Into<String>) -> Flag {
+    let mut params = BTreeMap::new();
+    params.insert("path".to_owned(), path.to_owned());
+    params.insert("reason".to_owned(), reason.to_owned());
+    params.insert("detail".to_owned(), detail.into());
+    Flag {
+        code: FLAG_ARCHIVE_UNSCANNED,
+        params,
+    }
+}
+
+/// What the content catalogue's own code says of one embedded bundle (the games checker's
+/// `bundle_verdict`).
+enum BundleVerdict {
+    /// Refused with content's code (its launcher spelling), its params.
+    Refused(&'static str, BTreeMap<String, String>),
+    /// Accepted; `unknown` held by the content catalogue (the flag); its body, when it has one.
+    Accepted {
+        unknown: bool,
+        body: Option<(String, Vec<u8>)>,
+    },
+}
+
+/// The params of a bundle's refusal: content's words prefixed `<path>!`, the bundle's file it
+/// names, and for `content-format` its reason.
+fn bundle_params(
+    path: &str,
+    detail: &str,
+    inner: Option<&str>,
+    reason: &str,
+) -> BTreeMap<String, String> {
+    let mut params = BTreeMap::new();
+    params.insert("detail".to_owned(), format!("{path}!{detail}"));
+    if let Some(inner) = inner {
+        params.insert("inner".to_owned(), inner.to_owned());
+    }
+    if !reason.is_empty() {
+        params.insert("reason".to_owned(), reason.to_owned());
+    }
+    params
+}
+
+/// One embedded bundle at `path`, judged by the content catalogue's own code within the release's
+/// budget: walked once (its own 32 MiB of glTF JSON charged to the release's before anything in it
+/// is parsed), then ingested.
+fn bundle_verdict(
+    path: &str,
+    raw: &[u8],
+    licence: bool,
+    budget: &mut sniff::SniffBudget,
+) -> BundleVerdict {
+    let unreadable = |why: &str| {
+        BundleVerdict::Refused(
+            codes::CONTENT_FORMAT,
+            bundle_params(
+                path,
+                &format!(": the content checker cannot read it ({why})"),
+                None,
+                "bundle-unreadable",
+            ),
+        )
     };
-    let declared: BTreeSet<&str> = parts.iter().map(|p| p.path.as_str()).collect();
-    for f in found.iter().filter(|f| !declared.contains(f.as_str())) {
-        r.refusals.push(
-            LauncherError::new(codes::CONTENT_UNDECLARED)
-                .with("field", table.clone())
-                .with("path", f.clone()),
+    let w = match zipwalk::walk(raw, zipwalk::BUNDLE, true) {
+        Ok(w) => w,
+        Err(zipwalk::WalkError::Refused(r)) => {
+            return BundleVerdict::Refused(ours(r.code), bundle_params(path, &r.detail, None, ""));
+        }
+        Err(zipwalk::WalkError::Unreadable(why)) => return unreadable(&why),
+    };
+    let order: Vec<String> = w.order().map(str::to_owned).collect();
+    let list: Vec<(String, Vec<u8>)> = w.into_files();
+    let own: u64 = list
+        .iter()
+        .map(|(n, d)| zipwalk::gltf_json_bytes(n, &d[..d.len().min(16)], d.len() as u64))
+        .sum();
+    if budget.gltf_json + own > MAX_GLTF_JSON_TOTAL {
+        return BundleVerdict::Refused(
+            codes::CONTENT_FORMAT,
+            bundle_params(
+                path,
+                &format!(
+                    ": {} bytes of glTF JSON in the release with this bundle, over {MAX_GLTF_JSON_TOTAL} (32 MiB)",
+                    budget.gltf_json + own
+                ),
+                None,
+                "gltf-json-total",
+            ),
         );
     }
+    budget.gltf_json += own;
+    let files = bundle::Files::new(list);
+    match bundle::ingest(&files, &order, licence) {
+        Ok(a) => BundleVerdict::Accepted {
+            unknown: a.unknown,
+            body: a.body,
+        },
+        Err(bundle::Failure::Unreadable(why)) => unreadable(&why),
+        Err(bundle::Failure::Refused(r)) => {
+            let mut params = bundle_params(path, &r.detail, r.inner.as_deref(), r.reason);
+            // The reading that decided a refused VRM, as for a part of the release's own.
+            if r.code == bundle::E_CONTENT_LICENCE_REFUSED
+                && let Some(inner) = &r.inner
+                && let Some(Gate::Refused { deciding, .. }) =
+                    files.get(inner).map(|b| vrm_gate(b, Some(inner), None))
+            {
+                params = with_deciding(params, &deciding);
+            }
+            BundleVerdict::Refused(ours(r.code), params)
+        }
+    }
+}
+
+/// A file found content-typed: where its bytes are read from when its entry is judged.
+enum Found {
+    /// A file of the release.
+    Release,
+    /// A file in a game's own archive (its bytes kept when an entry declares it), and the files
+    /// beside it (what a `.gltf`'s relative uri may name).
+    Inner(Option<Vec<u8>>, std::rc::Rc<BTreeSet<String>>),
+}
+
+/// Holds a release's files to its `[[integration.content]]` (the module's seven steps). `files`
+/// is every file of the release, `(name, size)`; `read` gives the first bytes of one (`Some(n)`)
+/// or all of it (`None`).
+pub fn judge(
+    parts: &[ContentPart],
+    files: &[(String, u64)],
+    mut read: impl FnMut(&str, Option<usize>) -> Result<Vec<u8>>,
+) -> Result<Report> {
+    let mut files: Vec<(String, u64)> = files.to_vec();
+    files.sort();
+    let present: BTreeSet<String> = files.iter().map(|(n, _)| n.clone()).collect();
+    let declared: BTreeSet<&str> = parts.iter().map(|p| p.path.as_str()).collect();
+    let mut f = Findings {
+        parts,
+        out: Vec::new(),
+        seen: BTreeSet::new(),
+    };
+    let mut flags: Vec<Flag> = Vec::new();
+    let mut budget = sniff::SniffBudget::default();
+
+    // 1. The release's glTF JSON, from headers.
+    let mut heads: Vec<Vec<u8>> = Vec::with_capacity(files.len());
+    for (name, _) in &files {
+        heads.push(read(name, Some(PREFIX))?);
+    }
+    budget.gltf_json = files
+        .iter()
+        .zip(&heads)
+        .map(|((n, size), h)| zipwalk::gltf_json_bytes(n, &h[..h.len().min(16)], *size))
+        .sum();
+    if budget.gltf_json > MAX_GLTF_JSON_TOTAL {
+        f.format(
+            "",
+            problem(
+                "gltf-json-total",
+                format!(
+                    "{} bytes of glTF JSON in the release, over {MAX_GLTF_JSON_TOTAL} (32 MiB)",
+                    budget.gltf_json
+                ),
+            ),
+        );
+    }
+    let mut found: BTreeMap<String, Found> = files
+        .iter()
+        .zip(&heads)
+        .filter(|((n, _), h)| is_content_typed(n, h))
+        .map(|((n, _), _)| (n.clone(), Found::Release))
+        .collect();
+
+    // 2–4. Every file by its bytes; a game's own archives, one level deep.
+    for ((name, size), head) in files.iter().zip(heads) {
+        let raw: Vec<u8> = if needs_whole(name, &head, *size) {
+            read(name, None)?
+        } else {
+            head
+        };
+        if let Some(p) = name_problem(name, &raw, &mut budget) {
+            f.format(name, p);
+            continue;
+        }
+        if let Some(p) = format_problem(&raw, Some(name), Some(&present)) {
+            f.format(name, p);
+            continue;
+        }
+        // A zip no bundle by name; `name_problem` found it no bundle by its bytes either.
+        if !is_zip(&raw) || ends_with_any(name, BUNDLE_EXTS) {
+            continue;
+        }
+        let w = match zipwalk::walk(&raw, zipwalk::GAME_ARCHIVE, false) {
+            Ok(w) => w,
+            Err(zipwalk::WalkError::Refused(r)) => {
+                let cloak = matches!(
+                    r.code,
+                    zipwalk::E_ZIP_HEADERS_INCONSISTENT | zipwalk::E_ZIP_END_RECORD
+                ) && !r.zip64;
+                if cloak {
+                    let mut params = BTreeMap::new();
+                    params.insert("detail".to_owned(), r.detail);
+                    f.push(ours(r.code), name, params);
+                } else if r.code == zipwalk::E_ARCHIVE_TOO_LARGE && r.gltf_json {
+                    f.format(name, problem("gltf-json-total", r.detail));
+                } else {
+                    flags.push(unscanned(name, ours(r.code), r.detail));
+                }
+                continue;
+            }
+            Err(zipwalk::WalkError::Unreadable(why)) => {
+                f.format(
+                    name,
+                    problem(
+                        "archive-unreadable",
+                        format!("the archive cannot be read ({why})"),
+                    ),
+                );
+                continue;
+            }
+        };
+        let inner: Vec<(String, usize)> = w
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| !e.is_dir())
+            .map(|(i, e)| (format!("{name}!{}", e.name), i))
+            .collect();
+        let own: u64 = inner
+            .iter()
+            .map(|(k, i)| {
+                let e = &w.entries[*i];
+                zipwalk::gltf_json_bytes(k, &e.head, u64::from(e.size))
+            })
+            .sum();
+        if budget.gltf_json + own > MAX_GLTF_JSON_TOTAL {
+            f.format(
+                name,
+                problem(
+                    "gltf-json-total",
+                    format!(
+                        "{} bytes of glTF JSON in the release with this archive, over {MAX_GLTF_JSON_TOTAL} (32 MiB)",
+                        budget.gltf_json + own
+                    ),
+                ),
+            );
+            continue;
+        }
+        budget.gltf_json += own;
+        let beside = std::rc::Rc::new(
+            inner
+                .iter()
+                .map(|(k, _)| k.clone())
+                .collect::<BTreeSet<_>>(),
+        );
+        let mut inner = inner;
+        inner.sort();
+        for (k, i) in inner {
+            if present.contains(&k) {
+                f.format(
+                    &k,
+                    problem(
+                        "member-shadowed",
+                        "a file named like a member of an archive beside it",
+                    ),
+                );
+                continue;
+            }
+            let size = u64::from(w.entries[i].size);
+            let head = w.data(i, Some(PREFIX));
+            let d = if needs_whole(&k, &head, size) {
+                w.data(i, None)
+            } else {
+                head
+            };
+            if let Some(p) = name_problem(&k, &d, &mut budget)
+                .or_else(|| format_problem(&d, Some(&k), Some(&beside)))
+            {
+                f.format(&k, p);
+                continue;
+            }
+            if is_zip(&d) && !ends_with_any(&k, BUNDLE_EXTS) {
+                flags.push(unscanned(
+                    &k,
+                    "nested",
+                    "an archive inside an archive: opened one level deep",
+                ));
+                continue;
+            }
+            if ends_with_any(&k, INNER_PART_EXTS) && is_content_typed(&k, &d) {
+                let keep = declared.contains(k.as_str()).then(|| d.into_owned());
+                found.insert(k, Found::Inner(keep, beside.clone()));
+            }
+        }
+    }
+
+    // 5. Coverage.
+    for p in found.keys().filter(|p| !declared.contains(p.as_str())) {
+        f.push(codes::CONTENT_UNDECLARED, p, BTreeMap::new());
+    }
+    let missing: BTreeSet<&str> = declared
+        .iter()
+        .copied()
+        .filter(|p| !found.contains_key(*p))
+        .collect();
+    for p in missing {
+        if !f.holds(codes::CONTENT_FORMAT, p) {
+            let field = format!("{}.path", f.field(p));
+            let mut params = BTreeMap::new();
+            params.insert("field".to_owned(), field);
+            f.push(codes::CONTENT_MISSING, p, params);
+        }
+    }
+
+    // 6–7. Each entry: the gate, and its licence.
+    let mut reports = Vec::new();
     for (i, part) in parts.iter().enumerate() {
         // Two entries of one path are refused at parse; the first is the one judged.
         if parts[..i].iter().any(|p| p.path == part.path) {
             continue;
         }
-        let field = format!("{table}[{i}]");
-        if !found.contains(&part.path) {
-            r.refusals.push(
-                LauncherError::new(codes::CONTENT_MISSING)
-                    .with("field", format!("{field}.path"))
-                    .with("path", part.path.clone()),
-            );
+        let Some(how) = found.get(&part.path) else {
             continue;
-        }
-        let raw = read(&part.path)?;
+        };
+        let (raw, beside): (Vec<u8>, &BTreeSet<String>) = match how {
+            Found::Release => (read(&part.path, None)?, &present),
+            Found::Inner(Some(b), beside) => (b.clone(), beside),
+            Found::Inner(None, _) => continue,
+        };
+        let field = format!("integration.{TABLE}[{i}]");
         let mut base = BTreeMap::new();
         base.insert("field".to_owned(), field.clone());
-        base.insert("path".to_owned(), part.path.clone());
 
-        // What the gate is asked about this part: (the gate, the bundle's body when it is one).
         let mut gltf = None;
-        let mut gate: Option<(Gate, Option<String>)> = None;
-        if extension(&part.path) == ".astrachar" {
-            match astrachar_body(&raw, &mut budget) {
-                Body::Readable(name, body) => {
-                    if let Some(Ok(doc)) = gltf_document(&body, Some(&name), None) {
-                        gltf = Some(class_of(&doc));
-                    }
-                    gate = Some((vrm_gate(&body, Some(&name), None), Some(name)));
-                }
-                Body::Unreadable(reason) => {
-                    let mut params = base.clone();
-                    params.insert("reason".to_owned(), reason.to_owned());
-                    r.flags.push(Flag {
-                        code: FLAG_ASTRACHAR_UNREADABLE,
-                        params,
-                    });
-                }
-                Body::Format(p) => gate = Some((Gate::Format(p), None)),
-            }
-        } else {
-            match gltf_document(&raw, Some(&part.path), Some(present)) {
-                None => {}
-                Some(Err(p)) => gate = Some((Gate::Format(p), None)),
-                Some(Ok(doc)) => {
-                    let class = class_of(&doc);
-                    gltf = Some(class);
-                    if class == GltfClass::Avatar
-                        || (class == GltfClass::Plain && part.kind == ContentKind::Character)
-                    {
-                        gate = Some((gate_of(&doc), None));
-                    }
-                }
-            }
-        }
-
         let mut vrm_licence = None;
-        if let Some((gate, body)) = gate {
-            let mut params = base.clone();
-            if let Some(body) = body {
-                params.insert("body".to_owned(), body);
+        let mut refused = false;
+        match gltf_document(&raw, Some(&part.path), Some(beside)) {
+            None => {}
+            Some(Err(p)) => {
+                f.format(&part.path, p);
+                refused = true;
             }
-            match gate {
-                Gate::Format(p) => {
-                    params.insert("reason".to_owned(), p.reason.to_owned());
-                    params.insert("detail".to_owned(), p.detail);
-                    r.refusals.push(refusal(codes::CONTENT_FORMAT, &params));
-                }
-                Gate::Allowed(licence) => vrm_licence = Some(licence),
-                Gate::Refused { licence, deciding } => {
-                    vrm_licence = Some(licence);
-                    let params = with_deciding(params, &deciding);
-                    r.refusals
-                        .push(refusal(codes::CONTENT_LICENCE_REFUSED, &params));
-                }
-                Gate::Conflict { vrm0, vrm1 } => {
-                    for m in [&vrm0, &vrm1] {
-                        let side = if m.version == "0.x" { "vrm0" } else { "vrm1" };
-                        params.insert(side.to_owned(), m.verdict.as_str().to_owned());
-                        if let Some(d) = &m.deciding {
-                            params.insert(format!("{side}_meta"), d.meta.clone());
+            Some(Ok(doc)) => {
+                let class = class_of(&doc);
+                gltf = Some(class);
+                if class == GltfClass::Avatar
+                    || (class == GltfClass::Plain && part.kind == ContentKind::Character)
+                {
+                    match gate_of(&doc) {
+                        Gate::Format(p) => {
+                            f.format(&part.path, p);
+                            refused = true;
+                        }
+                        Gate::Allowed(licence) => vrm_licence = Some(licence),
+                        Gate::Refused { licence, deciding } => {
+                            vrm_licence = Some(licence);
+                            f.push(
+                                codes::CONTENT_LICENCE_REFUSED,
+                                &part.path,
+                                with_deciding(base.clone(), &deciding),
+                            );
+                            refused = true;
+                        }
+                        Gate::Conflict { vrm0, vrm1 } => {
+                            let mut params = base.clone();
+                            for m in [&vrm0, &vrm1] {
+                                let side = if m.version == "0.x" { "vrm0" } else { "vrm1" };
+                                params.insert(side.to_owned(), m.verdict.as_str().to_owned());
+                                if let Some(d) = &m.deciding {
+                                    params.insert(format!("{side}_meta"), d.meta.clone());
+                                }
+                            }
+                            f.push(codes::CONTENT_LICENCE_CONFLICT, &part.path, params);
+                            refused = true;
+                        }
+                        Gate::Unknown(deciding) => {
+                            let mut params = match &deciding {
+                                Some(d) => with_deciding(base.clone(), d),
+                                None => base.clone(),
+                            };
+                            params.insert("path".to_owned(), part.path.clone());
+                            flags.push(Flag {
+                                code: FLAG_VRM_META_UNKNOWN,
+                                params,
+                            });
                         }
                     }
-                    r.refusals
-                        .push(refusal(codes::CONTENT_LICENCE_CONFLICT, &params));
-                }
-                Gate::Unknown(deciding) => {
-                    let params = match &deciding {
-                        Some(d) => with_deciding(params, d),
-                        None => params,
-                    };
-                    r.flags.push(Flag {
-                        code: FLAG_VRM_META_UNKNOWN,
-                        params,
-                    });
                 }
             }
         }
-
+        if ends_with_any(&part.path, BUNDLE_EXTS) && is_zip(&raw) {
+            match bundle_verdict(&part.path, &raw, part.licence.is_some(), &mut budget) {
+                BundleVerdict::Refused(code, params) => {
+                    let mut params = params;
+                    params.insert("field".to_owned(), field.clone());
+                    f.push(code, &part.path, params);
+                    refused = true;
+                }
+                BundleVerdict::Accepted { unknown, body } => {
+                    if unknown {
+                        let mut params = base.clone();
+                        params.insert("path".to_owned(), part.path.clone());
+                        flags.push(Flag {
+                            code: FLAG_VRM_META_UNKNOWN,
+                            params,
+                        });
+                    }
+                    if let Some((name, bytes)) = body {
+                        if let Some(Ok(doc)) = gltf_document(&bytes, Some(&name), None) {
+                            gltf = Some(class_of(&doc));
+                        }
+                        if !unknown
+                            && let Gate::Allowed(licence) = vrm_gate(&bytes, Some(&name), None)
+                        {
+                            vrm_licence = Some(licence);
+                        }
+                    }
+                }
+            }
+        }
         let licence_source = if vrm_licence.is_some() {
             Some(LicenceSource::Vrm)
         } else if part.licence.is_some() {
             Some(LicenceSource::Declared)
         } else {
-            r.refusals.push(
-                LauncherError::new(codes::CONTENT_LICENCE_UNDECLARED)
-                    .with("field", format!("{field}.licence"))
-                    .with("path", part.path.clone()),
-            );
             None
         };
-        r.parts.push(PartReport {
+        // A part the gate refused is not also asked for its licence.
+        if licence_source.is_none() && !refused {
+            let mut params = BTreeMap::new();
+            params.insert("field".to_owned(), format!("{field}.licence"));
+            f.push(codes::CONTENT_LICENCE_UNDECLARED, &part.path, params);
+        }
+        reports.push(PartReport {
             path: part.path.clone(),
             kind: part.kind,
             title: part.title.clone(),
@@ -1246,7 +1841,29 @@ pub fn judge(
             vrm_licence,
         });
     }
-    Ok(r)
+    let content_files: Vec<String> = found.keys().cloned().collect();
+    Ok(Report {
+        content_files,
+        parts: reports,
+        refusals: f.out,
+        flags,
+    })
+}
+
+/// A release's files as `(name, size)`, read from a map (the unit tests').
+#[cfg(test)]
+fn judge_files(
+    parts: &[ContentPart],
+    files: &std::collections::HashMap<String, Vec<u8>>,
+) -> Result<Report> {
+    let list: Vec<(String, u64)> = files
+        .iter()
+        .map(|(n, b)| (n.clone(), b.len() as u64))
+        .collect();
+    judge(parts, &list, |name, at_most| {
+        let b = &files[name];
+        Ok(b[..b.len().min(at_most.unwrap_or(usize::MAX))].to_vec())
+    })
 }
 
 #[cfg(test)]
@@ -1263,6 +1880,7 @@ mod tests {
             ("a.b/c", ""),
             ("x.tar.gz", ".gz"),
             ("noext", ""),
+            ("mods/a.jar!assets/b.vrm", ".vrm"),
         ] {
             assert_eq!(extension(path), want, "{path}");
         }
@@ -1301,17 +1919,35 @@ mod tests {
     }
 
     #[test]
-    fn a_uri_is_resolved_beside_its_gltf() {
+    fn a_uri_is_resolved_beside_its_gltf_and_decoded_once() {
         assert_eq!(resolve("models/prop.gltf", "prop.bin"), "models/prop.bin");
         assert_eq!(
             resolve("models/prop.gltf", "./tex/a.png"),
             "models/tex/a.png"
         );
         assert_eq!(resolve("prop.gltf", "a//b.bin"), "a/b.bin");
+        assert_eq!(resolve("m/a.jar!x/p.gltf", "p.bin"), "m/a.jar!x/p.bin");
         assert!(has_scheme("https://x"));
         assert!(has_scheme("c:x"));
         assert!(!has_scheme("1x:y"));
         assert!(!has_scheme("a/b:c"));
+        assert_eq!(
+            decode_gltf_uri("Base%20Color.bin").unwrap(),
+            "Base Color.bin"
+        );
+        assert_eq!(decode_gltf_uri("..%2fx").unwrap(), "../x");
+        for (u, reason) in [
+            ("a?b", "uri-forbidden-character"),
+            ("a#b", "uri-forbidden-character"),
+            ("a\\b", "uri-forbidden-character"),
+            ("a%2", "uri-escape-invalid"),
+            ("a%zz", "uri-escape-invalid"),
+            ("a%ff", "uri-escape-invalid"),
+            ("a%0a", "uri-escape-invalid"),
+            ("%252e%252e/x", "uri-double-encoded"),
+        ] {
+            assert_eq!(decode_gltf_uri(u).unwrap_err().reason, reason, "{u}");
+        }
     }
 
     #[test]
@@ -1321,7 +1957,6 @@ mod tests {
             &br#"{"a":1,"a":2}"#[..],
             br#"{"x":{"b":false,"b":true}}"#,
             br#"{"x":[{"k":1,"k":1}]}"#,
-            br#"{"a":1,"a":2}"#,
         ] {
             let e = strict_object(twice).unwrap_err();
             assert_eq!(
@@ -1339,6 +1974,28 @@ mod tests {
         assert_eq!(strict_object(b"{} x").unwrap_err().reason, "json-invalid");
     }
 
+    /// The content catalogue's depth cap: the top-level object is depth 1, 128 is allowed, 129
+    /// is not — and a million levels are refused, never a crash.
+    #[test]
+    fn json_nests_at_most_128_deep_and_a_million_levels_never_crash() {
+        let deep = |depth: usize| {
+            let mut s = b"{\"a\":".to_vec();
+            s.extend(std::iter::repeat_n(b'[', depth - 1));
+            s.extend(std::iter::repeat_n(b']', depth - 1));
+            s.push(b'}');
+            s
+        };
+        assert!(strict_object(&deep(128)).is_ok());
+        assert_eq!(
+            strict_object(&deep(129)).unwrap_err().reason,
+            "json-too-deep"
+        );
+        assert_eq!(
+            strict_object(&deep(1_000_000)).unwrap_err().reason,
+            "json-too-deep"
+        );
+    }
+
     fn meta(json: &str) -> Map<String, Value> {
         serde_json::from_str(json).unwrap()
     }
@@ -1348,79 +2005,67 @@ mod tests {
         let v = |version, json: &str| meta_verdict(version, &meta(json)).verdict;
         use Verdict::*;
         use VrmVersion::*;
-        assert_eq!(
-            v(
+        for (version, json, want) in [
+            (
                 V0,
-                r#"{"licenseName":"CC_BY","allowedUserName":"Everyone"}"#
+                r#"{"licenseName":"CC_BY","allowedUserName":"Everyone"}"#,
+                Allowed,
             ),
-            Allowed
-        );
-        assert_eq!(
-            v(V0, r#"{"licenseName":"CC0","allowedUserName":"Everyone"}"#),
-            Allowed
-        );
-        assert_eq!(
-            v(
+            (
                 V0,
-                r#"{"licenseName":"Other","allowedUserName":"Everyone"}"#
+                r#"{"licenseName":"CC0","allowedUserName":"Everyone"}"#,
+                Allowed,
             ),
-            Unknown
-        );
-        assert_eq!(
-            v(
+            (
                 V0,
-                r#"{"licenseName":"CC-BY","allowedUserName":"Everyone"}"#
+                r#"{"licenseName":"Other","allowedUserName":"Everyone"}"#,
+                Unknown,
             ),
-            Unknown
-        );
-        assert_eq!(
-            v(
+            (
                 V0,
-                r#"{"licenseName":"CC_BY","allowedUserName":"everyone"}"#
+                r#"{"licenseName":"CC-BY","allowedUserName":"Everyone"}"#,
+                Unknown,
             ),
-            Unknown
-        );
-        assert_eq!(
-            v(
+            (
                 V0,
-                r#"{"licenseName":"Other","allowedUserName":"OnlyAuthor"}"#
+                r#"{"licenseName":"CC_BY","allowedUserName":"everyone"}"#,
+                Unknown,
             ),
-            Prohibited
-        );
-        assert_eq!(
-            v(V0, r#"{"licenseName":1,"allowedUserName":"Everyone"}"#),
-            Prohibited
-        );
-        assert_eq!(v(V0, r#"{"allowedUserName":"Everyone"}"#), Prohibited);
-        assert_eq!(
-            v(
+            (
+                V0,
+                r#"{"licenseName":"Other","allowedUserName":"OnlyAuthor"}"#,
+                Prohibited,
+            ),
+            (
+                V0,
+                r#"{"licenseName":1,"allowedUserName":"Everyone"}"#,
+                Prohibited,
+            ),
+            (V0, r#"{"allowedUserName":"Everyone"}"#, Prohibited),
+            (
                 V1,
-                r#"{"allowRedistribution":true,"avatarPermission":"everyone"}"#
+                r#"{"allowRedistribution":true,"avatarPermission":"everyone"}"#,
+                Allowed,
             ),
-            Allowed
-        );
-        assert_eq!(
-            v(
+            (
                 V1,
-                r#"{"allowRedistribution":"true","avatarPermission":"everyone"}"#
+                r#"{"allowRedistribution":"true","avatarPermission":"everyone"}"#,
+                Prohibited,
             ),
-            Prohibited
-        );
-        assert_eq!(
-            v(
+            (
                 V1,
-                r#"{"allowRedistribution":1,"avatarPermission":"everyone"}"#
+                r#"{"allowRedistribution":1,"avatarPermission":"everyone"}"#,
+                Prohibited,
             ),
-            Prohibited
-        );
-        assert_eq!(
-            v(
+            (
                 V1,
-                r#"{"allowRedistribution":true,"avatarPermission":"Everyone"}"#
+                r#"{"allowRedistribution":true,"avatarPermission":"Everyone"}"#,
+                Unknown,
             ),
-            Unknown
-        );
-        assert_eq!(v(V1, r#"{"allowRedistribution":true}"#), Prohibited);
+            (V1, r#"{"allowRedistribution":true}"#, Prohibited),
+        ] {
+            assert_eq!(v(version, json), want, "{json}");
+        }
         let d = meta_verdict(V1, &meta("{}")).deciding.unwrap();
         assert_eq!(
             (d.meta.as_str(), &d.value, d.defaulted),
@@ -1458,5 +2103,32 @@ mod tests {
             GltfClass::Plain
         );
         assert_eq!(class_of(&doc(r#"{"asset":{}}"#)), GltfClass::Plain);
+    }
+
+    /// A file of the release whose first bytes decide it is never read whole: a big binary, a
+    /// UTF-16 text whose first character is no `{`.
+    #[test]
+    fn only_what_the_rules_need_is_read_whole() {
+        let mut pak = b"\xff\xfe".to_vec();
+        pak.extend(std::iter::repeat_n([0x00, 0xd8], 1 << 20).flatten());
+        let big = pak.len() as u64;
+        assert!(!needs_whole("data/level.pak", &pak[..PREFIX], big));
+        assert!(!needs_whole("plugins/a.dll", b"MZ\x90\0", 1 << 20));
+        assert!(needs_whole("data/a.json", b"  {\"a\"", 1 << 20));
+        assert!(needs_whole("data/a.json", b"        ", 1 << 20));
+        assert!(needs_whole("mods/a.jar", b"PK\x03\x04", 1 << 20));
+        assert!(!needs_whole("packs/a.astrapack", b"PK\x03\x04", 1 << 20));
+        assert!(needs_whole("m/a.glb", b"glTF\x02\0\0\0", 1 << 20));
+        assert!(!needs_whole("m/a.bin", b"glTF\x02\0\0\0", 1 << 20));
+        assert!(needs_whole("m/a.gltf", b"xx", 1 << 20));
+        // And judged so, the release holds what the whole file would make it.
+        let files: std::collections::HashMap<String, Vec<u8>> = [
+            ("astra-gi.toml".to_owned(), b"schema = 1".to_vec()),
+            ("data/level.pak".to_owned(), pak),
+        ]
+        .into_iter()
+        .collect();
+        let r = judge_files(&[], &files).unwrap();
+        assert!(r.refusals.is_empty() && r.flags.is_empty(), "{r:?}");
     }
 }

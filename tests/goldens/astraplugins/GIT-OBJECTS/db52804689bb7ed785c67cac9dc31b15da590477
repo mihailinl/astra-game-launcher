@@ -1,0 +1,26 @@
+tree 617236e685bd00bd5c94f9509bd437fad3772807
+parent c8c99ec4a700c4043393f5ce0daa12c55ee00722
+parent 8fa2586abe845a69b5cc9dea7d3f6b08eb9e4df3
+author Mihailin <mishasamil32@outlook.com> 1793587455 -0800
+committer GitHub <noreply@github.com> 1793587455 -0800
+gpgsig -----BEGIN PGP SIGNATURE-----
+ 
+ wsFcBAABCAAQBQJq5/j/CRC1aQ7uu5UhlAAAh2YQAK0UcERhmp+7LmAqj7BoGLx8
+ OXT3mydBiSnJuvWt+ipt/Mo0iR9cRO0QJEE+kt8TYzdPpHcmQaa6QSUam2TMMGzV
+ G7c1wBVL9uczJYYS+zn8ZT7JB+v4DrK1W9T/+zSPXDuCRn+r1vbQpLnmrm2sgY2U
+ uK/O5NEGEi/wOof+gp560zDqTcAX1oOQQA5Cmm6uErn2/NT6Iik+pf3KNlstJ12x
+ gMLke9pZF4BLNVM8kdyePV6V05WVTKQDoDKXFAiJnuHzab81N6ZbucGxm4iAv+JE
+ LdVcGnVa/ZrrYIh2MsfTK0SzOFyukT3O68T2S0cpo0AYosvbGFc4yPHXafABAX0H
+ VTs2TKjr22zHozr0G06yI70qAgypORh65B3p5EsS05mmNkJWlRj8GsEDy4zj2b2a
+ /oZeBY2jbptwR94OURxXmnJv2BSsvoMYy1x5SineK1I2t43/s1lub87DpO7f1OdH
+ YUjsk8UUaiXSinClklQ8UH0BkXCHpr1aiTX8sM6VkZZ2tQQ1AIxbINr0kiOdXL3Y
+ 6g4wOBgivzkHA7AnUA3ROJnT8i5+wD9ekA/cWbXzrYtZYFb/GkqKfEbybD0UgFag
+ +HXa8jK76b3TXc/EMO1/MZG255vCWzpIP7qpKd9Gb3InZV9cjTl5RCF3hcrxKSLk
+ 22982SErjwg3YE8PcRG7
+ =xoUT
+ -----END PGP SIGNATURE-----
+ 
+
+Merge pull request #133 from mihailinl/fix/mods-deep-nesting-toml-limit
+
+mods-deep-nesting: 39 levels, under the toml crate's recursion limit

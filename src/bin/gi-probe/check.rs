@@ -44,11 +44,15 @@
 //!    `[[integration.content]]` ([`GiPackage::content`], spec `manifest.md` §2.7, the codes the
 //!    catalogue's content check raises before gi-probe, in this launcher's spelling): every
 //!    content-typed file one declared part (`content-undeclared`, `content-missing`; a path
-//!    declared twice is step 1's `content-duplicate`), every GLB and `.gltf` whole and
-//!    self-contained (`content-format`), the VRM licence gate (`content-licence-refused`,
-//!    `content-licence-conflict`; an unknown meta is the notice `content-vrm-meta-unknown`, an
-//!    unreadable `.astrachar` `content-astrachar-unreadable`), and a licence for every part
-//!    (`content-licence-undeclared`). The report's `content.parts` is what a catalogue entry's
+//!    declared twice is step 1's `content-duplicate`; a model in a game's own archive is
+//!    `<archive>!<inner>`), every file judged by its bytes and every GLB and `.gltf` whole,
+//!    within the caps and self-contained (`content-format`), a game's archives opened one level
+//!    deep (two readings refused with the content catalogue's code; one it cannot open is the
+//!    notice `content-archive-unscanned`), each `.astrachar` and `.astrapack` judged by the
+//!    content catalogue's own code (its codes), the VRM licence gate (`content-licence-refused`,
+//!    `content-licence-conflict`; an unknown meta is the notice `content-vrm-meta-unknown`), and
+//!    a licence for every part (`content-licence-undeclared`). The report's `content.parts` is
+//!    what a catalogue entry's
 //!    `content[]` carries, member for member (`games-index-v1.schema.json` `contentPart`), and
 //!    `content.classes` what each glTF part's extensions make it (`avatar`, `animation`,
 //!    `plain`), which `content[]` has no member for.
@@ -536,7 +540,7 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
                         "the VRM licence gate cannot read this part's licence (no VRM meta, or a token it does not know): it passes with the licence its entry declares, flagged"
                     }
                     _ => {
-                        "this .astrachar's body cannot be read as the spec reads a bundle, so the VRM licence gate never saw it: it passes with the licence its entry declares, flagged"
+                        "this archive could not be opened (zip64, too large, encrypted, another method, or an archive inside an archive), so nothing inside it was judged: it publishes flagged, for a moderator"
                     }
                 };
                 p.notice(8, Finding::from_refusal(f.code, &f.params, detail));

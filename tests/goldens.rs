@@ -229,7 +229,8 @@ fn alone(d: &Descriptor) -> EngineSet {
 /// are refused by ingest and lint (`verdict`) and drop only `mods` in a client that reads it
 /// (`client` = `mods-dropped`); 0.5.0 reads nothing in `mods`, so it detects with them as
 /// with any other, which is what this asserts, and 0.5.1 refuses them (debt row 46). A golden
-/// the parser refuses all the same is an entry of `SPEC_DEFECTS_AT_PIN` (`mods-deep-nesting`).
+/// the parser refuses all the same would be an entry of `SPEC_DEFECTS_AT_PIN`; none is at this
+/// pin (`mods-deep-nesting` nests 39 deep since AstraPlugins #133, under the toml crate's limit).
 #[test]
 fn the_mods_goldens_change_no_detection() {
     let compat = mods_records("compat");

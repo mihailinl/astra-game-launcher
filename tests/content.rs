@@ -25,7 +25,7 @@ use astra_game_launcher::content::{
 use astra_game_launcher::{Manifest, codes};
 use content_fixtures::{
     FBX, GateWant, PNG, VRM1_ALLOWED, fixture_failure, gate_vectors, glb, hostile, library_answer,
-    manifest, near_miss_failure, part, release_vectors, vrm1, vrma, zip_of,
+    manifest, near_miss_failure, part, release_answer_agrees, release_vectors, vrm1, vrma, zip_of,
 };
 use serde_json::Value;
 
@@ -33,14 +33,22 @@ fn failures(list: Vec<String>) {
     assert!(list.is_empty(), "\n{}", list.join("\n"));
 }
 
-/// Every code `vectors.json` names for content is the spec's and has the launcher's spelling, and
-/// the mapping names each launcher code once and only codes the launcher has.
+/// Every code and flag `vectors.json` names for content is the spec's and has the launcher's
+/// spelling, and the mapping names each launcher code once and only codes the launcher has.
 #[test]
 fn every_spec_content_code_has_the_launchers_spelling() {
     let v = spec_goldens::vectors();
     for r in v["content"]["releases"].as_array().unwrap() {
         if let Some(code) = r.get("code").and_then(Value::as_str) {
             assert!(launcher_code(code).is_some(), "{code}");
+        }
+        for flag in r
+            .get("flags")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            assert!(launcher_code(flag.as_str().unwrap()).is_some(), "{flag}");
         }
     }
     let mut seen = BTreeSet::new();
@@ -62,20 +70,29 @@ fn every_spec_content_code_has_the_launchers_spelling() {
     }
 }
 
-/// **The releases.** Each folder of `content/releases/`, zipped as it is, is refused with
-/// exactly the one code `vectors.json` gives, or accepted with no refusal.
+/// **The releases.** Each folder of `content/releases/`, zipped as it is (with the files too
+/// large to commit built as the spec builds them, `synth`), is refused with exactly the one code
+/// `vectors.json` gives — however many of its files carry it — or accepted with none, and carries
+/// exactly the flags it gives. A `guard` = `strict_json` golden's `.gltf` is refused by the strict
+/// parser alone, never a crash.
 #[test]
 fn every_content_release_golden_gets_its_verdict_and_code() {
     let mut out = Vec::new();
-    for (name, files, code) in release_vectors() {
-        let (refused, _, _) = library_answer(&zip_of(&files));
-        let codes: Vec<&str> = refused.iter().map(|(c, _)| c.as_str()).collect();
-        let ok = match code {
-            None => codes.is_empty(),
-            Some(c) => codes == [c],
-        };
-        if !ok {
-            out.push(format!("{name}: answered {refused:?}; wants {code:?}"));
+    for v in release_vectors() {
+        let (refused, flagged, _) = library_answer(&zip_of(&v.files));
+        if !release_answer_agrees(&v, &refused, &flagged) {
+            out.push(format!(
+                "{}: answered {refused:?} flagged {flagged:?}; wants {:?} flagged {:?}",
+                v.name, v.code, v.flags
+            ));
+        }
+        if v.strict_json_guard {
+            for (name, bytes) in v.files.iter().filter(|(n, _)| n.ends_with(".gltf")) {
+                let why = content::format_problem(bytes, Some(name), None);
+                if why.as_ref().map(|p| p.reason) != Some("json-too-deep") {
+                    out.push(format!("{}: {name} is {why:?}", v.name));
+                }
+            }
         }
     }
     failures(out);
@@ -88,9 +105,9 @@ fn an_accepted_release_says_where_each_licence_came_from() {
     let by_name = |n: &str| {
         release_vectors()
             .into_iter()
-            .find(|(name, _, _)| name == n)
+            .find(|v| v.name == n)
             .unwrap()
-            .1
+            .files
     };
     let (_, flags, r) = library_answer(&zip_of(&by_name("allowed")));
     let r = r.unwrap();
@@ -215,7 +232,7 @@ fn every_vrm_gate_golden_decides_its_release() {
 #[test]
 fn every_hostile_content_fixture_is_refused_and_its_near_miss_passes() {
     let fixtures = hostile();
-    assert!(fixtures.len() >= 25, "{} fixtures", fixtures.len());
+    assert!(fixtures.len() >= 80, "{} fixtures", fixtures.len());
     let mut out = Vec::new();
     for f in &fixtures {
         let (refused, flagged, _) = library_answer(&zip_of(&f.files));
@@ -230,8 +247,17 @@ fn every_hostile_content_fixture_is_refused_and_its_near_miss_passes() {
         .iter()
         .flat_map(|f| f.refused.iter().map(|(c, _)| *c))
         .collect();
-    for (_, code) in SPEC_CODES.iter().filter(|(s, _)| s.starts_with("E_")) {
-        if !refused.contains(code) {
+    let flagged: BTreeSet<&str> = fixtures
+        .iter()
+        .flat_map(|f| f.flagged.iter().map(|(c, _)| *c))
+        .collect();
+    for (spec, code) in SPEC_CODES {
+        let has = if spec.starts_with("E_") {
+            refused.contains(code)
+        } else {
+            flagged.contains(code)
+        };
+        if !has {
             out.push(format!("{code}: no hostile fixture"));
         }
     }
@@ -323,67 +349,6 @@ fn a_glb_is_judged_by_what_its_extensions_make_it() {
     }
 }
 
-/// Every `.astrachar` bundle of one release is read within ONE budget, the limits the release was
-/// opened with: two bundles that each fit, together do not, and the second is refused
-/// (`content-format{reason=too-large}`) where a fresh budget per bundle let N of them cost N times
-/// what one may.
-#[test]
-fn every_character_bundle_of_a_release_shares_its_one_budget() {
-    let padding = vec![0u8; 150 << 10];
-    let bundle = content_fixtures::astrachar(
-        &content_fixtures::astrachar_json(r#"{"file":"models/Mira.vrm"}"#),
-        &[
-            ("models/Mira.vrm", &vrm1(VRM1_ALLOWED)),
-            ("textures/pad.bin", &padding),
-        ],
-    );
-    let release = |names: &[&str]| {
-        let parts: String = names
-            .iter()
-            .map(|n| part(n, "character", Some("CC-BY-4.0")))
-            .collect();
-        let mut files = vec![("astra-gi.toml".to_owned(), manifest(&parts).into_bytes())];
-        files.extend(names.iter().map(|n| ((*n).to_owned(), bundle.clone())));
-        zip_of(&files)
-    };
-    let limits = astra_game_launcher::Limits {
-        max_uncompressed_bytes: 256 << 10,
-        ..Default::default()
-    };
-    let content = |zip: &[u8]| {
-        astra_game_launcher::GiPackage::open_with_limits(zip, &common::sha(zip), &limits)
-            .unwrap()
-            .content()
-            .unwrap()
-    };
-    let one = content(&release(&["characters/a.astrachar"]));
-    assert!(one.refusals.is_empty(), "{:?}", one.refusals);
-    let two = content(&release(&[
-        "characters/a.astrachar",
-        "characters/b.astrachar",
-    ]));
-    let refused: Vec<_> = two
-        .refusals
-        .iter()
-        .map(|e| (e.code, e.param("path"), e.param("reason")))
-        .collect();
-    assert_eq!(
-        refused,
-        [(
-            codes::CONTENT_FORMAT,
-            Some("characters/b.astrachar"),
-            Some("too-large")
-        )]
-    );
-    // With the default limits, both fit.
-    let both = release(&["characters/a.astrachar", "characters/b.astrachar"]);
-    let r = astra_game_launcher::GiPackage::open(&both, &common::sha(&both))
-        .unwrap()
-        .content()
-        .unwrap();
-    assert!(r.refusals.is_empty(), "{:?}", r.refusals);
-}
-
 /// The licence kept with a VRM part (`vrm_licence`): the gate's two fields and every usage flag
 /// the file carries (legal G5), of the 1.0 meta where the file carries two that agree — the
 /// spec's goldens `allowed-vrm1.vrm` (all six VRM 1.0 keys) and `vrm-metas-agree.vrm`.
@@ -412,9 +377,12 @@ fn the_vrm_licence_kept_is_every_gate_and_usage_field_of_the_meta_shown() {
 
 /// Every row of `manifest.md` §2.7.1's table, through `GiPackage::content`: a file of that
 /// extension (any letter case) with its format's real signature is content-typed — so undeclared
-/// it is `content-undeclared` — and one whose first bytes miss by one is not.
+/// it is `content-undeclared` — and one whose first bytes miss by one is not. (A GLB is a whole
+/// one, and a `.gltf` near miss a valid JSON object whose `{` is past the 32 bytes sniffed: every
+/// GLB and `.gltf` is held to the format rules whether or not it is content-typed.)
 #[test]
 fn every_content_extension_is_content_only_with_its_own_signature() {
+    const WHOLE_GLB: &[u8] = b"glTF\x02\0\0\0\x18\0\0\0\x04\0\0\0JSON{}  ";
     let zip_magic = [&b"PK\x03\x04"[..], b"PK\x05\x06", b"PK\x07\x08"];
     // (extension, real first bytes, near-miss first bytes)
     type Row<'a> = (&'a str, Vec<&'a [u8]>, Vec<&'a [u8]>);
@@ -429,13 +397,16 @@ fn every_content_extension_is_content_only_with_its_own_signature() {
             zip_magic.to_vec(),
             vec![b"PK\x06\x06", b"KP\x03\x04"],
         ),
-        (".vrma", vec![b"glTF\x02\0\0\0"], vec![b"gltf\x02\0\0\0"]),
-        (".glb", vec![b"glTF\x02\0\0\0"], vec![b"GLTF\x02\0\0\0"]),
-        (".vrm", vec![b"glTF\x02\0\0\0"], vec![b"glTf\x02\0\0\0"]),
+        (".vrma", vec![WHOLE_GLB], vec![b"gltf\x02\0\0\0"]),
+        (".glb", vec![WHOLE_GLB], vec![b"GLTF\x02\0\0\0"]),
+        (".vrm", vec![WHOLE_GLB], vec![b"glTf\x02\0\0\0"]),
         (
             ".gltf",
             vec![b"{\"asset\":{}}", b" \n\t{}"],
-            vec![b"[{}]", b"x{}"],
+            vec![
+                b"                                 {}",
+                b"\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t{}",
+            ],
         ),
         (
             ".fbx",
