@@ -215,7 +215,7 @@ cat >"$notes_file" <<EOF_NOTES
 **Commit:** \`$head_sha\`
 **Source tree sha256:** \`$SOURCE_TREE_SHA256\`
 
-Astra pins this crate by git rev in \`astra-rs/astra-daemon/Cargo.toml\`; the Astra release
+Astra pins this crate by git rev in \`astra-daemon/Cargo.toml\`; the Astra release
 notes / About screen show this same source-tree hash for whatever commit it pinned, so what
 Astra compiled in can be checked against what this release built from source — they're both
 a hash of the source tree, never a binary, since the crate is compiled into the daemon rather

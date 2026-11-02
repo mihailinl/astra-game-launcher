@@ -778,7 +778,7 @@ cargo test --all-features   # also gi-probe and its tests (canary K4); what scri
 
 ## Verifying a release against what Astra compiles in
 
-Astra does not bundle a binary of this crate: `astra-rs/astra-daemon/Cargo.toml` pins it as a
+Astra does not bundle a binary of this crate: `astra-daemon/Cargo.toml` pins it as a
 git dependency by commit (`rev = "<sha>"`), and Cargo builds it into the daemon from source at
 that exact commit. So the comparable thing between "what Astra built" and "what GitHub built
 from source" is not a binary hash — it's a hash of the **source tree**, which anyone can
@@ -789,7 +789,7 @@ algorithm) and bakes it in:
 
 ```
 astra-game-launcher --version
-# astra-game-launcher 0.4.1 (source tree sha256 <hex>)
+# astra-game-launcher 0.5.0 (source tree sha256 <hex>)
 ```
 
 Astra's own release notes / About screen show the same hash for the commit it pinned. A GitHub
@@ -799,7 +799,7 @@ a hash you compute yourself. Recompute it from a clone of a tag with one line (r
 and `sha256sum`; `scripts/tree-hash.sh` is this same command, runnable against any directory):
 
 ```bash
-V=0.4.1 REPO=https://github.com/mihailinl/astra-game-launcher
+V=0.5.0 REPO=https://github.com/mihailinl/astra-game-launcher
 rm -rf /tmp/astra-gl-verify && mkdir -p /tmp/astra-gl-verify && \
 git clone --quiet --depth 1 --branch "v$V" "$REPO" /tmp/astra-gl-verify/src && \
 cd /tmp/astra-gl-verify/src && git archive "v$V" | tar -x -C /tmp/astra-gl-verify && \
