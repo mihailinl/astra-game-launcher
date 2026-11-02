@@ -1,0 +1,10 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# crlf.toml must keep its literal CRLF bytes: the link-digest test proves the digest rule
+# normalises them (manifest.md §2.6.1). No normalisation is configured on this machine
+# (core.autocrlf unset, no root .gitattributes), but this pins it so a checkout or a future
+# `* text=auto` elsewhere in the tree can never silently rewrite it — mirrors AstraPlugins'
+# own `.gitattributes` entry for the same file.
+crlf.toml -text
