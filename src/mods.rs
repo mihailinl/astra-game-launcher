@@ -253,8 +253,10 @@ pub enum Unplayable {
     /// (`unknown-key`, `manifest-invalid`, `path-escapes`), `platform` (a native Linux game: no
     /// loader proxy), or `no-doorstop` (its launch does not go through a Doorstop proxy beside the
     /// game). Or `over-budget`: their folder is past a bound of one evaluation (§7.8: more than
-    /// 1,024 mods, a folder of more than 5,000 entries, …), so nothing of it is listed, and a start
-    /// is without mods.
+    /// 1,024 mods, a folder of more than 5,000 entries, …) or of the discovery's, so nothing of it
+    /// is listed, and a start is without mods. Or `outside-versions`: the integration declares a
+    /// version of this loader the built-in data's `versions` do not hold (an IL2CPP foundation at a
+    /// build other than 788), so no loader of the player's can be offered with it.
     NotSupported { reason: String },
 }
 
@@ -1029,10 +1031,26 @@ fn data_loaders(p: &Placed, c: &Candidate, b: &Budget) -> Vec<LoaderOutcome> {
     evaluate_one_within(mods, &p.code, &p.bindings, c.manager.source_kind(), root, b).loaders
 }
 
+/// Whether the data's `versions` for loader `id` hold for `need`, the version an integration
+/// declares it runs beside. A need the loader's template cannot read (BepInEx 5's `5.4`, a series,
+/// not a version) is not asked: `true`.
+fn data_allows(mods: &Mods, id: &str, need: &str) -> bool {
+    let Some(v) = mods.loader(id).and_then(|l| l.version()) else {
+        return true;
+    };
+    match (v.versions(), v.template().read(need)) {
+        (Some(want), Some((runs, _))) => want.holds(&runs),
+        _ => true,
+    }
+}
+
 /// The integration's verdict on a loader the built-in data recognised, in this order: a loader
 /// Astra cannot run beside at all (`coexist = []`), whatever is installed; the integration
-/// ([`capability`]); then its declaration — the loader it names, the data's `versions`, and its own
-/// narrower one ([`ModsLoader::accepts`]).
+/// ([`capability`]); a declaration of this loader whose own version lies outside the data's
+/// `versions` (§7.4: a foundation narrows them, never widens them), with which no loader of the
+/// player's can ever be offered (`not-supported{reason=outside-versions}`, never "update to" a
+/// version the other side refuses); then the declaration — the loader it names, the data's
+/// `versions`, and its own narrower one ([`ModsLoader::accepts`]).
 fn data_verdict(
     r: &Recognised,
     kind: LoaderKind,
@@ -1057,6 +1075,11 @@ fn data_verdict(
         return Err(Unplayable::LoaderUnsupported { have, need });
     }
     let (_, decl) = can.as_ref().map_err(Clone::clone)?;
+    if decl.loader.id() == r.id && !data_allows(mods, &r.id, &decl.loader.need()) {
+        return Err(Unplayable::NotSupported {
+            reason: "outside-versions".to_owned(),
+        });
+    }
     let chains = r
         .coexist
         .iter()

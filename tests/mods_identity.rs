@@ -9,9 +9,11 @@
 //! (v0.5.0, 6d1851b, a dev-dependency) answers — every [`ModSource`] field, in the same order:
 //! manager, profile, root, loader kind, version and preloader, mods, last played, the playable
 //! verdict and its parameters — but for the rows declared in [`Row`], each applied to 0.5.0's
-//! answer and counted, and each with a floor, so a row nothing exercises fails as surely as one
-//! that is wrong. Floors per playable verdict, manager and loader kind hold the corpus to
-//! covering what 0.5.0 could say.
+//! answer (a source changed, gone, or one 0.5.1 lists where 0.5.0 listed none) and counted, and
+//! each with a floor, so a row nothing exercises fails as surely as one that is wrong. Floors per
+//! playable verdict, manager and loader kind hold the corpus to covering what 0.5.0 could say.
+//! Where a row changes the loader 0.5.1 reads, its verdict is 0.5.0's rule ([`verdict_050`],
+//! itself held to every verdict 0.5.0 gives over the corpus) on what 0.5.1 read.
 //!
 //! The corpus lays the real layouts (astra-companion-5f's loader notes, 2026-11-01): BepInEx 5 in
 //! a game folder (`BepInEx/`, `winhttp.dll`, `doorstop_config.ini`, `.doorstop_version`) and in a
@@ -20,8 +22,11 @@
 //! BepInEx 6 IL2CPP with `dotnet/` and `BepInEx/interop/`, at be.788 and others; BepInEx 6 Mono,
 //! CoreCLR and the IL2CPP preloader's older name; MelonLoader (`version.dll`, `MelonLoader/`,
 //! `Mods/`, `Plugins/`, `UserData/`); Astra's own items, Astra's own BepInEx in the game folder;
-//! folders the player picked; every integration verdict 0.5.0 gave. Unreal is new in 0.5.1 and
-//! has nothing to be identical to: `tests/mods.rs` holds its answers.
+//! folders the player picked; every integration verdict 0.5.0 gave; and what players' trees hold
+//! that the data reads otherwise: a `BepInEx/` spelled in another letter case, links, a version
+//! resource with no `ProductVersion` or with control characters, both BepInEx cores in one
+//! profile, more mods than one evaluation reads. Unreal is new in 0.5.1 and has nothing to be
+//! identical to: `tests/mods.rs` holds its answers.
 
 mod common;
 
@@ -87,6 +92,9 @@ enum Row {
     /// folder, or (where no manager's adapter reads its state: a picked folder, the game folder)
     /// one switched off as `*.old` — was no mod to 0.5.0; the data's `dir-per-mod` counts it.
     FolderWithoutDll,
+    /// The same, where it is all a source holds: 0.5.0 listed no source there, 0.5.1 lists one
+    /// (and, when it is offered, a Play that had no answer asks: `mods-choice-needed`).
+    SourceAppears,
     /// A BepInEx 6 IL2CPP that never ran has no `BepInEx/interop/` yet, which the data requires
     /// to recognise it: no source.
     Il2cppNeverRun,
@@ -102,24 +110,73 @@ enum Row {
     /// The game folder's own BepInEx beside a program below the folder detection runs on: the
     /// data's `game` source is that folder (§7.3), not the program's. No source.
     ProgramBelowTheFolder,
-    /// An IL2CPP integration declaring a build other than 788 and a BepInEx at that build:
-    /// offered by 0.5.0, unsupported by the data (`versions = "=6.0.0-be.788"`; a foundation may
-    /// narrow it, never widen it, §7.4).
+    /// An IL2CPP integration declaring a build other than 788: the data's `versions =
+    /// "=6.0.0-be.788"` does not hold for its own build (a foundation may narrow it, never widen
+    /// it, §7.4), so no BepInEx 6 of the player's is offered with it, whatever its build:
+    /// `not-supported{reason=outside-versions}` where 0.5.0 offered the declared build and told
+    /// any other "need the declared build".
     BuildNot788,
+    /// On a file system that tells letter case apart: a `BepInEx/` or `BepInEx/core/` spelled in
+    /// another case (`bepinex/`, `BepInEx/Core/`) is not the data's (`stat` is the exact
+    /// spelling, §7.4), where 0.5.0 found it ignoring case (and Proton loads it). No source.
+    CaseVariant,
+    /// Unix: a link is never followed below `{source}` (§7.3). A mod folder or a loose dll that is
+    /// a link is no mod (fewer mods, and a source of linked mods alone is none); a `BepInEx/`
+    /// that is a link recognises nothing (no source).
+    Link,
+    /// A `BepInEx.dll` (`BepInEx.Core.dll`) whose `ProductVersion` is missing or empty: the data
+    /// reads its `FileVersion` next (`key = ["ProductVersion", "FileVersion"]`), where 0.5.0's
+    /// version was unknown. Another version, and the verdict on it.
+    VersionFallback,
+    /// A version resource holding control characters: shown without them (and `have` too).
+    Printable,
+    /// In an IL2CPP game, a profile whose `BepInEx/core` holds both BepInEx 5's preloader and
+    /// BepInEx 6 IL2CPP's: 0.5.0 read the first it probed (BepInEx 5, never offered there), the
+    /// data reads the IL2CPP game's own (BepInEx 6, its version and verdict).
+    MixedCores,
+    /// More than 1,024 mods in the root (§7.8): 0.5.1 lists none of them and says
+    /// `not-supported{reason=over-budget}` (no version, no preloader); 0.5.0 counted them.
+    OverBudget,
 }
 
-const ROWS: [Row; 8] = [
+const ROWS: [Row; 15] = [
     Row::Patchers,
     Row::FolderWithoutDll,
+    Row::SourceAppears,
     Row::Il2cppNeverRun,
     Row::AnotherFlavour,
     Row::FlavourUnknown,
     Row::LibraryMissing,
     Row::ProgramBelowTheFolder,
     Row::BuildNot788,
+    Row::CaseVariant,
+    Row::Link,
+    Row::VersionFallback,
+    Row::Printable,
+    Row::MixedCores,
+    Row::OverBudget,
 ];
 
-/// What 0.5.1's answer for one BepInEx source of 0.5.0's is, by the rows.
+/// The loader 0.5.1 reads in a source the data recognises.
+#[derive(Debug, Clone)]
+struct Now {
+    kind: &'static str,
+    /// What its version resource says, as 0.5.1 shows it.
+    version: Option<String>,
+    preloader: &'static str,
+    /// The row that makes `version` differ from 0.5.0's, when it does.
+    version_row: Option<Row>,
+}
+
+/// A source 0.5.1 lists where 0.5.0 lists none: what its row says besides its loader.
+#[derive(Debug, Clone)]
+struct Appear {
+    manager: &'static str,
+    profile: String,
+    root: PathBuf,
+}
+
+/// What 0.5.1's answer for one BepInEx source is, by the rows.
 #[derive(Debug, Default, Clone)]
 struct Effect {
     /// Mods 0.5.1 counts more (+) or fewer (-), and the rows that say so.
@@ -127,8 +184,12 @@ struct Effect {
     rows: Vec<Row>,
     /// 0.5.1 lists no BepInEx here, for this row.
     absent: Option<Row>,
-    /// 0.5.1 says `loader-unsupported` with these `have` and `need` (BuildNot788).
-    unsupported: Option<(String, String)>,
+    /// The loader 0.5.1 reads (a data kind's).
+    now: Option<Now>,
+    /// More mods than one evaluation reads.
+    over: bool,
+    /// 0.5.0 lists no source here (no mod it counts) and 0.5.1 does.
+    appears: Option<Appear>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +205,8 @@ enum Lay {
     Bep5(&'static str),
     Bep6(&'static str),
     Bep6NeverRun(&'static str),
+    /// Both cores, BepInEx 5's and BepInEx 6 IL2CPP's, in one `BepInEx/core`.
+    Mixed(&'static str, &'static str),
     Bep6Mono,
     Bep6Coreclr,
     Bep6OldName,
@@ -191,6 +254,10 @@ struct World {
     install: Install,
     added: Vec<PathBuf>,
     expect: BTreeMap<PathBuf, Effect>,
+    /// Links laid so far: each one's target folder is its own.
+    links: u32,
+    /// The corpus' file system tells `BepInEx` from `bepinex` (Linux; not Windows, not macOS).
+    case_sensitive: bool,
 }
 
 impl World {
@@ -365,17 +432,15 @@ fn package(install: Install, flavour: Flavour) -> Option<now::GiPackage> {
     Some(mods_runner_for(&proxy, &decl, engine))
 }
 
-/// What `decl` an installed integration offers playing with, if its capability holds.
-fn decl_build(w: &World) -> Option<Option<u32>> {
-    match w.install {
-        Install::Mono | Install::PerGameBepinex => Some(None),
-        Install::Il2cpp(b) => Some(Some(b)),
-        _ => None,
-    }
-}
-
-/// The plugins of one BepInEx source, laid below `root`; what 0.5.1 counts otherwise.
-fn lay_plugins(w: &mut World, root: &Path, manager_kept: bool, eff: &mut Effect) {
+/// The plugins of one BepInEx source, laid below `root`; what 0.5.1 counts otherwise (for a
+/// loader the data reads, `data`). Returns the mods 0.5.0 counts and those 0.5.1 counts.
+fn lay_plugins(
+    w: &mut World,
+    root: &Path,
+    manager_kept: bool,
+    data: bool,
+    eff: &mut Effect,
+) -> (i64, i64) {
     let r = &mut w.rng;
     let mut dll_mods = 0;
     let mut plus = 0;
@@ -469,21 +534,59 @@ fn lay_plugins(w: &mut World, root: &Path, manager_kept: bool, eff: &mut Effect)
     if r.chance(40) {
         write(&root.join("BepInEx/config/BepInEx.cfg"), b"[Logging]\n");
     }
-    // A count 0.5.1 would raise from nothing never stands alone: 0.5.0 lists no source there.
-    if plus > 0 && dll_mods == 0 && patchers == 0 {
-        write(
-            &root.join("BepInEx/plugins/Author-Base/Base.dll"),
-            b"MZ a mod",
-        );
+    // A mod folder and a loose dll that are links, their targets outside the source: 0.5.0
+    // followed them, the data never does.
+    let mut links = 0;
+    if cfg!(unix) && data && w.rng.chance(8) {
+        w.links += 1;
+        let target = w.tmp.join(&format!("dev/{}", w.links));
+        write(&target.join("Linked/Linked.dll"), b"MZ a linked mod");
+        write(&target.join("LinkedLoose.dll"), b"MZ a linked loose mod");
+        fs::create_dir_all(root.join("BepInEx/plugins")).unwrap();
+        if w.rng.chance(60) {
+            symlink(&target.join("Linked"), &root.join("BepInEx/plugins/Linked"));
+            links += 1;
+        }
+        if links == 0 || w.rng.chance(50) {
+            symlink(
+                &target.join("LinkedLoose.dll"),
+                &root.join("BepInEx/plugins/LinkedLoose.dll"),
+            );
+            links += 1;
+        }
+    }
+    // More mods than one evaluation reads (§7.8: 1,024): 0.5.0 counted them.
+    let mut bulk = 0;
+    if data && w.rng.chance(2) {
+        for i in 0..1_025 {
+            write(&root.join(format!("BepInEx/plugins/Bulk{i:04}.dll")), b"MZ");
+        }
+        bulk = 1_025;
+        eff.over = true;
     }
     if plus > 0 {
-        eff.delta += plus;
         eff.rows.push(Row::FolderWithoutDll);
     }
     if patchers > 0 {
-        eff.delta -= patchers;
         eff.rows.push(Row::Patchers);
     }
+    if links > 0 {
+        eff.rows.push(Row::Link);
+    }
+    let then = dll_mods + patchers + links + bulk;
+    let now = dll_mods + plus + bulk;
+    eff.delta += now - then;
+    (then, now)
+}
+
+#[cfg(unix)]
+fn symlink(target: &Path, link: &Path) {
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+#[cfg(not(unix))]
+fn symlink(_: &Path, _: &Path) {
+    unreachable!("links are laid on Unix only");
 }
 
 /// BepInEx's log at `root`: its start line naming `program` (or another), written `ago` ago.
@@ -510,16 +613,64 @@ fn lay_log(w: &mut World, root: &Path, program: &str) {
         .unwrap();
 }
 
-/// One loader of the player's laid at `root` (a profile, a picked folder, the game folder), and
-/// what 0.5.1 answers for it otherwise, keyed by its folder.
-fn lay_source(w: &mut World, root: &Path, lay: Lay, manager_kept: bool, game_folder: bool) {
+/// The version a data kind's library says, written: `ProductVersion` as `v`; or, for the rows,
+/// a resource with no `ProductVersion` (or an empty one) and `FileVersion`, or one whose
+/// `ProductVersion` holds control characters. What 0.5.1 shows of it, and the row.
+fn library_version(w: &mut World, at: &Path, name: &str, v: &str) -> (Option<String>, Option<Row>) {
+    let short = v.split('+').next().unwrap().to_owned();
+    if w.rng.chance(5) {
+        let product = if w.rng.chance(50) {
+            vec![("ProductName", name), ("FileVersion", short.as_str())]
+        } else {
+            vec![
+                ("ProductName", name),
+                ("ProductVersion", ""),
+                ("FileVersion", short.as_str()),
+            ]
+        };
+        write(at, &pe_with_resource(&product));
+        return (Some(short), Some(Row::VersionFallback));
+    }
+    if w.rng.chance(4) {
+        let spoken = format!("{v}\u{1b}[31m\u{7}");
+        write(
+            at,
+            &pe_with_resource(&[("ProductName", name), ("ProductVersion", spoken.as_str())]),
+        );
+        return (Some(format!("{v}[31m")), Some(Row::Printable));
+    }
+    (Some(v.to_owned()), None)
+}
+
+/// One loader of the player's laid at `root` (a profile, a picked folder, the game folder), kept
+/// by `manager` (its code as a row says it), and what 0.5.1 answers for it otherwise, keyed by
+/// its folder.
+fn lay_source(
+    w: &mut World,
+    root: &Path,
+    lay: Lay,
+    manager: &'static str,
+    manager_kept: bool,
+    game_folder: bool,
+) {
     let mut eff = Effect::default();
     let flavour = w.flavour;
-    let windows = w.platform() == Platform::Windows;
-    let build = decl_build(w).flatten();
+    let bep5 = |v: Option<String>, row| Now {
+        kind: "bepinex5",
+        version: v,
+        preloader: "BepInEx.Preloader.dll",
+        version_row: row,
+    };
+    let bep6 = |v: Option<String>, row| Now {
+        kind: "bepinex6-il2cpp",
+        version: v,
+        preloader: "BepInEx.Unity.IL2CPP.dll",
+        version_row: row,
+    };
     match lay {
         Lay::Bep5(v) => {
             bepinex5_at(root, v);
+            let mut written = (Some(v.to_owned()), None);
             if w.rng.chance(30) {
                 write(
                     &root.join("BepInEx/core/BepInEx.dll"),
@@ -529,13 +680,23 @@ fn lay_source(w: &mut World, root: &Path, lay: Lay, manager_kept: bool, game_fol
                         ("FileVersion", "5.4.23.2"),
                     ]),
                 );
+            } else {
+                written = library_version(w, &root.join("BepInEx/core/BepInEx.dll"), "BepInEx", v);
             }
+            eff.now = Some(bep5(written.0, written.1));
             if flavour == Flavour::Il2cpp {
                 eff.absent = Some(Row::AnotherFlavour);
             }
         }
         Lay::Bep6(v) | Lay::Bep6NeverRun(v) => {
             bepinex6_il2cpp_at(root, v);
+            let written = library_version(
+                w,
+                &root.join("BepInEx/core/BepInEx.Core.dll"),
+                "BepInEx.Core",
+                v,
+            );
+            eff.now = Some(bep6(written.0, written.1));
             if lay == Lay::Bep6NeverRun(v) {
                 fs::remove_dir_all(root.join("BepInEx/interop")).unwrap();
                 eff.absent = Some(Row::Il2cppNeverRun);
@@ -543,17 +704,16 @@ fn lay_source(w: &mut World, root: &Path, lay: Lay, manager_kept: bool, game_fol
             if flavour == Flavour::Mono {
                 eff.absent = Some(Row::AnotherFlavour);
             }
-            // An integration at another build, and a BepInEx at that build.
-            if let Some(build) = build
-                && build != 788
-                && v.starts_with(&format!("6.0.0-be.{build}"))
-                && windows
-            {
-                eff.unsupported = Some((
-                    v.split('+').next().unwrap().to_owned(),
-                    format!("6.0.0-be.{build}"),
-                ));
-            }
+        }
+        Lay::Mixed(v5, v6) => {
+            bepinex5_at(root, v5);
+            bepinex6_il2cpp_at(root, v6);
+            // Each flavour's data reads its own core.
+            eff.now = Some(if flavour == Flavour::Il2cpp {
+                bep6(Some(v6.to_owned()), None)
+            } else {
+                bep5(Some(v5.to_owned()), None)
+            });
         }
         Lay::Bep6Mono => {
             write(
@@ -609,21 +769,54 @@ fn lay_source(w: &mut World, root: &Path, lay: Lay, manager_kept: bool, game_fol
             return;
         }
     }
-    let data_kind = matches!(lay, Lay::Bep5(_) | Lay::Bep6(_) | Lay::Bep6NeverRun(_));
+    let data_kind = matches!(
+        lay,
+        Lay::Bep5(_) | Lay::Bep6(_) | Lay::Bep6NeverRun(_) | Lay::Mixed(..)
+    );
     if data_kind && flavour == Flavour::Unknown {
         eff.absent = Some(Row::FlavourUnknown);
     }
     if data_kind && game_folder && w.below {
         eff.absent = Some(Row::ProgramBelowTheFolder);
     }
-    if data_kind {
-        lay_plugins(w, root, manager_kept, &mut eff);
+    let (then, now) = if data_kind {
+        lay_plugins(w, root, manager_kept, true, &mut eff)
     } else {
         // 0.5.0's own count, for a BepInEx the data does not describe.
         let mut ignored = Effect::default();
-        lay_plugins(w, root, manager_kept, &mut ignored);
-    }
+        lay_plugins(w, root, manager_kept, false, &mut ignored)
+    };
     lay_log(w, root, GAME);
+    if data_kind && eff.absent.is_none() {
+        // What the data never reads, laid last over the whole tree: a `BepInEx/` (or its
+        // `core/`) spelled in another case, a `BepInEx/` that is a link.
+        if w.case_sensitive && w.rng.chance(4) {
+            if w.rng.chance(50) {
+                fs::rename(root.join("BepInEx"), root.join("bepinex")).unwrap();
+            } else {
+                fs::rename(root.join("BepInEx/core"), root.join("BepInEx/Core")).unwrap();
+            }
+            eff.absent = Some(Row::CaseVariant);
+        } else if cfg!(unix) && w.rng.chance(2) {
+            w.links += 1;
+            let target = w.tmp.join(&format!("dev/{}/BepInEx", w.links));
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            fs::rename(root.join("BepInEx"), &target).unwrap();
+            symlink(&target, &root.join("BepInEx"));
+            eff.absent = Some(Row::Link);
+        }
+    }
+    if data_kind && eff.absent.is_none() && then == 0 && now > 0 {
+        eff.appears = Some(Appear {
+            manager,
+            profile: if game_folder {
+                String::new()
+            } else {
+                root.file_name().unwrap().to_string_lossy().into_owned()
+            },
+            root: root.to_path_buf(),
+        });
+    }
     w.expect.insert(key(root), eff);
 }
 
@@ -634,6 +827,7 @@ fn pick_lay(r: &mut Rng, flavour: Flavour) -> Lay {
         (Flavour::Il2cpp, 0..=44) => Lay::Bep6(r.pick(&BEP6_VERSIONS)),
         (Flavour::Il2cpp, 45..=52) => Lay::Bep6NeverRun(BEP6_VERSIONS[0]),
         (Flavour::Il2cpp, 53..=58) => Lay::Bep5(r.pick(&BEP5_VERSIONS)),
+        (Flavour::Il2cpp, 59..=62) => Lay::Mixed(r.pick(&BEP5_VERSIONS), r.pick(&BEP6_VERSIONS)),
         (_, 0..=54) => Lay::Bep5(r.pick(&BEP5_VERSIONS)),
         (_, 55..=60) => Lay::Bep6(r.pick(&BEP6_VERSIONS)),
         (_, 61..=66) => Lay::Bep6Mono,
@@ -641,7 +835,8 @@ fn pick_lay(r: &mut Rng, flavour: Flavour) -> Lay {
         (_, 72..=75) => Lay::Bep6OldName,
         (_, 76..=80) => Lay::LibraryMissing,
         (_, 81..=88) => Lay::Melon,
-        (_, 89..=94) => Lay::NoCore,
+        (_, 89..=92) => Lay::NoCore,
+        (_, 93..=95) => Lay::Mixed(r.pick(&BEP5_VERSIONS), r.pick(&BEP6_VERSIONS)),
         _ => Lay::Nothing,
     }
 }
@@ -680,7 +875,14 @@ fn world(i: u64) -> World {
         install,
         added: Vec::new(),
         expect: BTreeMap::new(),
+        links: 0,
+        case_sensitive: false,
     };
+    w.case_sensitive = {
+        write(&w.tmp.join("CaseProbe"), b"");
+        fs::metadata(w.tmp.join("caseprobe")).is_err()
+    };
+    fs::remove_file(w.tmp.join("CaseProbe")).unwrap();
     lay_game(&w.game_root(), flavour);
     fs::create_dir_all(w.home()).unwrap();
     if let Some(pkg) = package(install, flavour) {
@@ -707,12 +909,12 @@ fn world(i: u64) -> World {
         for p in 0..w.rng.below(4) {
             let root = data.join(folder).join("profiles").join(format!("P{p}"));
             let lay = pick_lay(&mut w.rng, flavour);
-            lay_source(&mut w, &root, lay, true, false);
+            lay_source(&mut w, &root, lay, manager, true, false);
         }
         if appid == NEW_APPID && w.rng.chance(40) {
             let root = data.join("renamed").join("profiles").join("ByLog");
             let lay = pick_lay(&mut w.rng, flavour);
-            lay_source(&mut w, &root, lay, true, false);
+            lay_source(&mut w, &root, lay, manager, true, false);
             if fs::metadata(root.join("BepInEx")).is_ok() {
                 write(
                     &root.join("BepInEx/LogOutput.log"),
@@ -735,7 +937,7 @@ fn world(i: u64) -> World {
             Flavour::Il2cpp => Lay::Bep6(w.rng.pick(&BEP6_VERSIONS)),
             _ => Lay::Bep5(w.rng.pick(&BEP5_VERSIONS)),
         };
-        lay_source(&mut w, &game_root, lay, false, true);
+        lay_source(&mut w, &game_root, lay, "manual", false, true);
         write(&game_root.join(".doorstop_version"), b"4.3.0");
         if install == Install::None {
             write(&game_root.join("winhttp.dll"), b"MZ their doorstop");
@@ -749,7 +951,7 @@ fn world(i: u64) -> World {
         plugin_at(&game_root, "Their/Their.dll");
     }
     if w.rng.chance(15) {
-        lay_source(&mut w, &game_root, Lay::Melon, false, true);
+        lay_source(&mut w, &game_root, Lay::Melon, "manual", false, true);
     }
 
     // Folders the player picked: a folder of profiles, a profile itself, one inside a Gale data
@@ -759,20 +961,20 @@ fn world(i: u64) -> World {
         let base = w.tmp.join("picked/My mods");
         let root = base.join("profiles/Mine");
         let lay = pick_lay(&mut w.rng, flavour);
-        lay_source(&mut w, &root, lay, false, false);
+        lay_source(&mut w, &root, lay, "folder", false, false);
         added.push(base);
     }
     if w.rng.chance(20) {
         let root = w.tmp.join("picked/Direct");
         let lay = pick_lay(&mut w.rng, flavour);
-        lay_source(&mut w, &root, lay, false, false);
+        lay_source(&mut w, &root, lay, "folder", false, false);
         added.push(root);
     }
     if w.rng.chance(15) {
         let base = w.tmp.join("D/com.kesomannen.gale/moved");
         let root = base.join("profiles/Kept");
         let lay = pick_lay(&mut w.rng, flavour);
-        lay_source(&mut w, &root, lay, true, false);
+        lay_source(&mut w, &root, lay, "gale", true, false);
         added.push(base);
     }
     if w.rng.chance(10)
@@ -790,13 +992,97 @@ fn world(i: u64) -> World {
     w
 }
 
+/// Launcher 0.5.0's verdict on a BepInEx of `kind` whose library says `version`, in world `w`:
+/// the installed integration's capability, then `accepts` (BepInEx 5.4.x for `bepinex5`, exactly
+/// the declared build for `bepinex6-il2cpp`). Held to every verdict 0.5.0 gives over the corpus
+/// (`expected`), so it is 0.5.0's rule wherever a row changes the loader 0.5.1 reads.
+fn verdict_050(w: &World, kind: &str, version: Option<&str>) -> Value {
+    let not =
+        |reason: &str| serde_json::json!({"Err": {"code": "not-supported", "reason": reason}});
+    let (want, need) = match w.install {
+        Install::None => return not("not-installed"),
+        Install::NoTable => return serde_json::json!({"Err": {"code": "integration-without-mods"}}),
+        Install::UnknownKey => return not("unknown-key"),
+        Install::BadBuild => return not("manifest-invalid"),
+        Install::Native => return not("platform"),
+        Install::NoDoorstop => return not("no-doorstop"),
+        Install::Mono | Install::PerGameBepinex => (None, "5.4".to_owned()),
+        Install::Il2cpp(b) => (Some(b), format!("6.0.0-be.{b}")),
+    };
+    let ok = match want {
+        None => kind == "bepinex5" && version.is_some_and(|v| v.starts_with("5.4.")),
+        Some(b) => {
+            kind == "bepinex6-il2cpp"
+                && version
+                    .and_then(|v| v.strip_prefix("6.0.0-be."))
+                    .map(|r| {
+                        r.chars()
+                            .take_while(char::is_ascii_digit)
+                            .collect::<String>()
+                    })
+                    .and_then(|d| d.parse::<u32>().ok())
+                    == Some(b)
+        }
+    };
+    if ok {
+        return serde_json::json!({"Ok": null});
+    }
+    let have = version.map_or(kind, |v| v.split('+').next().unwrap());
+    serde_json::json!({"Err": {"code": "loader-unsupported", "have": have, "need": need}})
+}
+
+/// 0.5.1's verdict on a loader of a data kind: 0.5.0's, but for [`Row::BuildNot788`].
+fn verdict_051(w: &World, kind: &str, version: Option<&str>) -> (Value, bool) {
+    let then = verdict_050(w, kind, version);
+    let passed = then.get("Ok").is_some() || then["Err"]["code"] == "loader-unsupported";
+    match w.install {
+        Install::Il2cpp(b) if b != 788 && kind == "bepinex6-il2cpp" && passed => (
+            serde_json::json!({"Err": {"code": "not-supported", "reason": "outside-versions"}}),
+            true,
+        ),
+        _ => (then, false),
+    }
+}
+
+/// Discovery's order: the most recently played first, then profile, manager, root; one folder's
+/// BepInEx before its MelonLoader.
+fn discovery_order(a: &Value, b: &Value) -> std::cmp::Ordering {
+    let manager = |v: &Value| {
+        ["r2modman", "thunderstore", "gale", "manual", "folder"]
+            .iter()
+            .position(|m| v["manager"] == *m)
+            .unwrap()
+    };
+    let melon = |v: &Value| v["loader"]["kind"] == "melonloader";
+    b["last_played"]
+        .as_u64()
+        .cmp(&a["last_played"].as_u64())
+        .then_with(|| a["profile"].as_str().cmp(&b["profile"].as_str()))
+        .then_with(|| manager(a).cmp(&manager(b)))
+        .then_with(|| {
+            Path::new(a["root"].as_str().unwrap()).cmp(Path::new(b["root"].as_str().unwrap()))
+        })
+        .then_with(|| melon(a).cmp(&melon(b)))
+}
+
+/// When BepInEx's log at `root` was written, as a row says it.
+fn log_ms(root: &Path) -> Option<u64> {
+    let t = fs::metadata(root.join("BepInEx/LogOutput.log"))
+        .ok()?
+        .modified()
+        .ok()?;
+    u64::try_from(t.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_millis()).ok()
+}
+
 /// 0.5.0's answer as 0.5.1 gives it, by the rows; which rows applied, and how many of 0.5.0's
-/// sources no row touched (`untouched`: compared exactly as 0.5.0 gave them).
+/// sources no row touched (`untouched`: compared exactly as 0.5.0 gave them). Every verdict 0.5.0
+/// gives a BepInEx the data reads is held to [`verdict_050`] (`wrong_050`).
 fn expected(
     w: &World,
     then: &[launcher_050::ModSource],
     used: &mut BTreeMap<Row, usize>,
     untouched: &mut usize,
+    wrong_050: &mut Vec<String>,
 ) -> Vec<Value> {
     let mut out = Vec::new();
     for s in then {
@@ -809,10 +1095,34 @@ fn expected(
             p.eq_ignore_ascii_case("BepInEx.Preloader.dll")
                 || p.eq_ignore_ascii_case("BepInEx.Unity.IL2CPP.dll")
         });
+        if bepinex {
+            let kind = v["loader"]["kind"].as_str().unwrap().to_owned();
+            let rule = verdict_050(w, &kind, s.loader.version.as_deref());
+            if rule != v["playable"] {
+                wrong_050.push(format!(
+                    "{}: 0.5.0 says {}, verdict_050 {rule}",
+                    s.root.display(),
+                    v["playable"]
+                ));
+            }
+        }
         if bepinex && let Some(e) = w.expect.get(&key(&s.root)) {
             touched = e.absent.is_some() || !e.rows.is_empty();
             if let Some(row) = e.absent {
                 *used.entry(row).or_default() += 1;
+                continue;
+            }
+            if e.over {
+                *used.entry(Row::OverBudget).or_default() += 1;
+                // The loader the data reads, nothing of it listed.
+                let now = e.now.as_ref().expect("a data kind's loader");
+                v["loader"]["kind"] = Value::from(now.kind);
+                v["mods"] = Value::from(0);
+                v["loader"]["version"] = Value::Null;
+                v["loader"]["preloader"] = Value::Null;
+                v["playable"] =
+                    serde_json::json!({"Err": {"code": "not-supported", "reason": "over-budget"}});
+                out.push(v);
                 continue;
             }
             for row in &e.rows {
@@ -823,19 +1133,50 @@ fn expected(
                 continue;
             }
             v["mods"] = Value::from(mods);
-            if let Some((have, need)) = &e.unsupported
-                && s.playable.is_ok()
-            {
-                *used.entry(Row::BuildNot788).or_default() += 1;
-                v["playable"] = serde_json::json!({"Err": {"code": "loader-unsupported", "have": have, "need": need}});
+            let now = e.now.as_ref().expect("a data kind's loader");
+            if v["loader"]["kind"] != now.kind {
+                *used.entry(Row::MixedCores).or_default() += 1;
+                v["loader"]["kind"] = Value::from(now.kind);
+                v["loader"]["preloader"] = Value::from(now.preloader);
+                v["loader"]["version"] = serde_json::to_value(&now.version).unwrap();
+                touched = true;
+            } else if v["loader"]["version"].as_str() != now.version.as_deref() {
+                let row = now
+                    .version_row
+                    .expect("a version 0.5.1 reads otherwise, by a row");
+                *used.entry(row).or_default() += 1;
+                v["loader"]["version"] = serde_json::to_value(&now.version).unwrap();
                 touched = true;
             }
+            let (p, by_build) = verdict_051(w, now.kind, now.version.as_deref());
+            if by_build {
+                *used.entry(Row::BuildNot788).or_default() += 1;
+                touched = true;
+            }
+            v["playable"] = p;
         }
         if !touched {
             *untouched += 1;
         }
         out.push(v);
     }
+    // The sources 0.5.1 lists where 0.5.0 listed none.
+    for e in w.expect.values() {
+        let Some(a) = &e.appears else { continue };
+        let now = e.now.as_ref().expect("a data kind's loader");
+        *used.entry(Row::SourceAppears).or_default() += 1;
+        let (playable, _) = verdict_051(w, now.kind, now.version.as_deref());
+        out.push(serde_json::json!({
+            "manager": a.manager,
+            "profile": a.profile,
+            "root": a.root,
+            "loader": {"kind": now.kind, "version": now.version, "preloader": now.preloader},
+            "mods": e.delta,
+            "last_played": log_ms(&a.root),
+            "playable": playable,
+        }));
+    }
+    out.sort_by(discovery_order);
     out
 }
 
@@ -867,9 +1208,12 @@ fn mods_discovery_answers_as_launcher_0_5_0_over_the_corpus() {
     let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
     let mut sources = 0usize;
     let mut untouched = 0usize;
+    let mut wrong_050 = Vec::new();
     let mut failures = Vec::new();
+    let mut case_sensitive = true;
     for i in 0..worlds {
         let w = world(i);
+        case_sensitive &= w.case_sensitive;
         let then_target: launcher_050::GameTarget =
             serde_json::from_value(serde_json::to_value(w.target()).unwrap()).unwrap();
         let env = w.env();
@@ -883,18 +1227,23 @@ fn mods_discovery_answers_as_launcher_0_5_0_over_the_corpus() {
         let then = launcher_050::discover_mods_in(&then_target, &w.profile(), &then_env);
         let ours = now::discover_mods_in(&w.target(), &w.profile(), &env);
         assert_eq!(snapshot(w.tmp.path()), before, "world {i}: discovery wrote");
-        let want = expected(&w, &then, &mut used, &mut untouched);
+        let want = expected(&w, &then, &mut used, &mut untouched, &mut wrong_050);
         let got: Vec<Value> = ours
             .iter()
             .map(|s| {
-                // How Astra runs beside it: the data's chain for its BepInEx, nothing for the
-                // rest. Not a field 0.5.0 had.
-                let chain = matches!(
+                // How Astra runs beside it: the data's chain for its BepInEx (one over budget
+                // too: the data's, though nothing of it is listed), nothing for the rest. Not a
+                // field 0.5.0 had.
+                let data = matches!(
                     s.loader.kind,
                     now::LoaderKind::Bepinex5 | now::LoaderKind::Bepinex6Il2cpp
-                ) && s.loader.preloader.as_deref().is_some_and(|p| {
-                    p == "BepInEx.Preloader.dll" || p == "BepInEx.Unity.IL2CPP.dll"
-                });
+                );
+                let over = matches!(&s.playable, Err(now::Unplayable::NotSupported { reason }) if reason == "over-budget");
+                let chain = data
+                    && (over
+                        || s.loader.preloader.as_deref().is_some_and(|p| {
+                            p == "BepInEx.Preloader.dll" || p == "BepInEx.Unity.IL2CPP.dll"
+                        }));
                 let want_coexist: &[now::Coexistence] = if chain {
                     &[now::Coexistence::Chain]
                 } else {
@@ -930,6 +1279,11 @@ fn mods_discovery_answers_as_launcher_0_5_0_over_the_corpus() {
                 .or_default() += 1;
         }
     }
+    assert!(
+        wrong_050.is_empty(),
+        "verdict_050 is not 0.5.0's rule:\n{}",
+        wrong_050.join("\n")
+    );
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
     eprintln!(
         "mods identity: {worlds} worlds, {sources} sources, {untouched} of 0.5.0's by no row\n  verdicts {verdicts:?}\n  managers {managers:?}\n  kinds {kinds:?}\n  rows {used:?}"
@@ -943,6 +1297,10 @@ fn mods_discovery_answers_as_launcher_0_5_0_over_the_corpus() {
     let floor = |n: usize| (n as u64 * worlds / WORLDS).max(1) as usize;
     let mut low = Vec::new();
     for row in ROWS {
+        // What only some file systems and platforms lay.
+        if (row == Row::CaseVariant && !case_sensitive) || (row == Row::Link && !cfg!(unix)) {
+            continue;
+        }
         let n = used.get(&row).copied().unwrap_or(0);
         if n < floor(10) {
             low.push(format!("row {row:?}: {n}"));

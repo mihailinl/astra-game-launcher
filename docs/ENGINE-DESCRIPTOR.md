@@ -128,13 +128,17 @@ Launcher 0.5.0 accepted it and read nothing in it; 0.5.1 reads it (`engines::mod
   and never offered, exactly as 0.5.0 did, and when the loader last ran (BepInEx's
   `LogOutput.log`). `tests/mods_identity.rs` holds every Unity answer to launcher 0.5.0's
   (v0.5.0, a dev-dependency) over a seeded corpus of 600 game folders, mod-manager homes and
-  Astra profiles, but for eight declared rows, each the data's reading, applied to 0.5.0's answer
-  and counted with a floor: `BepInEx/patchers` is not the mods root; a plugins folder holding no
-  `*.dll` is a mod (`dir-per-mod`); a BepInEx 6 IL2CPP with no `BepInEx/interop/` yet, a BepInEx
-  of the other Unity flavour, one beside a game whose flavour nothing names, a preloader without
-  its library, and the game folder's BepInEx beside a program below the folder detection runs on
-  are not recognised; an IL2CPP integration declaring a build other than 788 is not offered
-  beside it. Unreal is found for the first time (`tests/mods.rs`): a UE4SS 3 of the player's
+  Astra profiles, but for fifteen declared rows, each the data's reading, applied to 0.5.0's
+  answer and counted with a floor (debt row 48): `BepInEx/patchers` is not the mods root; a
+  plugins folder holding no `*.dll` is a mod (`dir-per-mod`), so a source of such folders alone
+  appears; a BepInEx 6 IL2CPP with no `BepInEx/interop/` yet, a BepInEx of the other Unity
+  flavour, one beside a game whose flavour nothing names, a preloader without its library, the
+  game folder's BepInEx beside a program below the folder detection runs on, a `BepInEx/` spelled
+  in another letter case (Linux) and a `BepInEx/` that is a link are not recognised, and a mod
+  that is a link is no mod; an IL2CPP game's profile holding both cores is BepInEx 6; a library
+  with no `ProductVersion` is read by its `FileVersion`; a version is shown without control
+  characters; a root of more than 1,024 mods is over budget; and an IL2CPP integration declaring
+  a build other than 788 offers no source (`not-supported{reason=outside-versions}`). Unreal is found for the first time (`tests/mods.rs`): a UE4SS 3 of the player's
   beside the real program is a source Astra chains, a UE4SS 2 is `loader-unsupported` with
   `need` = `UE4SS 3` whatever is installed, the paks are listed and run beside Astra. An Unreal
   runner declares no `[integration.mods]` (it chains a UE4SS 3 by itself), so its sources say

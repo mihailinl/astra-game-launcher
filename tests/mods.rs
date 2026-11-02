@@ -589,6 +589,50 @@ fn an_il2cpp_integration_needs_their_exact_bleeding_edge_build() {
     assert_eq!(names, [("Be5", LoaderKind::Bepinex5)]);
 }
 
+/// An IL2CPP integration declaring a build the built-in data does not hold (`versions =
+/// "=6.0.0-be.788"`; a foundation narrows it, never widens it, §7.4) can be offered with no
+/// BepInEx of the player's, whatever its build: the player is never told to install a version
+/// the other side refuses (735 for the integration, 788 for the data).
+#[test]
+fn an_il2cpp_integration_at_a_build_outside_the_data_is_offered_with_no_source() {
+    let w = World::il2cpp(NEW_APPID);
+    w.install(&MODS_DECL.replace(
+        "loader = \"bepinex5\"",
+        "loader = \"bepinex6-il2cpp\"\nbepinex_build = 735",
+    ));
+    for (name, version) in [
+        ("Be735", "6.0.0-be.735+5fef357"),
+        ("Be788", "6.0.0-be.788+5b766a3"),
+        ("Dev", "6.0.0-dev+3a12d18"),
+    ] {
+        let p = w.gale(GAME, name);
+        bepinex6_il2cpp_at(&p, version);
+        plugin_at(&p, "M/M.dll");
+    }
+    let found = w.discover();
+    assert_eq!(found.len(), 3, "{found:#?}");
+    for s in &found {
+        assert_eq!(
+            s.playable,
+            Err(Unplayable::NotSupported {
+                reason: "outside-versions".into()
+            }),
+            "{}",
+            s.profile
+        );
+    }
+    // At 788, the integration the data holds: offered.
+    let w = World::il2cpp(NEW_APPID);
+    w.install(&MODS_DECL.replace(
+        "loader = \"bepinex5\"",
+        "loader = \"bepinex6-il2cpp\"\nbepinex_build = 788",
+    ));
+    let p = w.gale(GAME, "Be788");
+    bepinex6_il2cpp_at(&p, "6.0.0-be.788+5b766a3");
+    plugin_at(&p, "M/M.dll");
+    assert_eq!(w.discover()[0].playable, Ok(()));
+}
+
 #[test]
 fn an_integration_that_cannot_play_with_mods_says_why() {
     let reason = |w: &World| match &w.discover()[0].playable {
