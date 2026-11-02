@@ -28,6 +28,26 @@ pub enum ModsLoader {
 }
 
 impl ModsLoader {
+    /// The loader's id, as the manifest spells it: the `id` of the built-in `mods` loader
+    /// (engine-descriptor-v1.md §7.2) that the integration's chain runs beside.
+    pub fn id(self) -> &'static str {
+        match self {
+            ModsLoader::Bepinex5 => "bepinex5",
+            ModsLoader::Bepinex6Il2cpp { .. } => "bepinex6-il2cpp",
+        }
+    }
+
+    /// Whether the player's loader, whose version resource says `written`, is one the
+    /// integration's own declaration accepts — narrower than the built-in data may be, never
+    /// wider (§7.4): 5.4.x for `bepinex5`, exactly the declared bleeding-edge build for
+    /// `bepinex6-il2cpp` (astra-bepinex's design §4.5).
+    pub(crate) fn accepts(self, written: Option<&str>) -> bool {
+        match self {
+            ModsLoader::Bepinex5 => written.is_some_and(|v| v.starts_with("5.4.")),
+            ModsLoader::Bepinex6Il2cpp { build } => written.and_then(be_build) == Some(build),
+        }
+    }
+
     /// What the player's BepInEx must be, as a person reads it: `5.4`, `6.0.0-be.788`.
     pub fn need(self) -> String {
         match self {
@@ -35,6 +55,13 @@ impl ModsLoader {
             ModsLoader::Bepinex6Il2cpp { build } => format!("6.0.0-be.{build}"),
         }
     }
+}
+
+/// The bleeding-edge build of a BepInEx 6 version: `6.0.0-be.788+…` → 788.
+pub(crate) fn be_build(version: &str) -> Option<u32> {
+    let rest = version.strip_prefix("6.0.0-be.")?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
 }
 
 /// A checked `[integration.mods]` table.

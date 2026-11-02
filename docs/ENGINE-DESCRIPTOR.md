@@ -105,10 +105,42 @@ Launcher 0.5.0 accepted it and read nothing in it; 0.5.1 reads it (`engines::mod
   needs. Nothing is opened for writing, and nothing found is logged (§7.10): what an evaluation
   returns is for the player's install sheet and that one start, and a runner is handed a chain's
   `entry` and its `tell`, never the list of mods.
-- **Not yet what a start asks.** "With your mods" still runs on `src/mods/**` (0.4.0's
-  discovery: BepInEx, the r2modman, Gale and Thunderstore Mod Manager adapters); its loaders
-  becoming this data, held to today's answers by an identity canary, is 0.5.1's next step (debt
-  row 46).
+- **What "with your mods" asks** (0.5.1 C, `src/mods.rs`): the built-in loaders are this data.
+  The specification's own fragments (`testdata/games/descriptors/mods/builtin/*.mods.toml` at the
+  pin) are GPL test data and never built in: `src/mods/builtin/` is the launcher's own copy,
+  held member for member to them (`tests/mods_identity.rs`
+  `the_builtin_mods_are_the_specifications_fragments`), each riding on the one built-in
+  descriptor it is valid on — BepInEx 5 and BepInEx 6 IL2CPP (exactly `6.0.0-be.788`) on Unity;
+  UE4SS 3, UE4SS 2 and the `~mods` paks on Unreal — and parsed apart from the descriptors Pass A
+  asks, whose digests and answers stay what they were. Discovery (`discover_mods_in`) and a Play
+  with mods (`resolve_play`) judge a folder through one function, `mods::judge`: the built-in
+  rule that names the game's program gives its code and its bindings
+  (`engines::builtin_placement`: `{project}` only from a strong rule; a game a weak rule places
+  binds none, and its Unreal loaders yield nothing), and `evaluate_one` says which loader is
+  there, its version, its mods root, which mods are enabled and how Astra runs beside it
+  (`ModSource::coexist`, new: `chain` for BepInEx and UE4SS 3, `side-by-side` for the paks,
+  empty for UE4SS 2 and for every loader the data does not describe). A chain's target is the
+  data's `chain` entry. What stays code: the adapters (r2modman, Thunderstore Mod Manager, Gale:
+  where their profiles are, and a mod they switched off by renaming its files `*.old`, which an
+  adapter reads as the manager's own enable state, §7.7), Astra's own items and Astra's own loader
+  in the game folder (never the player's), the loaders the data does not describe (MelonLoader;
+  BepInEx 6 for Mono or CoreCLR, the IL2CPP preloader's older name) recognised only to be shown
+  and never offered, exactly as 0.5.0 did, and when the loader last ran (BepInEx's
+  `LogOutput.log`). `tests/mods_identity.rs` holds every Unity answer to launcher 0.5.0's
+  (v0.5.0, a dev-dependency) over a seeded corpus of 600 game folders, mod-manager homes and
+  Astra profiles, but for eight declared rows, each the data's reading, applied to 0.5.0's answer
+  and counted with a floor: `BepInEx/patchers` is not the mods root; a plugins folder holding no
+  `*.dll` is a mod (`dir-per-mod`); a BepInEx 6 IL2CPP with no `BepInEx/interop/` yet, a BepInEx
+  of the other Unity flavour, one beside a game whose flavour nothing names, a preloader without
+  its library, and the game folder's BepInEx beside a program below the folder detection runs on
+  are not recognised; an IL2CPP integration declaring a build other than 788 is not offered
+  beside it. Unreal is found for the first time (`tests/mods.rs`): a UE4SS 3 of the player's
+  beside the real program is a source Astra chains, a UE4SS 2 is `loader-unsupported` with
+  `need` = `UE4SS 3` whatever is installed, the paks are listed and run beside Astra. An Unreal
+  runner declares no `[integration.mods]` (it chains a UE4SS 3 by itself), so its sources say
+  `integration-without-mods`: the choice of "with" is not asked. Nothing in `src/mods.rs`,
+  `src/mods/**` or `src/engines/**` writes anything but Astra's own profile files, or logs
+  (`tests/mods_read_only.rs`, bound to call expressions).
 
 The specification's `mods` goldens (`testdata/games/descriptors/mods/`, `vectors.json`
 `descriptors.mods`, §7.11) hold the launcher to it: every hostile and compat golden is refused

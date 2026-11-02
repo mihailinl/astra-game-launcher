@@ -82,9 +82,9 @@ pub use manifest::{
     SCHEMA, Target, link_limits, wine_dll_overrides,
 };
 pub use mods::{
-    ArmedBy, Choice, ChoiceKind, ChoiceSource, LOADER_STATUS_FILE_NAME, LastRun, LoaderKind,
-    LoaderReason, LoaderStatus, MODS_CHOICE_SCHEMA, ModLoader, ModManager, ModSource, ModsDecl,
-    ModsEnv, ModsLoader, Unplayable, add_mods_root, default_mods_source, discover_mods,
+    ArmedBy, Choice, ChoiceKind, ChoiceSource, Coexistence, LOADER_STATUS_FILE_NAME, LastRun,
+    LoaderKind, LoaderReason, LoaderStatus, MODS_CHOICE_SCHEMA, ModLoader, ModManager, ModSource,
+    ModsDecl, ModsEnv, ModsLoader, Unplayable, add_mods_root, default_mods_source, discover_mods,
     discover_mods_in, loader_status, mods_choice, mods_last_run, set_mods_choice,
 };
 pub use pack_inbox::{

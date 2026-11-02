@@ -37,8 +37,8 @@
 use std::path::{Path, PathBuf};
 
 use super::{
-    Budget, ChoiceKind, ChoiceSource, ModsDecl, ModsEnv, ModsLoader, Unplayable, accepts,
-    bepinex_at, discover, melonloader_at, read_choice_file,
+    Budget, Candidate, ChoiceKind, ChoiceSource, LoaderKind, ModManager, ModsDecl, ModsEnv,
+    ModsLoader, Placed, Unplayable, discover, judge, read_choice_file,
 };
 use crate::doorstop::{self, Generation};
 use crate::error::{LauncherError, Result, codes};
@@ -251,7 +251,9 @@ pub(crate) fn resolve_play(
             ));
     }
 
-    // Their mods are still there, and still a BepInEx the chain runs beside.
+    // Their mods are still there, and still a loader the chain runs beside: judged as discovery
+    // judges it, by the built-in data (the loader the declaration names, its `versions` and the
+    // declaration's own), the chain's target that loader's `chain` entry.
     let root = &source.root;
     // Never a share, a device or a verbatim namespace: refused before anything touches it.
     crate::paths::require_local(root)?;
@@ -261,35 +263,56 @@ pub(crate) fn resolve_play(
     if !usable || !root.is_dir() {
         return Err(source_missing(&source));
     }
-    let Some(loader) = bepinex_at(root, &Budget::new()) else {
-        if melonloader_at(root, false).is_some() {
+    let candidate = Candidate {
+        manager: source.manager,
+        profile: source.profile.clone(),
+        root: root.clone(),
+        game_folder: source.manager == ModManager::Manual,
+    };
+    let found = judge(
+        &candidate,
+        Placed::of(game).as_ref(),
+        &super::capability(game, Some(ledger)),
+        Some(ledger),
+        &Budget::new(),
+    );
+    let Some(theirs) = found
+        .iter()
+        .find(|f| f.source.loader.kind != LoaderKind::MelonLoader)
+    else {
+        if !found.is_empty() {
             return Err(
                 LauncherError::new(codes::MODS_MELONLOADER).with("profile", source.profile.clone())
             );
         }
         return Err(source_missing(&source).with("reason", "no-preloader"));
     };
-    if let Err(Unplayable::LoaderUnsupported { have, need }) = accepts(decl.loader, &loader) {
-        return Err(LauncherError::new(codes::MODS_LOADER_UNSUPPORTED)
+    let unsupported_loader = |have: &str, need: &str| {
+        LauncherError::new(codes::MODS_LOADER_UNSUPPORTED)
             .with("have", have)
             .with("need", need)
-            .with("profile", source.profile.clone()));
-    }
-    // The one preloader the chain hands the game to (astra-bepinex's chain, §4.3 step 2).
-    let want = match decl.loader {
-        ModsLoader::Bepinex5 => "BepInEx.Preloader.dll",
-        ModsLoader::Bepinex6Il2cpp { .. } => "BepInEx.Unity.IL2CPP.dll",
+            .with("profile", source.profile.clone())
     };
-    let preloader = loader.preloader.clone().unwrap_or_default();
-    if !preloader.eq_ignore_ascii_case(want) {
-        return Err(LauncherError::new(codes::MODS_LOADER_UNSUPPORTED)
-            .with("have", loader.kind.code())
-            .with("need", decl.loader.need())
-            .with("profile", source.profile.clone()));
+    match &theirs.source.playable {
+        Ok(()) => {}
+        Err(Unplayable::LoaderUnsupported { have, need }) => {
+            return Err(unsupported_loader(have, need));
+        }
+        Err(Unplayable::NotSupported { reason }) => return Err(unsupported(reason)),
+        Err(_) => {
+            return Err(unsupported_loader(
+                theirs.source.loader.kind.code(),
+                &decl.loader.need(),
+            ));
+        }
     }
-    let core =
-        find_any_case(root, &["BepInEx", "core"]).unwrap_or_else(|| root.join("BepInEx/core"));
-    let target = core.join(&preloader);
+    // The one file the chain hands the game to: the data's `chain` entry for that loader.
+    let Some(target) = theirs.entry.clone() else {
+        return Err(unsupported_loader(
+            theirs.source.loader.kind.code(),
+            &decl.loader.need(),
+        ));
+    };
 
     // Their pack's own Doorstop settings, from their copy of its ini.
     let game_root = game.game_root()?;

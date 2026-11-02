@@ -3,21 +3,37 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The player's own mods for a game, found where their mod managers keep them: r2modman,
-//! Thunderstore Mod Manager, Gale, a BepInEx installed by hand in the game folder, and folders the
+//! Thunderstore Mod Manager, Gale, a loader installed by hand in the game folder, and folders the
 //! player added. Pure reads: nothing here ever writes, and nothing of theirs ever is.
 //!
-//! - **Where**: each manager's data folder ([`ModsEnv`]), then the game's folder inside it — from
-//!   `games.tsv` (Thunderstore's ecosystem schema: Steam appid → r2modman's folder, Gale's
-//!   community), or, for a game newer than the table, the Steam install folder's name, or any
-//!   `<data>/*/profiles/*` whose `BepInEx/LogOutput.log` names this game's program in its first
-//!   lines. Never a guess beyond that.
-//! - **What counts**: a profile whose `BepInEx/core` holds a known preloader; a BepInEx in the game
-//!   folder that no ledger of ours placed ([`ModManager::Manual`]); MelonLoader, shown and never
-//!   offered. A BepInEx source with no mod of the player's ([`ModSource::mods`] = 0) is not
-//!   offered and not listed: that is Astra's own items alone, or an empty profile.
+//! - **Where** (code: the adapters, engine-descriptor-v1.md §7.7): each manager's data folder
+//!   ([`ModsEnv`]), then the game's folder inside it — from `games.tsv` (Thunderstore's ecosystem
+//!   schema: Steam appid → r2modman's folder, Gale's community), or, for a game newer than the
+//!   table, the Steam install folder's name, or any `<data>/*/profiles/*` whose
+//!   `BepInEx/LogOutput.log` names this game's program in its first lines. Never a guess beyond
+//!   that. Then the folders the player added, and the game folder ([`ModManager::Manual`]).
+//! - **What is there** (data: the built-in `mods`, [`builtin`]): in each of those folders, the
+//!   built-in descriptor that placed the game ([`crate::engines::builtin_placement`]) says which
+//!   loader it holds, its version, its mods root and which mods are enabled (§7.4, §7.5), through
+//!   [`crate::engines::mods::evaluate_one`]: BepInEx 5 and BepInEx 6 (IL2CPP) for Unity; UE4SS 3,
+//!   UE4SS 2 and the `~mods` paks for Unreal. An adapter adds only its manager's own enable state
+//!   (a mod it switched off, [`switched_off`]); Astra's own items and Astra's own loader in the
+//!   game folder are never the player's. A source with no mod of the player's
+//!   ([`ModSource::mods`] = 0) is not listed: that is Astra's own items alone, or an empty profile.
+//! - **What the data does not describe** (code, shown and never offered): MelonLoader, and a
+//!   BepInEx 6 that is not the IL2CPP build the data knows (Mono, CoreCLR, the IL2CPP preloader's
+//!   older name). They are recognised only to tell the player why "with your mods" is not offered,
+//!   exactly as launcher 0.5.0 did ([`other_bepinex_at`], [`melonloader_at`]).
 //! - **Whether it can be played together**: the installed integration's `[integration.mods]`
-//!   ([`ModsDecl`]) against their BepInEx's own version, read from its version resource.
+//!   ([`ModsDecl`]) against the loader the data recognised, its own `versions` and the
+//!   declaration's (narrower, never wider); and how Astra runs beside it ([`ModSource::coexist`]).
+//!
+//! `tests/mods_identity.rs` holds every Unity answer to launcher 0.5.0's hand-written discovery,
+//! but for the rows it declares, each counted.
+//!
+//! **Private** (§7.10): nothing here logs, and nothing it finds leaves the caller's hands.
 
+pub(crate) mod builtin;
 pub(crate) mod choice;
 mod decl;
 mod games;
@@ -44,6 +60,10 @@ pub use status::{
 };
 
 use crate::doorstop;
+use crate::engines::EngineCode;
+use crate::engines::mods::{
+    Bindings, Coexist, Enabled, LoaderOutcome, Mods, Recognised, SourceKind, Strategy, evaluate_one,
+};
 use crate::game::{GameTarget, Platform, steam_appid_of_dir};
 use crate::ledger::{self, Ledger};
 use crate::manifest::Manifest;
@@ -58,7 +78,7 @@ pub enum ModManager {
     /// Thunderstore Mod Manager (Overwolf, Windows only): r2modman's code, its own data folder.
     Thunderstore,
     Gale,
-    /// A BepInEx installed by hand in the game folder.
+    /// A loader installed by hand in the game folder.
     Manual,
     /// A folder the player added whose owner is not recognisable from its path.
     Folder,
@@ -76,22 +96,45 @@ impl ModManager {
             ModManager::Folder => "folder",
         }
     }
+
+    /// Where the specification's `{source}` is for a folder this manager keeps (§7.3): the game
+    /// folder for [`ModManager::Manual`], the folder the player picked for
+    /// [`ModManager::Folder`], an adapter's profile for the rest (a picked folder inside a
+    /// manager's data is read as that manager's, §7.7).
+    pub(crate) fn source_kind(self) -> SourceKind {
+        match self {
+            ModManager::Manual => SourceKind::Game,
+            ModManager::Folder => SourceKind::Picked,
+            ModManager::R2modman | ModManager::Thunderstore | ModManager::Gale => {
+                SourceKind::Manager
+            }
+        }
+    }
 }
 
 /// Which mod loader a source runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LoaderKind {
-    /// `BepInEx/core/BepInEx.Preloader.dll`.
+    /// BepInEx 5 (`bepinex5`, built-in data).
     Bepinex5,
-    /// `BepInEx.Unity.Mono.Preloader.dll`: BepInEx 6 for a Mono game.
+    /// `BepInEx.Unity.Mono.Preloader.dll`: BepInEx 6 for a Mono game. Not in the data: shown,
+    /// never offered.
     Bepinex6Mono,
-    /// `BepInEx.Unity.IL2CPP.dll` (or the older `BepInEx.IL2CPP.dll`).
+    /// BepInEx 6 for an IL2CPP game (`bepinex6-il2cpp`, built-in data); its preloader's older
+    /// name `BepInEx.IL2CPP.dll` is shown and never offered.
     Bepinex6Il2cpp,
-    /// `BepInEx.NET.CoreCLR.dll`: BepInEx 6 for a .NET game that is not Unity.
+    /// `BepInEx.NET.CoreCLR.dll`: BepInEx 6 for a .NET game that is not Unity. Not in the data.
     Bepinex6Coreclr,
     #[serde(rename = "melonloader")]
     MelonLoader,
+    /// UE4SS 3 (`ue4ss3`, built-in data): beside the game's real program, chained.
+    Ue4ss3,
+    /// UE4SS 2 (`ue4ss2`, built-in data): recognised, and Astra cannot run beside it.
+    Ue4ss2,
+    /// The engine's own `~mods` paks (`unreal-paks`, built-in data): no loader and no list; they
+    /// load beside Astra whatever it does.
+    UnrealPaks,
 }
 
 impl LoaderKind {
@@ -102,6 +145,73 @@ impl LoaderKind {
             LoaderKind::Bepinex6Il2cpp => "bepinex6-il2cpp",
             LoaderKind::Bepinex6Coreclr => "bepinex6-coreclr",
             LoaderKind::MelonLoader => "melonloader",
+            LoaderKind::Ue4ss3 => "ue4ss3",
+            LoaderKind::Ue4ss2 => "ue4ss2",
+            LoaderKind::UnrealPaks => "unreal-paks",
+        }
+    }
+
+    /// The kind a built-in `mods` loader's `id` names: its code. `None` for an id no kind has.
+    pub(crate) fn of_id(id: &str) -> Option<LoaderKind> {
+        [
+            LoaderKind::Bepinex5,
+            LoaderKind::Bepinex6Il2cpp,
+            LoaderKind::Ue4ss3,
+            LoaderKind::Ue4ss2,
+            LoaderKind::UnrealPaks,
+        ]
+        .into_iter()
+        .find(|k| k.code() == id)
+    }
+
+    /// One BepInEx per folder (as 0.5.0 listed them): every BepInEx kind is one family.
+    fn family(self) -> &'static str {
+        match self {
+            LoaderKind::Bepinex5
+            | LoaderKind::Bepinex6Mono
+            | LoaderKind::Bepinex6Il2cpp
+            | LoaderKind::Bepinex6Coreclr => "bepinex",
+            other => other.code(),
+        }
+    }
+}
+
+/// How Astra runs beside the player's loader (engine-descriptor-v1.md §7.6), as the built-in data
+/// says for that loader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Coexistence {
+    /// Astra's runner starts first and hands control to their loader, in place (BepInEx, UE4SS 3).
+    Chain,
+    /// Their loader starts as it would without Astra, and Astra runs beside it (the `~mods`
+    /// paks: nothing to hand over, nothing told).
+    SideBySide,
+    /// Their mod manager starts the game, and Astra rides along through an adapter.
+    ViaManager,
+}
+
+impl Coexistence {
+    pub fn code(self) -> &'static str {
+        match self {
+            Coexistence::Chain => "chain",
+            Coexistence::SideBySide => "side-by-side",
+            Coexistence::ViaManager => "via-manager",
+        }
+    }
+
+    fn of(s: &Strategy) -> Coexistence {
+        match s {
+            Strategy::Chain { .. } => Coexistence::Chain,
+            Strategy::SideBySide { .. } => Coexistence::SideBySide,
+            Strategy::ViaManager => Coexistence::ViaManager,
+        }
+    }
+
+    fn of_data(s: &Coexist) -> Coexistence {
+        match s {
+            Coexist::Chain { .. } => Coexistence::Chain,
+            Coexist::SideBySide { .. } => Coexistence::SideBySide,
+            Coexist::ViaManager => Coexistence::ViaManager,
         }
     }
 }
@@ -110,10 +220,12 @@ impl LoaderKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModLoader {
     pub kind: LoaderKind,
-    /// The `ProductVersion` of `BepInEx.dll` (BepInEx 5) or `BepInEx.Core.dll` (6), as its
-    /// version resource has it: `5.4.23.6+b89fcc8…`, `6.0.0-be.788+5b766a3…`. `None`: unreadable.
+    /// Its version resource's own words (`BepInEx.dll` for BepInEx 5, `BepInEx.Core.dll` for 6,
+    /// `UE4SS.dll`): `5.4.23.6+b89fcc8…`, `6.0.0-be.788+5b766a3…`, `3.0.1`. `None`: unreadable,
+    /// or a loader that has none (the paks).
     pub version: Option<String>,
-    /// The preloader in `BepInEx/core`, as spelled on disk; `None` for MelonLoader.
+    /// The file a chain hands control to, as spelled on disk: their preloader in `BepInEx/core`,
+    /// `UE4SS.dll`. `None` when Astra does not chain the loader (MelonLoader, UE4SS 2, the paks).
     pub preloader: Option<String>,
 }
 
@@ -124,19 +236,24 @@ pub enum Unplayable {
     /// Their mods run through MelonLoader; Astra plays together with BepInEx only.
     #[serde(rename = "melonloader")]
     MelonLoader,
-    /// Their BepInEx is not one the integration's chain loader runs beside: `have` is theirs
-    /// (its version without the commit, or the loader's code when the version is unreadable),
-    /// `need` what the integration declares (`5.4`, `6.0.0-be.788`).
+    /// Their loader is not one the integration's chain loader runs beside: `have` is theirs (its
+    /// version without the commit, or the loader's code when the version is unreadable), `need`
+    /// what the integration declares (`5.4`, `6.0.0-be.788`). A loader Astra cannot run beside at
+    /// all, whatever is installed (UE4SS 2: `coexist = []`, §7.6), says so the same way: `need`
+    /// is then the name of the loader of the same engine that Astra does run beside (`UE4SS 3`).
     LoaderUnsupported { have: String, need: String },
     /// The integration installed for this game declares no `[integration.mods]`: it plays Astra
-    /// on its own for now (an IL2CPP runner ships without the table until it is proven). Its Play
+    /// on its own for now (an IL2CPP runner ships without the table until it is proven; an Unreal
+    /// runner, which needs no table: it chains a UE4SS 3 of the player's by itself). Its Play
     /// never asks, and plays Astra alone whatever was chosen.
     IntegrationWithoutMods,
     /// The integration installed for this game cannot play together with any mods: `reason` is
     /// `not-installed`, the code a Play with mods would refuse its `[integration.mods]` with
     /// (`unknown-key`, `manifest-invalid`, `path-escapes`), `platform` (a native Linux game: no
     /// loader proxy), or `no-doorstop` (its launch does not go through a Doorstop proxy beside the
-    /// game).
+    /// game). Or `over-budget`: their folder is past a bound of one evaluation (§7.8: more than
+    /// 1,024 mods, a folder of more than 5,000 entries, …), so nothing of it is listed, and a start
+    /// is without mods.
     NotSupported { reason: String },
 }
 
@@ -144,20 +261,31 @@ pub enum Unplayable {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModSource {
     pub manager: ModManager,
-    /// The profile's folder name; empty for [`ModManager::Manual`] (the game folder's BepInEx).
+    /// The profile's folder name; empty for [`ModManager::Manual`] (the game folder).
     pub profile: String,
-    /// The folder holding their `BepInEx/` (or `MelonLoader/`): the profile, or the game folder.
+    /// The folder that holds their loader (`{source}`): the profile, the folder they picked, or
+    /// the game folder.
     pub root: PathBuf,
     pub loader: ModLoader,
-    /// What their loader will load besides Astra: the first-level entries of `BepInEx/plugins` and
-    /// `BepInEx/patchers` holding at least one `*.dll` (a disabled `*.dll.old` is not one), Astra's
-    /// own (`astra-item.json` inside) not counted. MelonLoader: the `*.dll` files in `Mods/`.
+    /// What their loader will load besides Astra: the mods the built-in data finds enabled in its
+    /// mods root (BepInEx: each folder and each `*.dll` in `BepInEx/plugins`; a disabled
+    /// `*.dll.old` is not one, nor a folder their manager switched off), Astra's own
+    /// (`astra-item.json` inside) not counted. MelonLoader: the `*.dll` files in `Mods/`; a BepInEx
+    /// the data does not describe: 0.5.0's count (`BepInEx/plugins` and `BepInEx/patchers`).
     pub mods: u32,
     /// When their loader last ran there: its log's modification time (`BepInEx/LogOutput.log`,
-    /// `MelonLoader/Latest.log`), milliseconds since the UNIX epoch. `None`: never.
+    /// `MelonLoader/Latest.log`), milliseconds since the UNIX epoch. `None`: never, or a loader
+    /// whose log is not read.
     pub last_played: Option<u64>,
     /// `Ok`: offered. `Err`: shown, with the reason, and never offered.
     pub playable: Result<(), Unplayable>,
+    /// How Astra runs beside their loader, in the built-in data's order of preference (§7.6):
+    /// `chain` for BepInEx and UE4SS 3 (the Unreal runner chains a UE4SS 3 of the player's by
+    /// itself), `side-by-side` for the paks. Empty: Astra cannot run beside it (MelonLoader, a
+    /// BepInEx the data does not describe, UE4SS 2). New in 0.5.1; what a choice of "with" does
+    /// is still [`ModSource::playable`]'s.
+    #[serde(default)]
+    pub coexist: Vec<Coexistence>,
 }
 
 /// Where the mod managers keep their data on this machine.
@@ -186,9 +314,12 @@ const LOG_HEAD_BYTES: u64 = 8 * 1024;
 /// More than any `BepInEx.dll` / `BepInEx.Core.dll` (~140 KB): a larger one's version is not read.
 const MAX_ASSEMBLY_BYTES: u64 = 16 * 1024 * 1024;
 /// What one discovery may read in all, over every data folder and source: folder entries listed,
-/// and bytes of their files read. Spent, it stops looking; what it found so far stands.
+/// and bytes of their files read. Spent, it stops looking; what it found so far stands. Each
+/// built-in data evaluation has its own bounds besides (§7.8).
 const BUDGET_ENTRIES: usize = 200_000;
 const BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+/// How deep a mod's folder is looked into for what its manager switched off (0.5.0's bound).
+const MOD_DEPTH: usize = 8;
 
 /// The shared budget of one discovery ([`BUDGET_ENTRIES`], [`BUDGET_BYTES`]).
 pub(crate) struct Budget {
@@ -340,7 +471,7 @@ fn regular_file(path: &Path) -> Option<u64> {
         .map(|m| m.len())
 }
 
-/// Preloader names in `BepInEx/core`, in the order they are probed, and what each one is.
+/// Preloader names in `BepInEx/core`, in the order 0.5.0 probed them, and what each one is.
 const PRELOADERS: &[(&str, LoaderKind)] = &[
     ("BepInEx.Preloader.dll", LoaderKind::Bepinex5),
     ("BepInEx.Unity.IL2CPP.dll", LoaderKind::Bepinex6Il2cpp),
@@ -349,32 +480,62 @@ const PRELOADERS: &[(&str, LoaderKind)] = &[
     ("BepInEx.NET.CoreCLR.dll", LoaderKind::Bepinex6Coreclr),
 ];
 
-/// The BepInEx whose `BepInEx/core` is below `root`, if it holds a known preloader. Its version
-/// is read only from a regular file of an assembly's size, charged to `b`.
-pub(crate) fn bepinex_at(root: &Path, b: &Budget) -> Option<ModLoader> {
+/// The first known preloader in `<root>/BepInEx/core`, as 0.5.0 probed them: its name as spelled
+/// on disk, and its kind.
+fn first_preloader(root: &Path) -> Option<(PathBuf, String, LoaderKind)> {
     let core = find_any_case(root, &["BepInEx", "core"]).filter(|p| p.is_dir())?;
-    for (name, kind) in PRELOADERS {
-        let Some(pre) = find_any_case(&core, &[name]).filter(|p| p.is_file()) else {
-            continue;
-        };
-        let lib = if *kind == LoaderKind::Bepinex5 {
-            "BepInEx.dll"
-        } else {
-            "BepInEx.Core.dll"
-        };
-        let version = find_any_case(&core, &[lib]).and_then(|p| {
-            let len = regular_file(&p).filter(|n| *n <= MAX_ASSEMBLY_BYTES)?;
-            b.bytes(len)
-                .then(|| version::version_string_of_file(&p, "ProductVersion"))
-                .flatten()
-        });
-        return Some(ModLoader {
-            kind: *kind,
-            version,
-            preloader: pre.file_name().map(|n| n.to_string_lossy().into_owned()),
-        });
+    PRELOADERS.iter().find_map(|(name, kind)| {
+        let pre = find_any_case(&core, &[name]).filter(|p| p.is_file())?;
+        let spelled = pre.file_name()?.to_string_lossy().into_owned();
+        Some((core.clone(), spelled, *kind))
+    })
+}
+
+/// Whether `name` (a preloader's) is the `chain` entry of a loader of the built-in data: then the
+/// data, not [`other_bepinex_at`], says what that BepInEx is.
+fn data_entry_name(name: &str) -> bool {
+    builtin::descriptors()
+        .iter()
+        .filter_map(|d| d.mods())
+        .flat_map(Mods::loaders)
+        .flat_map(|l| l.coexist())
+        .any(|s| match s {
+            Coexist::Chain { entry, .. } => entry
+                .as_str()
+                .rsplit('/')
+                .next()
+                .is_some_and(|n| n.eq_ignore_ascii_case(name)),
+            _ => false,
+        })
+}
+
+/// A BepInEx below `root` that the built-in data does not describe — BepInEx 6 for Mono or
+/// CoreCLR, BepInEx 6 IL2CPP under its preloader's older name — exactly as 0.5.0 recognised it
+/// (its first known preloader, 0.5.0's order). Shown, never offered: no integration's chain runs
+/// beside one. `None` when the first preloader there is one the data describes (then the data
+/// answers, or nothing does). Its version is read only from a regular file of an assembly's size,
+/// charged to `b`.
+fn other_bepinex_at(root: &Path, b: &Budget) -> Option<ModLoader> {
+    let (core, preloader, kind) = first_preloader(root)?;
+    if data_entry_name(&preloader) {
+        return None;
     }
-    None
+    let lib = if kind == LoaderKind::Bepinex5 {
+        "BepInEx.dll"
+    } else {
+        "BepInEx.Core.dll"
+    };
+    let version = find_any_case(&core, &[lib]).and_then(|p| {
+        let len = regular_file(&p).filter(|n| *n <= MAX_ASSEMBLY_BYTES)?;
+        b.bytes(len)
+            .then(|| version::version_string_of_file(&p, "ProductVersion"))
+            .flatten()
+    });
+    Some(ModLoader {
+        kind,
+        version,
+        preloader: Some(preloader),
+    })
 }
 
 /// MelonLoader below `root`: its `MelonLoader/` folder (and, in a game folder, the `version.dll`
@@ -396,35 +557,9 @@ fn short(version: &str) -> &str {
     version.split('+').next().unwrap_or(version)
 }
 
-/// The bleeding-edge build of a BepInEx 6 version: `6.0.0-be.788+…` → 788.
-fn be_build(version: &str) -> Option<u32> {
-    let rest = version.strip_prefix("6.0.0-be.")?;
-    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    digits.parse().ok()
-}
-
-/// Whether the integration's chain runs beside `loader` (astra-bepinex's design §4.5): BepInEx
-/// 5.4.x for `bepinex5`; exactly the declared bleeding-edge build for `bepinex6-il2cpp`.
-pub(crate) fn accepts(want: ModsLoader, loader: &ModLoader) -> Result<(), Unplayable> {
-    if loader.kind == LoaderKind::MelonLoader {
-        return Err(Unplayable::MelonLoader);
-    }
-    let version = loader.version.as_deref();
-    let ok = match want {
-        ModsLoader::Bepinex5 => {
-            loader.kind == LoaderKind::Bepinex5 && version.is_some_and(|v| v.starts_with("5.4."))
-        }
-        ModsLoader::Bepinex6Il2cpp { build } => {
-            loader.kind == LoaderKind::Bepinex6Il2cpp && version.and_then(be_build) == Some(build)
-        }
-    };
-    if ok {
-        return Ok(());
-    }
-    Err(Unplayable::LoaderUnsupported {
-        have: version.map_or(loader.kind.code(), short).to_owned(),
-        need: want.need(),
-    })
+/// What a loader is, as `have` says it: its version without the commit, else its code.
+fn have(version: Option<&str>, kind: LoaderKind) -> String {
+    version.map_or(kind.code(), short).to_owned()
 }
 
 /// Whether the integration installed with `ledger` can play together with mods on `game`, and
@@ -457,13 +592,50 @@ pub(crate) fn capability(
     Ok((m, decl))
 }
 
+/// The game as the built-in data reads it: the code the built-in rule that names its program
+/// gives, that rule's bindings (§7.3), and the built-in `mods` for that code. `None` when no
+/// built-in rule names the program: then no built-in loader is asked, anywhere.
+pub(crate) struct Placed {
+    code: EngineCode,
+    bindings: Bindings,
+    mods: Option<&'static Mods>,
+    /// The folder detection runs on, canonical: `{source}` for the game folder.
+    game_dir: PathBuf,
+    /// `${game}`, the folder holding the program: where Astra's own game files are.
+    game_root: Option<PathBuf>,
+}
+
+impl Placed {
+    pub(crate) fn of(game: &GameTarget) -> Option<Placed> {
+        let game_dir = canonical_dir(&game.dir).ok()?;
+        let exe = game.exe_components().ok()?;
+        let (code, bindings) =
+            crate::engines::builtin_placement(&game_dir, &exe, crate::engines::builtin())?;
+        Some(Placed {
+            mods: builtin::for_code(&code),
+            code,
+            bindings,
+            game_dir,
+            game_root: game.game_root().ok(),
+        })
+    }
+}
+
 /// A folder that may be a mod source, before it is looked at.
-struct Candidate {
-    manager: ModManager,
-    profile: String,
-    root: PathBuf,
-    /// The game folder: its BepInEx is [`ModManager::Manual`], and MelonLoader there needs its proxy.
-    game_folder: bool,
+pub(crate) struct Candidate {
+    pub(crate) manager: ModManager,
+    pub(crate) profile: String,
+    pub(crate) root: PathBuf,
+    /// The game folder: its loader is [`ModManager::Manual`], and MelonLoader there needs its
+    /// proxy.
+    pub(crate) game_folder: bool,
+}
+
+/// One loader found in one source, judged: the source as a row says it, where a chain hands
+/// control to their loader (in place), and the family that keeps it once per folder.
+pub(crate) struct Found {
+    pub(crate) source: ModSource,
+    pub(crate) entry: Option<PathBuf>,
 }
 
 /// What discovery knows about the game while it looks.
@@ -590,11 +762,13 @@ fn manager_of_path(p: &Path) -> ModManager {
     }
 }
 
-/// A folder the player added: a profile itself, a game's folder of profiles, or a manager's whole
-/// (custom) data folder.
+/// A folder the player added: a profile itself (a BepInEx's `BepInEx/core` with a preloader, or
+/// MelonLoader, is there: the adapters' reading of where a profile is, as in 0.5.0; what is in it
+/// is then the data's to say), a game's folder of profiles, or a manager's whole (custom) data
+/// folder.
 fn added_root(look: &Lookup, root: &Path, out: &mut Vec<Candidate>) {
     let manager = manager_of_path(root);
-    if bepinex_at(root, look.budget).is_some() || melonloader_at(root, false).is_some() {
+    if first_preloader(root).is_some() || melonloader_at(root, false).is_some() {
         out.push(candidate(manager, root.to_path_buf()));
     } else if find_any_case(root, &["profiles"]).is_some() {
         profiles_in(manager, root, out, look.budget);
@@ -603,7 +777,8 @@ fn added_root(look: &Lookup, root: &Path, out: &mut Vec<Candidate>) {
     }
 }
 
-/// The mods the first-level entries of `BepInEx/plugins` and `BepInEx/patchers` hold.
+/// The mods the first-level entries of `BepInEx/plugins` and `BepInEx/patchers` hold, as 0.5.0
+/// counted them: for a BepInEx the data does not describe.
 fn count_bepinex_mods(root: &Path, b: &Budget) -> u32 {
     let mut n = 0;
     for sub in ["plugins", "patchers"] {
@@ -622,10 +797,7 @@ fn count_bepinex_mods(root: &Path, b: &Budget) -> u32 {
             let Ok(meta) = fs::metadata(&p) else { continue };
             if meta.is_file() {
                 n += u32::from(is_dll(&p));
-            } else if meta.is_dir()
-                && find_any_case(&p, &["astra-item.json"]).is_none()
-                && holds_dll(&p, 0, b)
-            {
+            } else if meta.is_dir() && !astra_item(&p) && holds_dll(&p, 0, b) {
                 n += 1;
             }
         }
@@ -643,7 +815,7 @@ fn is_dll(p: &Path) -> bool {
 /// Whether `dir` holds a `*.dll` somewhere below it, within bounds (links are followed by the
 /// loader too; the depth bound ends a loop, the budget a large tree).
 fn holds_dll(dir: &Path, depth: usize, b: &Budget) -> bool {
-    if depth > 8 {
+    if depth > MOD_DEPTH {
         return false;
     }
     let Ok(entries) = fs::read_dir(dir) else {
@@ -662,6 +834,72 @@ fn holds_dll(dir: &Path, depth: usize, b: &Budget) -> bool {
         }
     }
     subdirs.iter().any(|d| holds_dll(d, depth + 1, b))
+}
+
+/// Astra's own item, never one of the player's mods: a folder holding `astra-item.json`.
+fn astra_item(dir: &Path) -> bool {
+    find_any_case(dir, &["astra-item.json"]).is_some()
+}
+
+/// What a mod's folder holds below it, within bounds, links never followed: a file one of
+/// `globs` names, and a file renamed `*.old`.
+fn names_below(dir: &Path, globs: &[&crate::engines::mods::Glob], b: &Budget) -> (bool, bool) {
+    fn walk(
+        dir: &Path,
+        depth: usize,
+        globs: &[&crate::engines::mods::Glob],
+        b: &Budget,
+        seen: &mut (bool, bool),
+    ) {
+        if depth > MOD_DEPTH || (seen.0 && seen.1) {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        let mut subdirs = Vec::new();
+        for e in entries.flatten().take(MAX_DIR_ENTRIES) {
+            if !b.entry() {
+                return;
+            }
+            let Ok(t) = e.file_type() else { continue };
+            let name = e.file_name().to_string_lossy().into_owned();
+            if t.is_file() {
+                seen.0 |= globs.iter().any(|g| g.matches(&name));
+                seen.1 |= name.to_ascii_lowercase().ends_with(".old");
+            } else if t.is_dir() {
+                subdirs.push(e.path());
+            }
+        }
+        for d in subdirs {
+            walk(&d, depth + 1, globs, b, seen);
+        }
+    }
+    let mut seen = (false, false);
+    walk(dir, 0, globs, b, &mut seen);
+    seen
+}
+
+/// A mod folder its manager switched off: the manager's own enable state, which an adapter reads
+/// (engine-descriptor-v1.md §7.7). r2modman, Thunderstore Mod Manager and Gale switch a mod off by
+/// renaming its files `<name>.old`, so the folder stays and its loader loads nothing of it: it
+/// holds a file renamed `*.old` and none the loader's own `file-glob`s name (BepInEx: `*.dll`).
+/// Only for a source such a manager keeps; a folder of any other source is the data's alone.
+fn switched_off(
+    manager: ModManager,
+    dir: &Path,
+    globs: &[&crate::engines::mods::Glob],
+    b: &Budget,
+) -> bool {
+    if !matches!(
+        manager,
+        ModManager::R2modman | ModManager::Thunderstore | ModManager::Gale
+    ) || globs.is_empty()
+    {
+        return false;
+    }
+    let (loadable, renamed) = names_below(dir, globs, b);
+    renamed && !loadable
 }
 
 /// MelonLoader's mods: the `*.dll` files in `Mods/`.
@@ -687,68 +925,262 @@ fn modified_ms(root: &Path, rel: &[&str]) -> Option<u64> {
     u64::try_from(t.duration_since(UNIX_EPOCH).ok()?.as_millis()).ok()
 }
 
+/// The log a loader writes when it runs, below its source: what [`ModSource::last_played`] reads.
+/// BepInEx's only; another loader's last run is not read.
+fn log_of(kind: LoaderKind) -> Option<&'static [&'static str]> {
+    match kind.family() {
+        "bepinex" => Some(&["BepInEx", "LogOutput.log"]),
+        _ if kind == LoaderKind::MelonLoader => Some(&["MelonLoader", "Latest.log"]),
+        _ => None,
+    }
+}
+
 /// A path that can be written into `chain.ini` and remembered whole: local, no line break.
 fn usable(p: &Path) -> bool {
     local_verdict(p).is_ok() && p.to_str().is_some_and(|s| !s.contains(['\n', '\r', '\0']))
 }
 
-/// The source at `c`, judged: `None` when it is not one (no known preloader, nothing of the
-/// player's to load).
-fn source_of(
-    c: &Candidate,
-    melon: bool,
-    can: &Result<(Manifest, ModsDecl), Unplayable>,
-    b: &Budget,
-) -> Option<ModSource> {
-    if !usable(&c.root) || c.profile.contains(['\n', '\r', '\0']) {
-        return None;
-    }
-    let (loader, mods, log) = if melon {
-        let loader = melonloader_at(&c.root, c.game_folder)?;
-        let mods = count_melon_mods(&c.root, b);
-        // A profile with nothing in it is no one's mods; MelonLoader in the game folder loads
-        // into every start, mods or not.
-        if mods == 0 && !c.game_folder {
-            return None;
-        }
-        (loader, mods, ["MelonLoader", "Latest.log"])
-    } else {
-        let loader = bepinex_at(&c.root, b)?;
-        let mods = count_bepinex_mods(&c.root, b);
-        if mods == 0 {
-            return None;
-        }
-        (loader, mods, ["BepInEx", "LogOutput.log"])
+/// Whether a loader the data recognised in the game folder is Astra's own install: the ledger put
+/// a game file in the folder of one of the files recognising it, or below it — Astra's per-game
+/// BepInEx (`BepInEx/core/…`, 0.5.0's rule), an older runner's UE4SS (`ue4ss/…`). A recognising
+/// file directly beside the program (UE4SS 2's) is Astra's only when the ledger placed that very
+/// file: every runner puts its proxy beside the program.
+fn astra_placed(ledger: Option<&Ledger>, game_root: Option<&Path>, files: &[PathBuf]) -> bool {
+    let (Some(ledger), Some(game_root)) = (ledger, game_root) else {
+        return false;
     };
-    let playable = match (&loader.kind, can) {
-        (LoaderKind::MelonLoader, _) => Err(Unplayable::MelonLoader),
-        (_, Err(why)) => Err(why.clone()),
-        (_, Ok((_, decl))) => accepts(decl.loader, &loader),
-    };
-    Some(ModSource {
-        manager: c.manager,
-        profile: c.profile.clone(),
-        // As a person and `chain.ini` see it: no `\\?\` prefix.
-        root: plain(&c.root),
-        last_played: modified_ms(&c.root, &log),
-        loader,
-        mods,
-        playable,
+    let placed: Vec<String> = ledger
+        .game_files
+        .iter()
+        .map(|g| g.rel.to_ascii_lowercase())
+        .collect();
+    files.iter().any(|f| {
+        let Ok(rel) = f.strip_prefix(game_root) else {
+            return false;
+        };
+        let rel: Vec<String> = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
+            .collect();
+        let Some((_, folder)) = rel.split_last() else {
+            return false;
+        };
+        if folder.is_empty() {
+            let file = rel.join("/");
+            placed.contains(&file)
+        } else {
+            let folder = format!("{}/", folder.join("/"));
+            placed.iter().any(|g| g.starts_with(&folder))
+        }
     })
 }
 
-/// Whether `ledger`'s install put a `BepInEx/core` beside the game's program itself.
-fn placed_bepinex(ledger: Option<&Ledger>) -> bool {
-    ledger.is_some_and(|l| {
-        l.game_files
+/// The built-in data's loaders recognised in `c`, for a game `p` placed: each loader's outcome
+/// (§7.4–§7.8). The game folder is `{source}` as detection reads it (the folder detection ran on);
+/// any other source is its own folder.
+fn data_loaders(p: &Placed, c: &Candidate) -> Vec<LoaderOutcome> {
+    let Some(mods) = p.mods else {
+        return Vec::new();
+    };
+    let root = if c.game_folder { &p.game_dir } else { &c.root };
+    evaluate_one(mods, &p.code, &p.bindings, c.manager.source_kind(), root).loaders
+}
+
+/// The integration's verdict on a loader the built-in data recognised, in this order: a loader
+/// Astra cannot run beside at all (`coexist = []`), whatever is installed; the integration
+/// ([`capability`]); then its declaration — the loader it names, the data's `versions`, and its own
+/// narrower one ([`ModsLoader::accepts`]).
+fn data_verdict(
+    r: &Recognised,
+    kind: LoaderKind,
+    mods: &Mods,
+    code: &EngineCode,
+    can: &Result<(Manifest, ModsDecl), Unplayable>,
+) -> Result<(), Unplayable> {
+    let have = have(r.written.as_deref(), kind);
+    if r.coexist.is_empty() {
+        // The loader of the same engine that Astra does chain: what the player is told it needs.
+        let need = mods
+            .loaders()
             .iter()
-            .any(|g| g.rel.to_ascii_lowercase().starts_with("bepinex/core/"))
+            .find(|l| {
+                l.applies_to(code)
+                    && l.coexist()
+                        .iter()
+                        .any(|s| matches!(s, Coexist::Chain { .. }))
+            })
+            .map(|l| l.name().to_owned())
+            .unwrap_or_default();
+        return Err(Unplayable::LoaderUnsupported { have, need });
+    }
+    let (_, decl) = can.as_ref().map_err(Clone::clone)?;
+    let chains = r
+        .coexist
+        .iter()
+        .any(|s| matches!(s, Strategy::Chain { .. }));
+    if decl.loader.id() == r.id
+        && r.supported
+        && decl.loader.accepts(r.written.as_deref())
+        && chains
+    {
+        return Ok(());
+    }
+    Err(Unplayable::LoaderUnsupported {
+        have,
+        need: decl.loader.need(),
     })
+}
+
+/// Every loader recognised in `c`, judged against what is installed (`can`, `ledger`): the
+/// built-in data's first, then a BepInEx the data does not describe, then MelonLoader. Rows of no mod at all are kept:
+/// [`discover`] leaves them out, a Play re-judging its source does not. `None` when `c` is not a
+/// folder a row may name (a share, a line break in it).
+pub(crate) fn judge(
+    c: &Candidate,
+    placed: Option<&Placed>,
+    can: &Result<(Manifest, ModsDecl), Unplayable>,
+    ledger: Option<&Ledger>,
+    b: &Budget,
+) -> Vec<Found> {
+    let mut out = Vec::new();
+    if !usable(&c.root) || c.profile.contains(['\n', '\r', '\0']) {
+        return out;
+    }
+    let row = |source_root: &Path, loader: ModLoader, mods: u32, playable, coexist| {
+        let last_played = log_of(loader.kind).and_then(|rel| modified_ms(source_root, rel));
+        ModSource {
+            manager: c.manager,
+            profile: c.profile.clone(),
+            // As a person and `chain.ini` see it: no `\\?\` prefix.
+            root: plain(source_root),
+            loader,
+            mods,
+            last_played,
+            playable,
+            coexist,
+        }
+    };
+    if let Some(p) = placed
+        && let Some(mods) = p.mods
+    {
+        let source_root = if c.game_folder { &p.game_dir } else { &c.root };
+        for outcome in data_loaders(p, c) {
+            match outcome {
+                LoaderOutcome::Recognised(r) => {
+                    let Some(kind) = LoaderKind::of_id(&r.id) else {
+                        continue;
+                    };
+                    if c.game_folder && astra_placed(ledger, p.game_root.as_deref(), &r.files) {
+                        continue;
+                    }
+                    let loader = mods.loader(&r.id);
+                    let globs: Vec<&crate::engines::mods::Glob> = loader
+                        .map(|l| l.enabled())
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|e| match e {
+                            Enabled::FileGlob(g) => Some(g),
+                            _ => None,
+                        })
+                        .collect();
+                    let count = r
+                        .mods
+                        .iter()
+                        .filter(|m| m.enabled)
+                        .filter(|m| {
+                            !m.folder
+                                || r.root.as_ref().is_none_or(|root| {
+                                    let dir = root.join(&m.name);
+                                    !astra_item(&dir) && !switched_off(c.manager, &dir, &globs, b)
+                                })
+                        })
+                        .count();
+                    let entry = r.coexist.iter().find_map(|s| match s {
+                        Strategy::Chain { entry, .. } => Some(entry.clone()),
+                        _ => None,
+                    });
+                    let playable = data_verdict(&r, kind, mods, &p.code, can);
+                    out.push(Found {
+                        source: row(
+                            source_root,
+                            ModLoader {
+                                kind,
+                                version: r.written.clone(),
+                                preloader: entry
+                                    .as_ref()
+                                    .and_then(|e| e.file_name())
+                                    .map(|n| n.to_string_lossy().into_owned()),
+                            },
+                            u32::try_from(count).unwrap_or(u32::MAX),
+                            playable,
+                            r.coexist.iter().map(Coexistence::of).collect(),
+                        ),
+                        entry,
+                    });
+                }
+                LoaderOutcome::OverBudget { id, .. } => {
+                    let Some(kind) = LoaderKind::of_id(&id) else {
+                        continue;
+                    };
+                    let coexist = mods
+                        .loader(&id)
+                        .map(|l| l.coexist().iter().map(Coexistence::of_data).collect())
+                        .unwrap_or_default();
+                    out.push(Found {
+                        source: row(
+                            source_root,
+                            ModLoader {
+                                kind,
+                                version: None,
+                                preloader: None,
+                            },
+                            0,
+                            Err(Unplayable::NotSupported {
+                                reason: "over-budget".to_owned(),
+                            }),
+                            coexist,
+                        ),
+                        entry: None,
+                    });
+                }
+            }
+        }
+    }
+    // A BepInEx the data does not describe: never beside one it does (its first preloader would
+    // be the data's), so one BepInEx per folder, as 0.5.0 listed them.
+    if let Some(loader) = other_bepinex_at(&c.root, b) {
+        let mods = count_bepinex_mods(&c.root, b);
+        let playable = match can {
+            Err(why) => Err(why.clone()),
+            Ok((_, decl)) => Err(Unplayable::LoaderUnsupported {
+                have: have(loader.version.as_deref(), loader.kind),
+                need: decl.loader.need(),
+            }),
+        };
+        out.push(Found {
+            source: row(&c.root, loader, mods, playable, Vec::new()),
+            entry: None,
+        });
+    }
+    if let Some(loader) = melonloader_at(&c.root, c.game_folder) {
+        let mods = count_melon_mods(&c.root, b);
+        out.push(Found {
+            source: row(
+                &c.root,
+                loader,
+                mods,
+                Err(Unplayable::MelonLoader),
+                Vec::new(),
+            ),
+            entry: None,
+        });
+    }
+    out
 }
 
 /// Every mod source for `game`, judged against the integration installed in `profile_dir`, the
-/// most recently played first (ties by profile name), each folder once. The mod managers' data
-/// folders are this process's ([`ModsEnv::from_process`]).
+/// most recently played first (ties by profile name), each folder once per loader. The mod
+/// managers' data folders are this process's ([`ModsEnv::from_process`]).
 pub fn discover_mods(game: &GameTarget, profile_dir: &Path) -> Vec<ModSource> {
     discover_mods_in(game, profile_dir, &ModsEnv::from_process())
 }
@@ -776,6 +1208,7 @@ pub(crate) fn discover(
 ) -> Vec<ModSource> {
     let can = capability(game, ledger);
     let budget = Budget::new();
+    let placed = Placed::of(game);
     let appid = game
         .steam_appid
         .or_else(|| steam_appid_of_dir(&game.dir).ok().flatten());
@@ -813,24 +1246,27 @@ pub(crate) fn discover(
         });
     }
 
-    let mut seen: Vec<(PathBuf, bool)> = Vec::new();
+    let mut seen: Vec<(PathBuf, &'static str)> = Vec::new();
     let mut out: Vec<ModSource> = Vec::new();
     for c in &candidates {
-        for melon in [false, true] {
-            if !melon && c.game_folder && placed_bepinex(ledger) {
+        for f in judge(c, placed.as_ref(), &can, ledger, &budget) {
+            let s = f.source;
+            // A profile with nothing in it is no one's mods; MelonLoader in the game folder
+            // loads into every start, mods or not; a loader past a bound is shown to say so.
+            let over = matches!(&s.playable, Err(Unplayable::NotSupported { reason }) if reason == "over-budget");
+            let melon_here = s.loader.kind == LoaderKind::MelonLoader && c.game_folder;
+            if s.mods == 0 && !melon_here && !over {
                 continue;
             }
             let key = (
-                fs::canonicalize(&c.root).unwrap_or_else(|_| c.root.clone()),
-                melon,
+                fs::canonicalize(&s.root).unwrap_or_else(|_| s.root.clone()),
+                s.loader.kind.family(),
             );
             if seen.contains(&key) {
                 continue;
             }
-            if let Some(s) = source_of(c, melon, &can, &budget) {
-                seen.push(key);
-                out.push(s);
-            }
+            seen.push(key);
+            out.push(s);
         }
     }
     out.sort_by(|a, b| {
@@ -887,9 +1323,81 @@ mod tests {
     #[test]
     fn versions_and_builds() {
         assert_eq!(short("5.4.23.6+b89fcc8"), "5.4.23.6");
-        assert_eq!(be_build("6.0.0-be.788+5b766a3"), Some(788));
-        assert_eq!(be_build("6.0.0-be.788"), Some(788));
-        assert_eq!(be_build("6.0.0-dev+3a12d18"), None);
-        assert_eq!(be_build("6.0.0-be.+x"), None);
+        assert_eq!(decl::be_build("6.0.0-be.788+5b766a3"), Some(788));
+        assert_eq!(decl::be_build("6.0.0-be.788"), Some(788));
+        assert_eq!(decl::be_build("6.0.0-dev+3a12d18"), None);
+        assert_eq!(decl::be_build("6.0.0-be.+x"), None);
+    }
+
+    /// Every loader of the built-in data is a kind a row can name, and its code is the loader's
+    /// id; the kinds the data names are the only ones [`LoaderKind::of_id`] gives.
+    #[test]
+    fn every_builtin_loader_is_a_kind_a_row_names() {
+        let ids: Vec<&str> = builtin::descriptors()
+            .iter()
+            .filter_map(|d| d.mods())
+            .flat_map(Mods::loaders)
+            .map(|l| l.id())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "bepinex5",
+                "bepinex6-il2cpp",
+                "ue4ss3",
+                "ue4ss2",
+                "unreal-paks"
+            ]
+        );
+        for id in &ids {
+            assert_eq!(LoaderKind::of_id(id).map(LoaderKind::code), Some(*id));
+        }
+        for k in [
+            LoaderKind::Bepinex6Mono,
+            LoaderKind::Bepinex6Coreclr,
+            LoaderKind::MelonLoader,
+        ] {
+            assert_eq!(LoaderKind::of_id(k.code()), None, "{k:?}");
+        }
+        // The two BepInEx chain entries are the preloaders 0.5.0 played with mods.
+        assert!(data_entry_name("BepInEx.Preloader.dll"));
+        assert!(data_entry_name("bepinex.unity.il2cpp.DLL"));
+        for other in [
+            "BepInEx.Unity.Mono.Preloader.dll",
+            "BepInEx.IL2CPP.dll",
+            "BepInEx.NET.CoreCLR.dll",
+        ] {
+            assert!(!data_entry_name(other), "{other}");
+        }
+    }
+
+    /// A row's kinds and strategies serialise as their codes (the CLI's JSON, the daemon's row).
+    #[test]
+    fn kinds_and_strategies_serialise_as_their_codes() {
+        for k in [
+            LoaderKind::Bepinex5,
+            LoaderKind::Bepinex6Mono,
+            LoaderKind::Bepinex6Il2cpp,
+            LoaderKind::Bepinex6Coreclr,
+            LoaderKind::MelonLoader,
+            LoaderKind::Ue4ss3,
+            LoaderKind::Ue4ss2,
+            LoaderKind::UnrealPaks,
+        ] {
+            assert_eq!(
+                serde_json::to_value(k).unwrap(),
+                serde_json::Value::from(k.code())
+            );
+        }
+        for c in [
+            Coexistence::Chain,
+            Coexistence::SideBySide,
+            Coexistence::ViaManager,
+        ] {
+            assert_eq!(
+                serde_json::to_value(c).unwrap(),
+                serde_json::Value::from(c.code())
+            );
+        }
     }
 }

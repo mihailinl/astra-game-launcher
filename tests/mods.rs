@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use astra_game_launcher::{
-    Choice, ChoiceKind, ChoiceSource, LoaderKind, MODS_CHOICE_FILE_NAME, Manifest, ModManager,
-    ModSource, ModsEnv, ModsLoader, Platform, Unplayable, add_mods_root, codes,
+    Choice, ChoiceKind, ChoiceSource, Coexistence, LoaderKind, MODS_CHOICE_FILE_NAME, Manifest,
+    ModManager, ModSource, ModsEnv, ModsLoader, Platform, Unplayable, add_mods_root, codes,
     default_mods_source, discover_mods_in, mods_choice, set_mods_choice, uninstall,
 };
 use common::*;
@@ -35,6 +35,7 @@ struct World {
     tmp: Tmp,
     appid: u32,
     platform: Platform,
+    il2cpp: bool,
 }
 
 impl World {
@@ -44,8 +45,27 @@ impl World {
             tmp,
             appid,
             platform: Platform::Windows,
+            il2cpp: false,
         };
         unity_game(&w.game_dir(), GAME);
+        write(
+            &w.game_dir().join(format!("{GAME}.exe")),
+            &pe_with_options(X64, &[], b"game"),
+        );
+        fs::create_dir_all(w.home()).unwrap();
+        w
+    }
+
+    /// The same, an IL2CPP game; its runner says `engine = "unity-il2cpp"`.
+    fn il2cpp(appid: u32) -> World {
+        let tmp = Tmp::new("mods-il2cpp");
+        let w = World {
+            tmp,
+            appid,
+            platform: Platform::Windows,
+            il2cpp: true,
+        };
+        unity_il2cpp_game(&w.game_dir(), GAME);
         write(
             &w.game_dir().join(format!("{GAME}.exe")),
             &pe_with_options(X64, &[], b"game"),
@@ -81,11 +101,12 @@ impl World {
 
     /// The runner installed, with `decl` as its `[integration.mods]` (or none).
     fn install(&self, decl: &str) {
-        plan_and_install(
-            &mods_runner(&proxy(), decl),
-            &self.target(),
-            &self.profile(),
-        );
+        let pkg = if self.il2cpp {
+            mods_runner_for(&proxy(), decl, "unity-il2cpp")
+        } else {
+            mods_runner(&proxy(), decl)
+        };
+        plan_and_install(&pkg, &self.target(), &self.profile());
     }
 
     /// `<data>/com.kesomannen.gale/<folder>/profiles/<profile>`.
@@ -293,20 +314,30 @@ fn a_game_newer_than_the_table_is_found_by_its_install_folder_or_its_log() {
 
 // ---- what counts ----
 
+/// What counts is what the built-in data finds enabled in BepInEx's mods root
+/// (`unity.mods.toml`: each folder and each `*.dll` in `BepInEx/plugins`), less what the player's
+/// manager switched off (its adapter, §7.7) and Astra's own items. Launcher 0.5.0 counted
+/// otherwise (`tests/mods_identity.rs` declares each row): a folder holding no `*.dll` (a pack of
+/// textures another mod reads) was no mod to it, and `BepInEx/patchers` was counted too.
 #[test]
-fn only_what_their_bepinex_will_load_counts_as_a_mod() {
+fn what_the_data_finds_enabled_counts_as_a_mod() {
     let w = World::new(NEW_APPID);
     let p = w.gale(GAME, "Counted");
     bepinex5_at(&p, "5.4.23.5");
     plugin_at(&p, "A-Mod/A.dll");
     plugin_at(&p, "B-Nested/plugins/deep/B.DLL");
+    // Switched off by Gale: renamed, so BepInEx loads nothing of it.
     plugin_at(&p, "C-Disabled/C.dll.old");
-    plugin_at(&p, "D-NoDll/readme.txt");
+    plugin_at(&p, "C-Disabled/manifest.json.old");
+    plugin_at(&p, "D-Textures/suit.png");
     plugin_at(&p, "Loose.dll");
+    plugin_at(&p, "Loose2.DLL");
     plugin_at(&p, "LooseDisabled.dll.old");
+    plugin_at(&p, "notes.txt");
     // Astra's own items never count.
     plugin_at(&p, "Astra/Astra.Bridge.dll");
     write(&p.join("BepInEx/plugins/Astra/astra-item.json"), b"{}");
+    // Not in the mods root.
     write(&p.join("BepInEx/patchers/P-Patcher/P.dll"), b"MZ");
 
     // A profile with Astra alone, one with no preloader, one with only disabled mods: none.
@@ -325,12 +356,31 @@ fn only_what_their_bepinex_will_load_counts_as_a_mod() {
 
     let found = w.discover();
     assert_eq!(roots(&found), vec![(ModManager::Gale, real(&p))]);
-    assert_eq!(found[0].mods, 4, "A, B, Loose, the patcher");
+    assert_eq!(found[0].mods, 5, "A, B, D, Loose, Loose2");
     assert_eq!(found[0].profile, "Counted");
     assert_eq!(
         found[0].loader.preloader.as_deref(),
         Some("BepInEx.Preloader.dll")
     );
+    assert_eq!(found[0].coexist, [Coexistence::Chain]);
+
+    // The same folder picked where no manager keeps it: no adapter reads a manager's state there,
+    // so the data alone counts, the folder Gale switched off included.
+    let picked = w.tmp.join("Elsewhere/Mine");
+    copy_tree(&p, &picked);
+    let mut picked_found: Vec<ModSource> = discover_with_added(&w, &picked)
+        .into_iter()
+        .filter(|s| s.manager == ModManager::Folder)
+        .collect();
+    assert_eq!(picked_found.len(), 1, "{picked_found:#?}");
+    assert_eq!(picked_found.remove(0).mods, 6, "A, B, C, D, Loose, Loose2");
+}
+
+/// Discovery with `folder` added by the player.
+fn discover_with_added(w: &World, folder: &Path) -> Vec<ModSource> {
+    fs::create_dir_all(w.profile()).unwrap();
+    add_mods_root(&w.profile(), folder).unwrap();
+    w.discover()
 }
 
 #[test]
@@ -473,7 +523,7 @@ fn their_bepinex_is_judged_by_its_version_resource() {
 
 #[test]
 fn an_il2cpp_integration_needs_their_exact_bleeding_edge_build() {
-    let w = World::new(NEW_APPID);
+    let w = World::il2cpp(NEW_APPID);
     w.install(&MODS_DECL.replace(
         "loader = \"bepinex5\"",
         "loader = \"bepinex6-il2cpp\"\nbepinex_build = 788",
@@ -489,30 +539,54 @@ fn an_il2cpp_integration_needs_their_exact_bleeding_edge_build() {
         &dev733,
         "6.0.0-dev+3a12d1810bf4dd5ca1635352ccf5bff5d95f987f",
     );
-    // A BepInEx 5 for this IL2CPP integration.
+    // A BepInEx 5 for this IL2CPP game: the built-in data asks BepInEx 5 of a Mono game only
+    // (`codes = ["unity-mono"]`), and BepInEx 5 runs no IL2CPP game. Not the player's mods here.
     let be5 = w.gale(GAME, "Be5");
     bepinex5_at(&be5, "5.4.23.5");
-    for p in [&be788, &dev733, &be5] {
+    // A BepInEx 6 that never ran: no `BepInEx/interop/` yet, which the data requires.
+    let fresh = w.gale(GAME, "NeverRun");
+    bepinex6_il2cpp_at(&fresh, "6.0.0-be.788+5b766a3");
+    fs::remove_dir_all(fresh.join("BepInEx/interop")).unwrap();
+    for p in [&be788, &dev733, &be5, &fresh] {
         plugin_at(p, "M/M.dll");
     }
     let found = w.discover();
-    let get = |n: &str| found.iter().find(|s| s.profile == n).unwrap();
-    assert_eq!(get("Be788").loader.kind, LoaderKind::Bepinex6Il2cpp);
-    assert_eq!(get("Be788").playable, Ok(()));
+    let get = |n: &str| found.iter().find(|s| s.profile == n);
+    let be788 = get("Be788").unwrap();
+    assert_eq!(be788.loader.kind, LoaderKind::Bepinex6Il2cpp);
     assert_eq!(
-        get("Dev733").playable,
+        be788.loader.preloader.as_deref(),
+        Some("BepInEx.Unity.IL2CPP.dll")
+    );
+    assert_eq!(be788.playable, Ok(()));
+    assert_eq!(be788.coexist, [Coexistence::Chain]);
+    assert_eq!(
+        get("Dev733").unwrap().playable,
         Err(Unplayable::LoaderUnsupported {
             have: "6.0.0-dev".into(),
             need: "6.0.0-be.788".into()
         })
     );
     assert_eq!(
-        get("Be5").playable,
-        Err(Unplayable::LoaderUnsupported {
-            have: "5.4.23.5".into(),
-            need: "6.0.0-be.788".into()
-        })
+        get("Dev733").unwrap().loader.version.as_deref(),
+        Some("6.0.0-dev+3a12d1810bf4dd5ca1635352ccf5bff5d95f987f"),
+        "what its version resource says, though it is no `-be.N` build"
     );
+    assert!(get("Be5").is_none(), "{found:#?}");
+    assert!(get("NeverRun").is_none(), "{found:#?}");
+
+    // The same profiles for a Mono game: BepInEx 6 IL2CPP is not asked there, BepInEx 5 is.
+    let mono = World::new(NEW_APPID);
+    mono.install(MODS_DECL);
+    for (name, from) in [("Be788", &w), ("Be5", &w)] {
+        copy_tree(&from.gale(GAME, name), &mono.gale(GAME, name));
+    }
+    let found = mono.discover();
+    let names: Vec<(&str, LoaderKind)> = found
+        .iter()
+        .map(|s| (s.profile.as_str(), s.loader.kind))
+        .collect();
+    assert_eq!(names, [("Be5", LoaderKind::Bepinex5)]);
 }
 
 #[test]
@@ -862,12 +936,29 @@ fn a_fifo_where_a_log_or_an_assembly_should_be_never_blocks_discovery() {
     let found = rx
         .recv_timeout(Duration::from_secs(20))
         .expect("discovery opened a FIFO and waited for a writer");
-    let odd_source = found.iter().find(|s| s.profile == "Odd").unwrap();
-    assert_eq!(
-        odd_source.loader.version, None,
-        "no version read from a FIFO"
-    );
+    // The built-in data asks for `BepInEx.dll` as a FILE (`kind = "file"`, a probe opens only a
+    // regular file): a FIFO there is no BepInEx 5, so "Odd" is no source (0.5.0 listed it with no
+    // version; `tests/mods_identity.rs` declares the row).
+    assert!(!found.iter().any(|s| s.profile == "Odd"), "{found:#?}");
     assert!(!found.iter().any(|s| s.profile == "Logged"));
+    // A FIFO as the preloader, beside a `BepInEx.dll` that is a file: no source either, and no
+    // wait.
+    let odd2 = w.gale(GAME, "Odd2");
+    bepinex5_at(&odd2, "5.4.23.5");
+    plugin_at(&odd2, "M/M.dll");
+    fs::remove_file(odd2.join("BepInEx/core/BepInEx.Preloader.dll")).unwrap();
+    if !fifo(&odd2.join("BepInEx/core/BepInEx.Preloader.dll")) {
+        return;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (target, profile, env) = (w.target(), w.profile(), w.env());
+    std::thread::spawn(move || {
+        let _ = tx.send(discover_mods_in(&target, &profile, &env));
+    });
+    let found = rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("discovery opened a FIFO and waited for a writer");
+    assert!(!found.iter().any(|s| s.profile == "Odd2"), "{found:#?}");
 }
 
 #[test]
@@ -1066,4 +1157,298 @@ fn the_cli_checks_a_sources_spelling_before_touching_it() {
     let e: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(e["code"], "path-escapes", "{e}");
     assert_eq!(e["params"]["reason"], "not-absolute", "{e}");
+}
+
+// ---- Unreal: UE4SS and the `~mods` paks, found through the built-in data (0.5.1) ----
+
+/// An Unreal game (`Palworld/Pal/…`), a profile, and a home with no mod manager.
+struct Unreal {
+    tmp: Tmp,
+    exe: String,
+}
+
+impl Unreal {
+    fn new() -> Unreal {
+        let tmp = Tmp::new("mods-unreal");
+        let exe = unreal_game(&tmp.join("Palworld"), "Pal");
+        fs::create_dir_all(tmp.join("home")).unwrap();
+        Unreal { tmp, exe }
+    }
+
+    fn dir(&self) -> PathBuf {
+        self.tmp.join("Palworld")
+    }
+
+    fn bin(&self) -> PathBuf {
+        self.dir().join("Pal/Binaries/Win64")
+    }
+
+    fn target(&self) -> astra_game_launcher::GameTarget {
+        target(&self.dir(), &self.exe, Some(NEW_APPID), Platform::Windows)
+    }
+
+    fn profile(&self) -> PathBuf {
+        self.tmp.join("profiles/p")
+    }
+
+    fn discover(&self) -> Vec<ModSource> {
+        discover_mods_in(
+            &self.target(),
+            &self.profile(),
+            &ModsEnv::linux(Some(&self.tmp.join("home")), None, None),
+        )
+    }
+
+    /// A test Unreal runner installed, placing `game_files` (`(rel below the program's folder,
+    /// bytes)`) beside the program and nothing else of the player's kind.
+    fn install(&self, game_files: &[(&str, &[u8])]) {
+        let mut m = String::from(
+            "schema = 1\n\n[integration]\nid = \"test.unreal\"\nname = \"Test Unreal runner\"\nversion = \"1.0.0\"\nauthors = [\"tester\"]\nlicense = \"MIT\"\n\n[target]\nengine = \"unreal\"\nexe = \"*\"\nplatforms = [\"windows-x64\"]\nanti_cheat = \"none\"\n\n[[files]]\nfrom = \"runner/**\"\nto = \"${profile}/runner/\"\n",
+        );
+        let mut entries = vec![E::File("runner/Runner.dll", b"MZ runner")];
+        for (rel, bytes) in game_files {
+            m.push_str(&format!(
+                "\n[[game_files]]\nfrom = \"game/{rel}\"\nto = \"${{game}}/{rel}\"\nsha256 = \"{}\"\n",
+                sha(bytes)
+            ));
+        }
+        m.push_str("\n[launch]\nargs = []\n");
+        let names: Vec<String> = game_files
+            .iter()
+            .map(|(r, _)| format!("game/{r}"))
+            .collect();
+        entries.insert(0, E::File("astra-gi.toml", m.as_bytes()));
+        for ((_, bytes), name) in game_files.iter().zip(&names) {
+            entries.push(E::File(name.as_str(), bytes));
+        }
+        plan_and_install(
+            &open(&zip(&entries)).unwrap(),
+            &self.target(),
+            &self.profile(),
+        );
+    }
+}
+
+#[test]
+fn a_ue4ss_3_of_the_players_is_a_source_astra_chains() {
+    let u = Unreal::new();
+    ue4ss3_at(
+        &u.dir(),
+        "Pal",
+        "3.0.1",
+        "dwmapi.dll",
+        &[("Alpha", true), ("Beta", false), ("Gamma", true)],
+    );
+    // `enabled.txt` in a mod's own folder switches it on with no list edit.
+    write(&u.bin().join("ue4ss/Mods/Delta/enabled.txt"), b"");
+    let found = u.discover();
+    assert_eq!(found.len(), 1, "{found:#?}");
+    let s = &found[0];
+    assert_eq!(
+        (s.manager, s.profile.as_str(), s.loader.kind),
+        (ModManager::Manual, "", LoaderKind::Ue4ss3)
+    );
+    assert_eq!(real(&s.root), real(&u.dir()), "the folder detection ran on");
+    assert_eq!(s.loader.version.as_deref(), Some("3.0.1"));
+    assert_eq!(s.loader.preloader.as_deref(), Some("UE4SS.dll"));
+    assert_eq!(s.mods, 3, "Alpha, Gamma, Delta");
+    assert_eq!(s.coexist, [Coexistence::Chain]);
+    assert_eq!(s.last_played, None, "UE4SS's own log is not read");
+    assert_eq!(
+        s.playable,
+        Err(Unplayable::NotSupported {
+            reason: "not-installed".into()
+        })
+    );
+
+    // Some installs load it through `xinput1_3.dll`; with no proxy at all it loads into nothing.
+    fs::rename(u.bin().join("dwmapi.dll"), u.bin().join("xinput1_3.dll")).unwrap();
+    assert_eq!(u.discover().len(), 1);
+    fs::remove_file(u.bin().join("xinput1_3.dll")).unwrap();
+    assert_eq!(u.discover(), []);
+    write(&u.bin().join("dwmapi.dll"), b"MZ ue4ss proxy");
+
+    // A UE4SS 4: recognised, and not one Astra's runner runs beside (`versions = ">=3, <4"`).
+    write(
+        &u.bin().join("ue4ss/UE4SS.dll"),
+        &pe_with_resource(&[("ProductVersion", "4.0.0")]),
+    );
+    assert_eq!(
+        u.discover()[0].playable,
+        Err(Unplayable::NotSupported {
+            reason: "not-installed".into()
+        }),
+        "the integration first, as for BepInEx"
+    );
+
+    // An Unreal runner installed: it has no `[integration.mods]` (it chains their UE4SS by
+    // itself), so the choice of "with" is not asked.
+    write(
+        &u.bin().join("ue4ss/UE4SS.dll"),
+        &pe_with_resource(&[("ProductVersion", "3.0.1")]),
+    );
+    u.install(&[("astra-runner.txt", b"ours")]);
+    let found = u.discover();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].playable, Err(Unplayable::IntegrationWithoutMods));
+    assert_eq!(found[0].coexist, [Coexistence::Chain]);
+}
+
+#[test]
+fn ue4ss_2_is_recognised_and_astra_cannot_run_beside_it() {
+    let u = Unreal::new();
+    ue4ss2_at(&u.dir(), "Pal", "2.5.2", &[("Old", true), ("Off", false)]);
+    let found = u.discover();
+    assert_eq!(found.len(), 1, "{found:#?}");
+    let s = &found[0];
+    assert_eq!(s.loader.kind, LoaderKind::Ue4ss2);
+    assert_eq!(s.loader.version.as_deref(), Some("2.5.2"));
+    assert_eq!(s.loader.preloader, None, "nothing of it is chained");
+    assert_eq!(s.mods, 1);
+    assert_eq!(s.coexist, [], "chain-incapable: `coexist = []`");
+    // Said before anything about the integration: no install makes it playable.
+    assert_eq!(
+        s.playable,
+        Err(Unplayable::LoaderUnsupported {
+            have: "2.5.2".into(),
+            need: "UE4SS 3".into()
+        })
+    );
+    u.install(&[("astra-runner.txt", b"ours")]);
+    assert_eq!(u.discover()[0].playable, s.playable);
+}
+
+#[test]
+fn the_mods_paks_are_shown_and_run_beside_astra() {
+    let u = Unreal::new();
+    paks_at(
+        &u.dir(),
+        "Pal",
+        &["a_P.pak", "B.PAK", "c.pak.old", "readme.txt"],
+    );
+    fs::create_dir_all(u.dir().join("Pal/Content/Paks/~mods/sub")).unwrap();
+    let found = u.discover();
+    assert_eq!(found.len(), 1, "{found:#?}");
+    let s = &found[0];
+    assert_eq!(s.loader.kind, LoaderKind::UnrealPaks);
+    assert_eq!(
+        (s.loader.version.as_deref(), s.loader.preloader.as_deref()),
+        (None, None)
+    );
+    assert_eq!(s.mods, 2, "a_P.pak and B.PAK: present means enabled");
+    assert_eq!(s.coexist, [Coexistence::SideBySide]);
+    // An empty `~mods` holds no mod of the player's: not listed.
+    for p in ["a_P.pak", "B.PAK"] {
+        fs::remove_file(u.dir().join("Pal/Content/Paks/~mods").join(p)).unwrap();
+    }
+    assert_eq!(u.discover(), []);
+
+    // Beside a UE4SS 3: two sources of one folder, in the data's order.
+    paks_at(&u.dir(), "Pal", &["x.pak"]);
+    ue4ss3_at(&u.dir(), "Pal", "3.0.1", "dwmapi.dll", &[("M", true)]);
+    let kinds: Vec<LoaderKind> = u.discover().iter().map(|s| s.loader.kind).collect();
+    assert_eq!(kinds, [LoaderKind::Ue4ss3, LoaderKind::UnrealPaks]);
+}
+
+#[test]
+fn astras_own_ue4ss_in_the_game_folder_is_not_the_players() {
+    let u = Unreal::new();
+    ue4ss3_at(&u.dir(), "Pal", "3.0.1", "dwmapi.dll", &[("Theirs", true)]);
+    // An older Unreal runner of Astra's placed UE4SS itself beside the program.
+    let theirs = fs::read(u.bin().join("ue4ss/UE4SS.dll")).unwrap();
+    fs::remove_dir_all(u.bin().join("ue4ss")).unwrap();
+    u.install(&[
+        ("ue4ss/UE4SS.dll", &theirs),
+        ("ue4ss/UE4SS-settings.ini", b"[General]\n"),
+    ]);
+    write(&u.bin().join("ue4ss/Mods/Ours/enabled.txt"), b"");
+    assert_eq!(
+        u.discover(),
+        [],
+        "Astra's own loader is never one of the player's sources"
+    );
+}
+
+#[test]
+fn a_game_a_weak_rule_places_binds_no_project_and_finds_no_unreal_mods() {
+    let u = Unreal::new();
+    ue4ss3_at(&u.dir(), "Pal", "3.0.1", "dwmapi.dll", &[("M", true)]);
+    assert_eq!(u.discover().len(), 1);
+    // No `Content/Paks/`: only a weak rule names the program, and it binds no `{project}`
+    // (engine-descriptor-v1.md §7.3): "not with mods", never a guess.
+    fs::remove_dir_all(u.dir().join("Pal/Content")).unwrap();
+    assert_eq!(u.discover(), []);
+}
+
+/// A folder past one evaluation's bounds (engine-descriptor-v1.md §7.8: here 1,025 mods in a
+/// root) yields nothing of its mods: the source is shown, says so, and a Play with it is refused
+/// for that reason — never a partial list.
+#[test]
+fn a_folder_past_one_evaluations_bounds_is_shown_and_says_so() {
+    let w = World::new(NEW_APPID);
+    w.install(MODS_DECL);
+    let p = w.gale(GAME, "Huge");
+    bepinex5_at(&p, "5.4.23.5");
+    for i in 0..1025 {
+        plugin_at(&p, &format!("M{i:04}/M.dll"));
+    }
+    let found = w.discover();
+    assert_eq!(found.len(), 1, "{found:#?}");
+    let s = &found[0];
+    assert_eq!((s.loader.kind, s.mods), (LoaderKind::Bepinex5, 0));
+    assert_eq!(
+        s.loader.version, None,
+        "nothing of it is read past the bound"
+    );
+    assert_eq!(
+        s.playable,
+        Err(Unplayable::NotSupported {
+            reason: "over-budget".into()
+        })
+    );
+    assert_eq!(s.coexist, [Coexistence::Chain]);
+    set_mods_choice(
+        &w.profile(),
+        Choice {
+            choice: ChoiceKind::With,
+            source: Some(ChoiceSource::of(s)),
+            added_roots: vec![],
+        },
+    )
+    .unwrap();
+    let e = astra_game_launcher::prepare_launch_with(
+        &w.profile(),
+        &w.target(),
+        &vars(),
+        Some(Path::new("/opt/fake/steam")),
+        &w.env(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.param("reason")),
+        (codes::MODS_UNSUPPORTED, Some("over-budget"))
+    );
+    // One fewer: every mod listed.
+    fs::remove_dir_all(p.join("BepInEx/plugins/M1024")).unwrap();
+    let s = &w.discover()[0];
+    assert_eq!((s.mods, s.playable.clone()), (1024, Ok(())));
+}
+
+/// UE4SS and the paks are `source = ["game"]` in the built-in data: a folder the player picked
+/// holding the same layout is never read for them (nor a manager's profile).
+#[test]
+fn unreal_loaders_are_looked_for_in_the_game_folder_only() {
+    let u = Unreal::new();
+    let picked = u.tmp.join("picked/Palworld copy");
+    unreal_game(&picked, "Pal");
+    ue4ss3_at(&picked, "Pal", "3.0.1", "dwmapi.dll", &[("M", true)]);
+    paks_at(&picked, "Pal", &["x.pak"]);
+    fs::create_dir_all(u.profile()).unwrap();
+    add_mods_root(&u.profile(), &picked).unwrap();
+    assert_eq!(u.discover(), []);
+    // The same layout in the game folder is.
+    ue4ss3_at(&u.dir(), "Pal", "3.0.1", "dwmapi.dll", &[("M", true)]);
+    let found = u.discover();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].manager, ModManager::Manual);
 }

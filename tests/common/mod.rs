@@ -314,6 +314,100 @@ pub fn pe_with_version(strings: &[(&str, &str)]) -> Vec<u8> {
     b
 }
 
+/// A PE32+ image whose one section `.rsrc` holds a resource directory with an `RT_VERSION` of
+/// `strings`, as a linker lays one out: what the built-in `mods` data's `version` probe reads
+/// (engine-descriptor-v1.md §7.4: headers, section table, resource directory — never a scan).
+/// [`pe_with_version`] is no PE to that probe; this one is to both.
+pub fn pe_with_resource(strings: &[(&str, &str)]) -> Vec<u8> {
+    fn utf16z(s: &str) -> Vec<u8> {
+        s.encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect()
+    }
+    fn pad4(v: &mut Vec<u8>) {
+        while !v.len().is_multiple_of(4) {
+            v.push(0);
+        }
+    }
+    fn block(key: &str, value: &[u8], value_len: u16, text: bool, children: &[Vec<u8>]) -> Vec<u8> {
+        let mut b = vec![0, 0];
+        b.extend(value_len.to_le_bytes());
+        b.extend(u16::from(text).to_le_bytes());
+        b.extend(utf16z(key));
+        pad4(&mut b);
+        b.extend(value);
+        for c in children {
+            pad4(&mut b);
+            b.extend(c);
+        }
+        let len = b.len() as u16;
+        b[..2].copy_from_slice(&len.to_le_bytes());
+        b
+    }
+    let entries: Vec<Vec<u8>> = strings
+        .iter()
+        .map(|(k, v)| {
+            let value = utf16z(v);
+            block(k, &value, (value.len() / 2) as u16, true, &[])
+        })
+        .collect();
+    let table = block("040904b0", &[], 0, true, &entries);
+    let info = block("StringFileInfo", &[], 0, true, &[table]);
+    let mut fixed = vec![0u8; 52];
+    fixed[..4].copy_from_slice(&0xFEEF_04BDu32.to_le_bytes());
+    let info = block("VS_VERSION_INFO", &fixed, 52, false, &[info]);
+
+    let section_raw = 0x400u32;
+    let va = 0x1000u32;
+    let dir = |entries: &[(u32, u32)]| {
+        let mut d = vec![0u8; 12];
+        d.extend(0u16.to_le_bytes());
+        d.extend((entries.len() as u16).to_le_bytes());
+        for (name, off) in entries {
+            d.extend(name.to_le_bytes());
+            d.extend(off.to_le_bytes());
+        }
+        d
+    };
+    // Each directory is a 16-byte header and one 8-byte entry: the type directory at 0, the name
+    // directory at 24, the language directory at 48, the data entry at 72, the data at 88.
+    let mut rsrc = dir(&[(16, 0x8000_0000 | 24)]);
+    rsrc.extend(dir(&[(1, 0x8000_0000 | 48)]));
+    rsrc.extend(dir(&[(0x409, 72)]));
+    let data_at = 88u32;
+    rsrc.extend((va + data_at).to_le_bytes());
+    rsrc.extend((info.len() as u32).to_le_bytes());
+    rsrc.extend([0u8; 8]);
+    assert_eq!(rsrc.len(), data_at as usize);
+    rsrc.extend(&info);
+    let raw_size = rsrc.len().div_ceil(0x200) * 0x200;
+    rsrc.resize(raw_size, 0);
+
+    let mut b = vec![0u8; section_raw as usize];
+    b[..2].copy_from_slice(b"MZ");
+    b[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+    let pe = 0x80;
+    b[pe..pe + 4].copy_from_slice(b"PE\0\0");
+    b[pe + 4..pe + 6].copy_from_slice(&X64.to_le_bytes());
+    b[pe + 6..pe + 8].copy_from_slice(&1u16.to_le_bytes());
+    let opt_size = 240u16;
+    b[pe + 20..pe + 22].copy_from_slice(&opt_size.to_le_bytes());
+    let opt = pe + 24;
+    b[opt..opt + 2].copy_from_slice(&0x20Bu16.to_le_bytes());
+    b[opt + 108..opt + 112].copy_from_slice(&16u32.to_le_bytes());
+    b[opt + 112 + 16..opt + 112 + 20].copy_from_slice(&va.to_le_bytes());
+    b[opt + 112 + 20..opt + 112 + 24].copy_from_slice(&(raw_size as u32).to_le_bytes());
+    let sec = opt + usize::from(opt_size);
+    b[sec..sec + 5].copy_from_slice(b".rsrc");
+    b[sec + 8..sec + 12].copy_from_slice(&(raw_size as u32).to_le_bytes());
+    b[sec + 12..sec + 16].copy_from_slice(&va.to_le_bytes());
+    b[sec + 16..sec + 20].copy_from_slice(&(raw_size as u32).to_le_bytes());
+    b[sec + 20..sec + 24].copy_from_slice(&section_raw.to_le_bytes());
+    b.extend(rsrc);
+    b
+}
+
 /// The chain loader's two files, as a runner zip carries them.
 pub const CHAIN_DLL: &[u8] = b"MZ fake Astra.Chain.dll";
 pub const CHAIN_HOOKS_DLL: &[u8] = b"MZ fake Astra.Chain.Hooks.dll";
@@ -324,8 +418,15 @@ pub const MODS_DECL: &str = "[integration.mods]\nloader = \"bepinex5\"\nchain = 
 /// The runner shipping `proxy` as its Doorstop, the chain loader in `chain/`, and `decl` (a
 /// `[integration.mods]` table, or nothing) after everything else.
 pub fn mods_runner(proxy: &[u8], decl: &str) -> GiPackage {
+    mods_runner_for(proxy, decl, "unity-mono")
+}
+
+/// [`mods_runner`] for a game of `engine` (`unity-il2cpp`: an IL2CPP runner).
+pub fn mods_runner_for(proxy: &[u8], decl: &str, engine: &str) -> GiPackage {
     let files = "\n[[files]]\nfrom = \"chain/**\"\nto = \"${profile}/chain/\"\n";
-    let m = runner_manifest(&format!("{files}\n{decl}")).replace(&sha(WINHTTP), &sha(proxy));
+    let m = runner_manifest(&format!("{files}\n{decl}"))
+        .replace(&sha(WINHTTP), &sha(proxy))
+        .replace("engine = \"unity-mono\"", &format!("engine = \"{engine}\""));
     open(&zip(&[
         E::File("astra-gi.toml", m.as_bytes()),
         E::File("winhttp.dll", proxy),
@@ -347,11 +448,12 @@ pub fn bepinex5_at(root: &Path, version: &str) {
     );
     write(
         &root.join("BepInEx/core/BepInEx.dll"),
-        &pe_with_version(&[("ProductName", "BepInEx"), ("ProductVersion", version)]),
+        &pe_with_resource(&[("ProductName", "BepInEx"), ("ProductVersion", version)]),
     );
 }
 
-/// A BepInEx 6 for IL2CPP below `root`, `BepInEx.Core.dll` saying `version`, with its `dotnet/`.
+/// A BepInEx 6 for IL2CPP below `root` that has run once: `BepInEx.Core.dll` saying `version`,
+/// its `dotnet/`, and the `BepInEx/interop/` its first run generates.
 pub fn bepinex6_il2cpp_at(root: &Path, version: &str) {
     write(
         &root.join("BepInEx/core/BepInEx.Unity.IL2CPP.dll"),
@@ -363,9 +465,90 @@ pub fn bepinex6_il2cpp_at(root: &Path, version: &str) {
     );
     write(
         &root.join("BepInEx/core/BepInEx.Core.dll"),
-        &pe_with_version(&[("ProductName", "BepInEx.Core"), ("ProductVersion", version)]),
+        &pe_with_resource(&[("ProductName", "BepInEx.Core"), ("ProductVersion", version)]),
     );
     write(&root.join("dotnet/coreclr.dll"), b"MZ coreclr");
+    write(
+        &root.join("BepInEx/interop/Assembly-CSharp.dll"),
+        b"MZ generated interop",
+    );
+}
+
+/// A Unity IL2CPP game for Windows: `<name>.exe`, `UnityPlayer.dll`, `GameAssembly.dll` and
+/// `<name>_Data/il2cpp_data/`.
+pub fn unity_il2cpp_game(dir: &Path, name: &str) {
+    write(&dir.join(format!("{name}.exe")), b"MZ game");
+    write(&dir.join("UnityPlayer.dll"), b"MZ player");
+    write(&dir.join("GameAssembly.dll"), b"MZ il2cpp");
+    write(
+        &dir.join(format!(
+            "{name}_Data/il2cpp_data/Metadata/global-metadata.dat"
+        )),
+        b"metadata",
+    );
+}
+
+/// An Unreal game: `<project>/Binaries/Win64/<project>-Win64-Shipping.exe` beside
+/// `<project>/Content/Paks/`. Returns the program, relative to `dir`.
+pub fn unreal_game(dir: &Path, project: &str) -> String {
+    let exe = format!("{project}/Binaries/Win64/{project}-Win64-Shipping.exe");
+    write(&dir.join(&exe), b"MZ shipping");
+    write(
+        &dir.join(format!("{project}/Content/Paks/{project}-Windows.pak")),
+        b"pak",
+    );
+    exe
+}
+
+/// UE4SS 3 of the player's beside `project`'s program: its `dwmapi.dll` proxy (or `proxy`),
+/// `ue4ss/UE4SS.dll` saying `version`, its settings, and `mods` (name, on in `mods.txt`).
+pub fn ue4ss3_at(dir: &Path, project: &str, version: &str, proxy: &str, mods: &[(&str, bool)]) {
+    let bin = dir.join(format!("{project}/Binaries/Win64"));
+    write(&bin.join(proxy), b"MZ ue4ss proxy");
+    write(
+        &bin.join("ue4ss/UE4SS.dll"),
+        &pe_with_resource(&[("ProductName", "UE4SS"), ("ProductVersion", version)]),
+    );
+    write(&bin.join("ue4ss/UE4SS-settings.ini"), b"[General]\n");
+    let mut list = String::new();
+    for (name, on) in mods {
+        write(
+            &bin.join(format!("ue4ss/Mods/{name}/Scripts/main.lua")),
+            b"-- a mod",
+        );
+        list.push_str(&format!("{name} : {}\n", u8::from(*on)));
+    }
+    write(&bin.join("ue4ss/Mods/mods.txt"), list.as_bytes());
+}
+
+/// UE4SS 2 of the player's beside `project`'s program: `UE4SS.dll` saying `version`, its settings
+/// and `Mods/` beside the program, and `mods` (name, on in `mods.txt`).
+pub fn ue4ss2_at(dir: &Path, project: &str, version: &str, mods: &[(&str, bool)]) {
+    let bin = dir.join(format!("{project}/Binaries/Win64"));
+    write(&bin.join("xinput1_3.dll"), b"MZ ue4ss proxy");
+    write(
+        &bin.join("UE4SS.dll"),
+        &pe_with_resource(&[("ProductName", "UE4SS"), ("ProductVersion", version)]),
+    );
+    write(&bin.join("UE4SS-settings.ini"), b"[General]\n");
+    let mut list = String::new();
+    for (name, on) in mods {
+        write(
+            &bin.join(format!("Mods/{name}/Scripts/main.lua")),
+            b"-- a mod",
+        );
+        list.push_str(&format!("{name} : {}\n", u8::from(*on)));
+    }
+    write(&bin.join("Mods/mods.txt"), list.as_bytes());
+}
+
+/// The player's `~mods` paks below `project`: each name in `paks`.
+pub fn paks_at(dir: &Path, project: &str, paks: &[&str]) {
+    let at = dir.join(format!("{project}/Content/Paks/~mods"));
+    fs::create_dir_all(&at).unwrap();
+    for p in paks {
+        write(&at.join(p), b"pak");
+    }
 }
 
 /// A mod of the player's: `BepInEx/plugins/<rel>`.

@@ -46,8 +46,12 @@ comes off this file only in the commit that closes it.
 | 43 | **A restore leaves the packs in the companion.** `restore_game_files` (a withdrawn integration) puts the game's files back and keeps the profile, its `pack_inbox` record and its hold: the packs the integration handed the companion stay installed there until the uninstall, which writes their tombstones. | Whether a withdrawn integration's animations leave the companion at once is the withdrawal policy's (marketplace plan A§4.4), which names game files only. | plan owner, then L | `src/install.rs` `restore_game_files` |
 | 44 | **The companion's design says `<uid>.remove` (§2), its engine reads `<uid tail>.remove`.** `docs/animation-packs.md` §2 lists "`<uid>.remove` tombstones" in `inbox/packs/<integration>/`, and a uid holds a `/` (`astra.peak/climb`); §5 (b) ("the launcher writes `astra.peak/climb.remove` there") and the engine (`inbox.rs`: `<tail>.remove` trashes `<integration>/<tail>`) agree on the tail, which is what the launcher writes. The tail is the uid's as the archive's `animpack.toml` says it, never the archive's file name: §5 (b)'s own example is `peak-climb.astrapack` with uid `astra.peak/climb`. | Not the launcher's text. | astra-companion (one word in §2) | `tests/pack_inbox.rs` `uninstall_writes_the_tombstone_into_the_inbox` |
 | 45 | **Astra passes no companion root yet: every release that uses `${astra_pack_inbox}` is `pack-inbox-unavailable` in the daemon.** The daemon plans with `plan_install` / `plan_install_in`, which name none. | Lane D's: the daemon must call `plan_install_with_user_pack_root` with `CompanionLocation`'s pack root (below, "For the daemon"). Nothing first-party uses the placeholder yet. | D | `tests/pack_inbox.rs` `without_a_root_the_plan_is_refused` |
-| 46 | **A valid `mods` is evaluated, and no start asks it yet.** Since 0.5.1 B the launcher reads `astra.engine/1`'s `mods` (`engines::mods`; `docs/ENGINE-DESCRIPTOR.md`, "`mods`"): it refuses what is wrong inside it with §7.9's reasons (`mods-invalid{field, reason}`: every hostile golden for exactly its `reasons`, in the library, in `Manifest::lint` and in `gi-probe`), drops only `mods` in a client, and evaluates a valid one for one source within §7.8's bounds (`engines::mods::evaluate`). Nothing calls `evaluate` yet: "with your mods" still runs on `src/mods/**` (0.4.0's BepInEx discovery and its r2modman, Gale and Thunderstore Mod Manager adapters); the built-in loaders are not yet data on the built-in descriptors (the spec's `descriptors/mods/builtin/*.mods.toml` are held valid on them, and are not compiled in); and nothing turns a `Detection` into the `Bindings` a mods path's placeholders take. | Evaluating `mods` is 0.5.1's step B; the built-ins as data, and the discovery answering through `evaluate`, are its step C. | L (0.5.1 step C: the built-in loaders as data, `src/mods/**` answering through `evaluate`, held to today's answers by an identity canary) | `tests/goldens.rs` `every_mods_golden_is_refused_for_exactly_its_reasons`, `the_builtin_mods_fragments_ride_on_the_launchers_builtins`; `src/engines/mods/eval.rs` tests; `tests/mods.rs`, `tests/play_with_mods.rs` (today's discovery) |
 | 47 | **The content check bounds its work by the content catalogue's caps alone, never the release's.** Since 0.5.1 a release's every file is read by its bytes, each embedded bundle walked within the content contract's limits (4,096 entries, 128 MiB) and each game archive within §2.7.1's (65,536 entries, 512 MiB, at most 100 : 1 per deflated entry), the glTF JSON of the whole release within 32 MiB and the per-character sniff within 64 MiB. 0.5.0 also counted every `.astrachar` it unpacked against the release's own 1 GiB (`Limits::max_uncompressed_bytes`, `GiPackage::open_with_limits`); no longer: a release of many archives each up to 512 MiB makes the check inflate each of them in turn (one at a time, so memory stays one archive's), as the spec's own checker does. | One budget across a release would refuse a release the catalogue accepts. Every file inside is read once and dropped, so only the time grows with the number of archives; `gi-probe check` runs on the author's machine, the daemon on a developer's own import. | plan owner (accepted unless a release-wide cap is asked for, which the spec would have to adopt) | `src/content.rs` `judge`; `src/content/zipwalk.rs` `BUNDLE`, `GAME_ARCHIVE` |
+| 48 | **The built-in BepInEx data reads a profile otherwise than 0.5.0 did, in eight declared rows.** Since 0.5.1 C the player's mods are found through the built-in fragments (`src/mods/builtin/*.mods.toml`, held member for member to the specification's), so where `unity.mods.toml` reads otherwise than 0.5.0's hand-written code the data wins: `BepInEx/patchers` is not the mods root (fewer mods; a profile of patchers alone is no source); a plugins folder holding no `*.dll` (textures another mod reads, an empty folder, and outside a manager one switched off as `*.old`) is a mod (`dir-per-mod` says "a folder directly in `root`: it is there"); a BepInEx 6 IL2CPP that never ran (no `BepInEx/interop/` yet) is not recognised, nor a BepInEx of the other Unity flavour (`codes`), nor one beside a game whose flavour nothing names, nor a preloader without its library, nor the game folder's BepInEx beside a program below the folder detection runs on (`{source}` is that folder, §7.3); and an IL2CPP integration declaring a build other than 788 is not offered (`versions = "=6.0.0-be.788"`). Inside a manager's profile the adapter reads a folder switched off as the manager's own state (§7.7), as 0.5.0 did. | The fragments are the specification's (§7.11): the launcher may not widen them. The interop row costs the most: a player who installed BepInEx 6 and never started the game modded is not offered "with your mods" until one start without Astra writes the folder. | the spec: say whether `dir-per-mod` should name what a mod folder must hold (a `*.dll` below it), whether `BepInEx/patchers` is a second root, and whether a never-run BepInEx 6 (no `interop/`) is recognised; then L re-vendors, copies the new data into `src/mods/builtin/`, and drops the rows it closes | `tests/mods_identity.rs` `Row`, `mods_discovery_answers_as_launcher_0_5_0_over_the_corpus` (each row counted, with a floor) |
+| 49 | **Discovery lists every profile a manager keeps for the game; §7.8 evaluates the active one per start.** The install sheet's list is 0.5.0's: every r2modman, Thunderstore Mod Manager and Gale profile found for the game, each evaluated on its own (each its own §7.8 bounds; 0.5.0's whole-discovery budget still caps them all). A start evaluates the one source the player chose. §7.3 and §7.8 speak of "the one profile folder that a launcher adapter reports as the manager's **active** profile"; no adapter reads which profile a manager has active. | Reading a manager's active profile is new adapter code per manager, and listing only it would hide the other profiles the player has today. | plan owner (accept the list, or ask for the active-profile adapters), then L | `tests/mods.rs` `thunderstores_table_names_each_managers_folder_for_the_game` |
+| 50 | **Only the built-in descriptors' `mods` is asked, and a placement binds no `as` capture.** Discovery reads the built-in data for a game a built-in rule names (`engines::builtin_placement`); a game Pass B places gets no loader from its own descriptor's `mods` (§7.1 allows exactly that one), and `builtin_placement` binds `{program}`, `{dir}`, `{name}`, `{stem}` and, from a strong rule, the project placeholders, never a rule's `as` captures (`{data}`). No built-in `mods` path names a capture. | A Pass B game's mods need the descriptor that placed it handed to discovery (the daemon holds the `EngineSet`; `discover_mods_in` takes none) and the evaluator to return a placement's captures. | L (with the daemon passing its `EngineSet`) | `src/engines/eval.rs` `builtin_placement`; `tests/mods.rs` `a_game_a_weak_rule_places_binds_no_project_and_finds_no_unreal_mods` |
+| 51 | **An Unreal source is shown; its start is the runner's own.** UE4SS 3 is chained by astra-reshade 0.3.1's loader itself, which finds the player's UE4SS and sets `UE4SS_MODS_PATHS` in-process: the launcher hands it no `entry` and no `tell` from the data, an Unreal runner declares no `[integration.mods]`, so its sources say `integration-without-mods` and the choice of "with" is not asked. UE4SS's own log is not read (`last_played` is `None`). | The runner's chain predates the data; moving its UE4SS lookup onto the launcher's evaluation is a runner change (astra-reshade) and a manifest table for Unreal. | astra-companion-5f (runner), then L | `tests/mods.rs` `a_ue4ss_3_of_the_players_is_a_source_astra_chains` |
+| 52 | **MelonLoader and three BepInEx 6 builds are recognised by code, to be shown.** MelonLoader, BepInEx 6 for Mono and for CoreCLR, and BepInEx 6 IL2CPP under its preloader's older name (`BepInEx.IL2CPP.dll`) are not in the built-in data; `mods::other_bepinex_at` and `melonloader_at` recognise them exactly as 0.5.0 did, only so the player is told why "with your mods" is not offered. None is ever offered, chained or read for a version that decides anything. | §7 has no closed value for "recognised only to refuse" beyond `coexist = []`, and MelonLoader is "Open" (§7.11). | the spec (a loader with `coexist = []` for each, in the built-in fragments), then L deletes the code | `tests/mods.rs` `a_bepinex_in_the_game_folder_is_the_manual_source_and_melonloader_is_shown_not_offered`; `tests/mods_identity.rs` (kinds `bepinex6-mono`, `bepinex6-coreclr`, `melonloader`, floors) |
 
 ## For the daemon (D1)
 
@@ -139,14 +143,37 @@ sending to it.
 `field` the member). A catalogue entry has passed it at ingest (`Manifest::lint`, `gi-probe`); a
 developer-mode folder import has not, and `Manifest::lint(false)` shows it. Wherever the daemon
 holds a descriptor, `Descriptor::mods_refusals` non-empty means it carries no `mods` for this
-client: say so once, and keep detecting, offering and planning with it. Nothing the daemon calls
-evaluates `mods` yet (row 46). When it does (`engines::mods::evaluate`), §7.10 binds the daemon
-too: what an evaluation finds (which loaders, their versions, the mods, how many, the folders, the
+client: say so once, and keep detecting, offering and planning with it. Since 0.5.1 C the
+daemon's `discover_mods_in` evaluates the built-in `mods` (`docs/ENGINE-DESCRIPTOR.md`, "What
+\"with your mods\" asks"), so §7.10 binds the daemon now: what an evaluation finds (which loaders, their versions, the mods, how many, the folders, the
 picked one) goes to the player's install sheet and that one start only — never a log a problem
 report or a support bundle attaches (not even "with mods" or "without"), never a rating, Link, the
 companion's bridge, an AI tool or another plugin; a runner gets a chain's `entry` and its `tell`
 alone; and the picked folder and the "with your mods" choice stay in Astra's profile on this PC,
 never synced.
+
+`ModSourceRow` (0.5.1 C; additive — every field and code a 0.5.0 row had is unchanged):
+
+- **New field `ModSource::coexist`** (`Vec<Coexistence>`, codes `chain`, `side-by-side`,
+  `via-manager`; serde `[]` when absent): how Astra runs beside the player's loader, from the
+  built-in data. Add `repeated string coexist` to `ModSourceRow` and both shells' payloads.
+- **New `LoaderKind` codes** `ue4ss3`, `ue4ss2`, `unreal-paks` (the data's loader ids): name each
+  in the Workshop (`UE4SS 3`, `UE4SS 2`, "Unreal `~mods` paks"). `loader_version` for UE4SS is
+  `UE4SS.dll`'s own; the paks have none, and no `preloader`.
+- **Discovery for Unreal games**: `mods_fields` calls `discover_mods_in` for Unity only
+  (`unity: bool`); call it for an Unreal row too. A UE4SS 3 source says `integration-without-mods`
+  under astra-reshade's runners (they chain it by themselves, row 51): word it as "your UE4SS 3
+  and its mods run beside Astra", never "Astra plays alone". `declared` stays Unity-only.
+- **Verdicts with new parameters, no new code**: `loader-unsupported` for UE4SS 2 carries
+  `need` = `UE4SS 3` (a loader's name, not a version: "Astra needs UE4SS 3"); `not-supported`
+  carries the new `reason` `over-budget` (the folder is past one evaluation's bounds, §7.8: more
+  than 1,024 mods, a folder of more than 5,000 entries; nothing of it is listed). A Play with mods
+  refuses such a source `mods-unsupported{reason=over-budget}`.
+- **What counts as a mod changed** (row 48): a test of the daemon that lays a plugins folder with
+  no `*.dll`, or `BepInEx/patchers`, counts as the data does. Its `BepInEx.dll` fixtures must be
+  real PE images with a version resource (the data's probe walks the resource directory; the
+  launcher's `tests/common` `pe_with_resource` builds one), and a BepInEx 6 IL2CPP fixture needs
+  `dotnet/` and `BepInEx/interop/`, in an IL2CPP game (a `GameAssembly.dll` beside the program).
 
 ## For the specification (K13)
 
@@ -283,6 +310,18 @@ Also for the spec, not pinned by a golden:
   straight in the folder, its `[animpack] uid` the integration's, an id the companion reads,
   `[a-z0-9._-]{1,64}` not dot-led) and the codes, `pack-inbox-invalid{reason}` and
   `pack-inbox-unavailable`.
+- **The built-in Unity fragment (`unity.mods.toml`), read against real profiles** (0.5.1 C, debt
+  row 48; each a declared row of `tests/mods_identity.rs`). Its comment says r2modman and
+  Thunderstore Mod Manager disable a plugin by renaming it `*.dll.old`, "which the glob simply
+  does not match": that holds for a loose dll only. They switch a FOLDER mod off by renaming the
+  files inside it, and the folder stays, so `dir-per-mod` reads it as enabled; so does a folder
+  holding only textures another mod reads, or nothing. The launcher reads the switched-off folder
+  through the adapter (§7.7) inside a manager's profile, and as the data says anywhere else.
+  `BepInEx/patchers` (preloader patchers, loaded by the same BepInEx) is no root of any loader. And
+  `{ stat = "{source}/BepInEx/interop", kind = "dir" }` refuses a BepInEx 6 IL2CPP that never ran:
+  the interop assemblies are generated at its first start, so a profile r2modman just made is not
+  recognised. Say which of these the fragment means; a `dir-per-mod` member naming what a mod
+  folder must hold (`holds = "*.dll"`, below it) would close the first two.
 - **`mods` (§7): what L3b asked for is in the spec at db52804** (§7.1, `$defs/mods`, the compat
   goldens). What the launcher reads otherwise than the checker (`tools/check-games-goldens.py`
   `mods_reasons`), each a launcher-only note in [`ENGINE-DESCRIPTOR.md`](ENGINE-DESCRIPTOR.md):

@@ -1,0 +1,47 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# Built-in mod loaders for Unity, as `astra.engine/1` `mods` data (engine-descriptor-v1.md §7).
+# Appended to src/engines/builtin/unity.toml and read with it as one descriptor (src/mods/builtin.rs).
+# The launcher's own copy: tests/mods_identity.rs holds its `mods` member for member to the
+# specification's golden `testdata/games/descriptors/mods/builtin/unity.mods.toml` at the pin
+# (vendored as test data only, under its own licence).
+#
+# Both loaders chain: Astra's runner starts first and hands control to the player's own preloader,
+# in place. No side-by-side: Astra's BepInEx plugin would then read its settings from THEIR
+# BepInEx/config, a write into the player's tree (§7.10).
+schema = "astra.engine/1"
+
+[[mods.loader]]
+id = "bepinex5"
+name = "BepInEx 5"
+codes = ["unity-mono"]
+source = ["game", "manager", "picked"]
+require = [
+  { stat = "{source}/BepInEx/core/BepInEx.dll", kind = "file" },
+  { stat = "{source}/BepInEx/core/BepInEx.Preloader.dll", kind = "file" },
+]
+version = { pe = "{source}/BepInEx/core/BepInEx.dll", key = ["ProductVersion", "FileVersion"], template = "N{1,2}.N{1,2}.N{1,3}", versions = ">=5.4, <5.5" }
+root = "{source}/BepInEx/plugins"
+# A mod is a folder or a loose dll in the plugins folder; `*.dll.old` is one switched off.
+enabled = [ { format = "dir-per-mod" }, { format = "file-glob", glob = "*.dll" } ]
+coexist = [ { strategy = "chain", entry = "{source}/BepInEx/core/BepInEx.Preloader.dll" } ]
+
+[[mods.loader]]
+id = "bepinex6-il2cpp"
+name = "BepInEx 6 (IL2CPP)"
+codes = ["unity-il2cpp"]
+source = ["game", "manager", "picked"]
+require = [
+  { stat = "{source}/BepInEx/core/BepInEx.Unity.IL2CPP.dll", kind = "file" },
+  { stat = "{source}/BepInEx/core/BepInEx.Core.dll", kind = "file" },
+  { stat = "{source}/dotnet", kind = "dir" },
+  { stat = "{source}/BepInEx/interop", kind = "dir" },
+]
+# The interop assemblies are generated per BepInEx build: Astra's IL2CPP foundation runs beside
+# exactly one. Any other build is recognised and unsupported (§7.4).
+version = { pe = "{source}/BepInEx/core/BepInEx.Core.dll", key = ["ProductVersion", "FileVersion"], template = "N{1,2}.N{1,3}.N{1,3}-be.N{1,5}", versions = "=6.0.0-be.788" }
+root = "{source}/BepInEx/plugins"
+enabled = [ { format = "dir-per-mod" }, { format = "file-glob", glob = "*.dll" } ]
+coexist = [ { strategy = "chain", entry = "{source}/BepInEx/core/BepInEx.Unity.IL2CPP.dll" } ]

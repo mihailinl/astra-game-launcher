@@ -76,7 +76,8 @@ pub mod codes {
     /// (`choice_unreadable`, why): ask once ([`crate::set_mods_choice`]), then Play again.
     pub const MODS_CHOICE_NEEDED: &str = "mods-choice-needed";
     /// Play with mods: the chosen mod profile (`profile`, `manager`, `root`) is gone, or no longer
-    /// holds its BepInEx preloader (`reason` = `no-preloader`), or its .NET runtime (`file`).
+    /// holds a loader the built-in data recognises (`reason` = `no-preloader`), or its .NET
+    /// runtime (`file`).
     pub const MODS_SOURCE_MISSING: &str = "mods-source-missing";
     /// Play with mods: their BepInEx (`have`) is not one the integration's chain runs beside
     /// (`need`: `5.4`, `6.0.0-be.788`); `profile` names it.
@@ -85,7 +86,9 @@ pub mod codes {
     pub const MODS_MELONLOADER: &str = "mods-melonloader";
     /// Play with mods: the installed integration declares `[integration.mods]` and still cannot
     /// here (`reason` = `platform`: a native Linux game; `no-doorstop`: its launch goes through no
-    /// Doorstop proxy beside the game). One with no table plays Astra alone, never this.
+    /// Doorstop proxy beside the game; `over-budget`: the chosen folder is past one mods
+    /// evaluation's bounds, engine-descriptor-v1.md §7.8). One with no table plays Astra alone,
+    /// never this.
     pub const MODS_UNSUPPORTED: &str = "mods-unsupported";
     // Engine descriptors (`astra.engine/1`, [`crate::engines`]). Each refusal costs that one
     // descriptor only; the daemon raises one banner for all of them.

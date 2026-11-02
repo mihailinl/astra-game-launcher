@@ -100,6 +100,10 @@ pub struct Recognised {
     /// The version its `version` probe read (the value of the first key whose value reads in
     /// the template), `None` when unknown or not asked.
     pub version: Option<String>,
+    /// What the same probe found as written, for the player to read: the value of the first key
+    /// that has one, whether or not it reads in the template (`6.0.0-dev+3a12d18`, which is no
+    /// `-be.N` build). Never what decides support: that is [`Recognised::version`].
+    pub written: Option<String>,
     /// Whether its `versions` hold (`true` when it declares none). Recognised but unsupported:
     /// the player is told which loader was found and what Astra needs ([`Recognised::need`]),
     /// and offered to play without mods.
@@ -108,6 +112,10 @@ pub struct Recognised {
     pub need: Option<String>,
     /// Its mods, by name.
     pub mods: Vec<Mod>,
+    /// Its mods root as found below the source (its spelling on disk), when it is there.
+    pub root: Option<PathBuf>,
+    /// The files its top-level `file` lookups found, as spelled on disk: what recognised it.
+    pub files: Vec<PathBuf>,
     /// `coexist`, in order of preference; empty: Astra cannot run beside it.
     pub coexist: Vec<Strategy>,
 }
@@ -506,8 +514,8 @@ impl Ctx<'_> {
                 return Ok(None);
             }
         }
-        let (version, supported) = self.version(l, paths)?;
-        let mods = self.mods(l, paths)?;
+        let (version, written, supported) = self.version(l, paths)?;
+        let (root, mods) = self.mods(l, paths)?;
         let coexist = l
             .coexist
             .iter()
@@ -526,6 +534,7 @@ impl Ctx<'_> {
             id: l.id.clone(),
             name: l.name.clone(),
             version,
+            written,
             supported,
             need: l
                 .version
@@ -533,16 +542,23 @@ impl Ctx<'_> {
                 .and_then(|v| v.versions.as_ref())
                 .map(|v| v.as_str().to_owned()),
             mods,
+            root: root.map(|r| self.abs(&r)),
+            files: found.values().map(|f| self.abs(f)).collect(),
             coexist,
         }))
     }
 
-    /// The loader's version and whether its `versions` hold.
-    fn version(&mut self, l: &Loader, paths: &Paths) -> Step<(Option<String>, bool)> {
+    /// The loader's version, what its probe found as written, and whether its `versions` hold.
+    fn version(
+        &mut self,
+        l: &Loader,
+        paths: &Paths,
+    ) -> Step<(Option<String>, Option<String>, bool)> {
         let Some(v) = &l.version else {
-            return Ok((None, true));
+            return Ok((None, None, true));
         };
         let mut read = None;
+        let mut written = None;
         if let Some(comps) = self.resolve(paths.get(&v.pe), Kind::File)?
             && let Some((f, len)) = reads::open_regular(&self.abs(&comps))
         {
@@ -555,10 +571,10 @@ impl Ctx<'_> {
                 // evaluation's: over a per-evaluation bound, never a version "unknown" (§7.8).
                 return Err(Bound::Bytes);
             }
+            let strings: Vec<String> = strings.into_iter().flatten().flatten().collect();
+            written = strings.first().cloned();
             read = strings
                 .into_iter()
-                .flatten()
-                .flatten()
                 .find_map(|s| v.template.read(&s).map(|(runs, _)| (s, runs)));
         }
         let supported = match (&v.versions, &read) {
@@ -566,16 +582,17 @@ impl Ctx<'_> {
             (Some(want), Some((_, runs))) => want.holds(runs),
             (Some(_), None) => false,
         };
-        Ok((read.map(|(s, _)| s), supported))
+        Ok((read.map(|(s, _)| s), written, supported))
     }
 
-    /// The mods in the loader's root, each with whether it is enabled.
-    fn mods(&mut self, l: &Loader, paths: &Paths) -> Step<Vec<Mod>> {
+    /// The loader's root as found (its components below the source), and the mods in it, each
+    /// with whether it is enabled.
+    fn mods(&mut self, l: &Loader, paths: &Paths) -> Step<(Option<Vec<String>>, Vec<Mod>)> {
         let Some(root) = self.resolve(paths.get(&l.root), Kind::Dir)? else {
-            return Ok(Vec::new());
+            return Ok((None, Vec::new()));
         };
         let Some(listing) = self.listing(&root)? else {
-            return Ok(Vec::new());
+            return Ok((Some(root), Vec::new()));
         };
         let folders = l
             .enabled
@@ -631,7 +648,7 @@ impl Ctx<'_> {
                 m.enabled |= listed || marked;
             }
         }
-        Ok(out)
+        Ok((Some(root), out))
     }
 
     /// An `enable-list`'s `name-colon-flag` lines: `(name, enabled)`, in order. A missing list

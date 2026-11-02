@@ -96,6 +96,11 @@ launcher_legacy = { package = "astra-game-launcher", git = "https://github.com/m
 # ledger of every game an Astra 0.2.7 user installed was written by it. A test installs with it and
 # plans again with this crate. Never a runtime dependency; never moved: the rev is that release.
 launcher_031 = { package = "astra-game-launcher", git = "https://github.com/mihailinl/astra-game-launcher", rev = "9aa7874b60f6b10bd67411b7aad40fcc968b78bc", default-features = false }
+# The mods identity canary (`tests/mods_identity.rs`): launcher 0.5.0 (v0.5.0, 6d1851b), whose
+# `src/mods/**` found the player's mods with hand-written code. 0.5.1 finds them through the
+# built-in `mods` data, and the canary holds its answers to 0.5.0's. Never a runtime dependency;
+# never moved: a new pin would compare against itself.
+launcher_050 = { package = "astra-game-launcher", git = "https://github.com/mihailinl/astra-game-launcher", rev = "6d1851b6d86f3dea4ef2e1a06d26b583530a040a", default-features = false }
 
 # The C1 canary runs launcher 0.4.1 (a dependency, above) beside this crate over 20,000 game
 # folders: dependencies are built optimised in this repository's own dev and test builds (a

@@ -430,19 +430,58 @@ pub(crate) fn engine_of_program(
 /// listing of its folder; `None` when none matches, or its folder is not a real folder below
 /// `root`. Planning's built-in half (0.4.1's `engine_of_exe`), and what Pass B leaves alone.
 fn builtin_names(root: &Path, exe_rel: &[String], builtin: &EngineSet) -> Option<EngineCode> {
-    let (_, dir) = exe_rel.split_last()?;
+    builtin_placement(root, exe_rel, builtin).map(|(code, _)| code)
+}
+
+/// [`builtin_names`], with the values the rule that names the program binds for a `mods` path
+/// (engine-descriptor-v1.md §7.3): `{program}`, `{dir}`, `{name}`, `{stem}` from the program, and
+/// `{project}`, `{project.leaf}`, `{project.parent}` only from a strong or strong-fallback rule.
+/// A weak rule binds no project: a game it places is "not with mods", never a guess (§7.3; the
+/// built-in Unreal mods name `{project}` in every path, so they yield nothing there). A rule's
+/// `as` captures are not bound: no built-in `mods` path names one.
+pub(crate) fn builtin_placement(
+    root: &Path,
+    exe_rel: &[String],
+    builtin: &EngineSet,
+) -> Option<(EngineCode, super::mods::Bindings)> {
+    let (name, dir) = exe_rel.split_last()?;
     let game = Game::new(root, &[], None, Policy::BuiltIn);
     let folder = game.folder(dir)?;
     let builtins = members(builtin);
     let mut spent = Spent::default();
     ordered(&builtins, |r| r.scope != Scope::Anywhere)
         .into_iter()
-        .find_map(
-            |(mb, rule)| match game.on_program(mb, rule, exe_rel, &folder, &mut spent) {
-                Ok(Some(c)) => Some(c.code),
-                _ => None,
-            },
-        )
+        .find_map(|(mb, rule)| {
+            let c = match game.on_program(mb, rule, exe_rel, &folder, &mut spent) {
+                Ok(Some(c)) => c,
+                _ => return None,
+            };
+            let mut b = super::mods::Bindings::new()
+                .with("program", exe_rel.join("/"))
+                .with("dir", dir.join("/"))
+                .with("name", name.clone())
+                .with("stem", detect::program_stem(name));
+            let project = match rule.tier {
+                RuleTier::Strong | RuleTier::StrongFallback => game
+                    .fits(
+                        mb.model,
+                        rule,
+                        dir,
+                        name,
+                        &name.to_ascii_lowercase(),
+                        &folder,
+                    )
+                    .flatten(),
+                RuleTier::Weak => None,
+            };
+            if let Some(p) = project.filter(|p| !p.is_empty()) {
+                b = b
+                    .with("project", p.join("/"))
+                    .with("project.leaf", p[p.len() - 1].clone())
+                    .with("project.parent", p[..p.len() - 1].join("/"));
+            }
+            Some((c.code, b))
+        })
 }
 
 /// Pass B over a game whose Pass A answer is `base` (`unknown`, no evidence, no hint used).
@@ -2208,6 +2247,50 @@ pub(crate) fn find_version(tokens: &[Tok], bytes: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
     use crate::engines::{Descriptor, Origin};
+
+    /// The bindings a `mods` path takes (engine-descriptor-v1.md §7.3): a strong rule's project
+    /// and the program's own placeholders; a weak rule names the program and binds no project.
+    #[test]
+    fn a_strong_rule_binds_the_project_for_mods_and_a_weak_one_does_not() {
+        let root = std::env::temp_dir().join(format!("agl-placement-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let put = |rel: &str| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, b"MZ").unwrap();
+        };
+        put("Pkg/Pal/Binaries/Win64/Pal-Win64-Shipping.exe");
+        put("Pkg/Pal/Content/Paks/Pal-Windows.pak");
+        let exe: Vec<String> = ["Pkg", "Pal", "Binaries", "Win64", "Pal-Win64-Shipping.exe"]
+            .map(String::from)
+            .to_vec();
+        let (code, b) = builtin_placement(&root, &exe, super::super::builtin()).unwrap();
+        assert_eq!(code.as_str(), "unreal");
+        for (k, v) in [
+            ("project", "Pkg/Pal"),
+            ("project.leaf", "Pal"),
+            ("project.parent", "Pkg"),
+            ("program", "Pkg/Pal/Binaries/Win64/Pal-Win64-Shipping.exe"),
+            ("dir", "Pkg/Pal/Binaries/Win64"),
+            ("name", "Pal-Win64-Shipping.exe"),
+            ("stem", "Pal-Win64-Shipping"),
+        ] {
+            assert_eq!(b.get(k), Some(v), "{k}");
+        }
+        assert_eq!(
+            builtin_names(&root, &exe, super::super::builtin()),
+            Some(code.clone())
+        );
+        // No `Content/Paks`: only a weak rule names the program, and it binds no project.
+        fs::remove_dir_all(root.join("Pkg/Pal/Content")).unwrap();
+        let (weak, b) = builtin_placement(&root, &exe, super::super::builtin()).unwrap();
+        assert_eq!(weak, code);
+        for k in ["project", "project.leaf", "project.parent"] {
+            assert_eq!(b.get(k), None, "{k}");
+        }
+        assert_eq!(b.get("stem"), Some("Pal-Win64-Shipping"));
+        let _ = fs::remove_dir_all(&root);
+    }
 
     fn entry(rel: &[&str], is_dir: bool) -> Entry {
         Entry {

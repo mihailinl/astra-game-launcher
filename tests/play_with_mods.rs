@@ -121,8 +121,20 @@ impl World {
         )
     }
 
+    /// The runner installed. An IL2CPP runner is for an IL2CPP game: the built-in data asks for
+    /// BepInEx 6 IL2CPP in one only (`codes = ["unity-il2cpp"]`), so the game becomes one first.
     fn install_with(&self, proxy: &[u8], decl: &str) {
-        plan_and_install(&mods_runner(proxy, decl), &self.target(), &self.profile());
+        let engine = if decl.contains("bepinex6-il2cpp") {
+            write(&self.game().join("GameAssembly.dll"), b"MZ il2cpp");
+            "unity-il2cpp"
+        } else {
+            "unity-mono"
+        };
+        plan_and_install(
+            &mods_runner_for(proxy, decl, engine),
+            &self.target(),
+            &self.profile(),
+        );
     }
 
     fn install(&self, decl: &str) {
@@ -454,12 +466,31 @@ fn il2cpp_passes_their_dotnet_and_needs_doorstop_4() {
             .contains("\\BepInEx\\core\\BepInEx.Unity.IL2CPP.dll\n")
     );
 
-    // Their .NET runtime gone: their source is not whole.
+    // Their .NET runtime gone: their source is not whole. The built-in data requires `dotnet/`
+    // to recognise a BepInEx 6 IL2CPP at all (0.5.0 recognised it and then missed the file), so
+    // there is no BepInEx there any more.
     fs::remove_dir_all(theirs.join("dotnet")).unwrap();
     let e = w.play().unwrap_err();
     assert_eq!(
+        (e.code, e.param("reason")),
+        (codes::MODS_SOURCE_MISSING, Some("no-preloader"))
+    );
+    write(&theirs.join("dotnet/coreclr.dll"), b"MZ coreclr");
+    // Their pack's ini naming a runtime folder that is not there: the file it names is missing.
+    write(
+        &theirs.join("doorstop_config.ini"),
+        b"[General]\nenabled = true\n[Il2Cpp]\ncoreclr_path = gone\\coreclr.dll\ncorlib_dir = gone\n",
+    );
+    fs::remove_dir_all(theirs.join("dotnet")).unwrap();
+    fs::create_dir_all(theirs.join("dotnet")).unwrap();
+    let e = w.play().unwrap_err();
+    assert_eq!(
         (e.code, e.param("file")),
-        (codes::MODS_SOURCE_MISSING, Some("dotnet"))
+        (codes::MODS_SOURCE_MISSING, Some("dotnet/coreclr.dll"))
+    );
+    write(
+        &theirs.join("doorstop_config.ini"),
+        b"[General]\nenabled = true\n[Il2Cpp]\ncoreclr_path = dotnet\\coreclr.dll\ncorlib_dir = dotnet\n",
     );
     write(&theirs.join("dotnet/coreclr.dll"), b"MZ coreclr");
 

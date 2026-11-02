@@ -111,16 +111,29 @@ set_mods_choice(&profile_dir, Choice { choice: ChoiceKind::With,
   the Steam install folder's name, or a profile whose `BepInEx/LogOutput.log` names the game's
   program in its first five lines. Never a guess beyond that. `ModsEnv` says which data folders
   are looked in (`discover_mods_in` takes one).
-- **What counts.** A profile whose `BepInEx/core` holds a known preloader; a BepInEx in the game
-  folder no ledger of ours placed (`manual`); MelonLoader, shown and never offered. Mods are the
-  first-level entries of `BepInEx/plugins` and `BepInEx/patchers` with at least one `*.dll`
-  (`*.dll.old` is disabled; an entry holding `astra-item.json` is Astra's own); a source with none
-  is not listed. `last_played` is the log's modification time.
-- **Whether.** `ModSource::playable`: their BepInEx's `ProductVersion` (the version resource of
-  `BepInEx.dll` / `BepInEx.Core.dll`) against the declaration — 5.4.x for `bepinex5`, exactly
-  `6.0.0-be.<bepinex_build>` for `bepinex6-il2cpp` — or why the installed integration cannot:
-  `IntegrationWithoutMods` (no table: listed, "only without mods for now"), `NotSupported`
-  (`not-installed`, `platform`, …).
+- **What counts** (0.5.1: data). In each of those folders, and the game folder (`manual`), the
+  built-in `mods` data (`src/mods/builtin/`, held member for member to the specification's own
+  fragments;
+  [`docs/ENGINE-DESCRIPTOR.md`](docs/ENGINE-DESCRIPTOR.md), "`mods`") says which loader is there,
+  its version, its mods and which are enabled, and how Astra runs beside it
+  (`ModSource::coexist`): for Unity, BepInEx 5 (`BepInEx/core/BepInEx.dll` and
+  `BepInEx.Preloader.dll`) and BepInEx 6 IL2CPP (with `dotnet/` and `BepInEx/interop/`), each
+  in its own flavour of game; for Unreal, UE4SS 3 beside the real program (`ue4ss/UE4SS.dll`,
+  chained), UE4SS 2 (shown: Astra cannot run beside it) and the `~mods` paks (shown, run beside
+  Astra). Mods are what the data finds enabled in the loader's mods root — for BepInEx each
+  folder and each `*.dll` in `BepInEx/plugins` (`*.dll.old` is disabled; a folder r2modman,
+  Thunderstore Mod Manager or Gale switched off, its files renamed `*.old`, is read as their own
+  state; an entry holding `astra-item.json` is Astra's own); for UE4SS the folders `mods.txt` or
+  an `enabled.txt` switches on; the paks present. A source with none is not listed, nor Astra's
+  own loader in the game folder. MelonLoader and BepInEx 6 for Mono or CoreCLR are shown and
+  never offered, as before. `last_played` is BepInEx's (MelonLoader's) log's modification time.
+- **Whether.** `ModSource::playable`: the loader the data recognised, its own `versions` and the
+  declaration's — 5.4.x for `bepinex5`, exactly `6.0.0-be.<bepinex_build>` for
+  `bepinex6-il2cpp`, never wider than the data's `6.0.0-be.788` — or why the installed
+  integration cannot: `IntegrationWithoutMods` (no table: listed, "only without mods for now";
+  an Unreal runner, which chains a UE4SS 3 by itself), `NotSupported` (`not-installed`,
+  `platform`, …, `over-budget` for a folder past one evaluation's bounds). A loader Astra cannot
+  run beside at all (UE4SS 2) is `LoaderUnsupported` with `need` the loader it can (`UE4SS 3`).
 - **The choice.** `<profile>/mods-choice.json`
   (`{"schema":1,"choice":"with"|"without","source":{…},"added_roots":[…]}`), written atomically
   under the profile lock by `set_mods_choice` and `add_mods_root` only; its name is reserved like
@@ -174,10 +187,10 @@ set_mods_choice(&profile_dir, Choice { choice: ChoiceKind::With,
 | code | from | params | what the person can do |
 |---|---|---|---|
 | `mods-choice-needed` | `prepare_launch` | `sources` (how many could be played together); `choice_unreadable` when `mods-choice.json` could not be read | Answer once (`set_mods_choice`: with which mods, or without), then Play again. |
-| `mods-source-missing` | `prepare_launch` | `profile`, `manager`, `root`; `reason` = `no-preloader`, or `file` (their .NET runtime) | Their mod profile is gone or broken: play without mods, or choose another. |
+| `mods-source-missing` | `prepare_launch` | `profile`, `manager`, `root`; `reason` = `no-preloader` (no loader the data recognises there now), or `file` (their .NET runtime) | Their mod profile is gone or broken: play without mods, or choose another. |
 | `mods-loader-unsupported` | `prepare_launch` | `have`, `need` (`5.4`, `6.0.0-be.788`), `profile` | Their BepInEx is too old (update it in their manager), or another build than the integration's: play with Astra alone, or with their mods without Astra. |
 | `mods-melonloader` | `prepare_launch` | `profile` | Their mods run through MelonLoader: Astra plays together with BepInEx only. |
-| `mods-unsupported` | `prepare_launch` | `reason` = `platform`, `no-doorstop` | The installed integration declares the table and still cannot play with mods here: choose "without". |
+| `mods-unsupported` | `prepare_launch` | `reason` = `platform`, `no-doorstop`, `over-budget` (their folder is past one evaluation's bounds) | The installed integration declares the table and still cannot play with mods here: choose "without". |
 
 A Play with mods can also answer an existing code: `unknown-key` / `manifest-invalid` /
 `path-escapes` for an `[integration.mods]` this launcher cannot use, `needs-reinstall` (`file`)

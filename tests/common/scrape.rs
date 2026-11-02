@@ -12,16 +12,30 @@ use std::path::{Path, PathBuf};
 /// The string literals of Rust source `src` (plain, raw, byte), comments and the bodies of
 /// `#[cfg(test)] mod`s skipped.
 pub fn literals(src: &str) -> Vec<String> {
+    scan(src).0
+}
+
+/// Rust source `src` as the compiler reads its expressions: comments gone, every string and char
+/// literal `""`, the bodies of `#[cfg(test)] mod`s gone. What a canary bound to expressions (a
+/// call, a method) reads, so that a name in a comment, a doc or a message never matches.
+pub fn code(src: &str) -> String {
+    scan(src).1
+}
+
+/// [`literals`] and [`code`], in one pass.
+fn scan(src: &str) -> (Vec<String>, String) {
     let b = src.as_bytes();
     let mut out = Vec::new();
+    let mut code: Vec<u8> = Vec::new();
     let mut i = 0;
     // Braces outside literals and comments; inside a test module, the depth its body opened at.
     let mut depth = 0usize;
     let mut test_mod: Option<usize> = None;
     let mut test_mod_next = false;
-    let push = |out: &mut Vec<String>, lit: &str, skipping: bool| {
+    let push = |out: &mut Vec<String>, code: &mut Vec<u8>, lit: &str, skipping: bool| {
         if !skipping {
             out.push(lit.to_owned());
+            code.extend_from_slice(b"\"\"");
         }
     };
     while i < b.len() {
@@ -40,11 +54,16 @@ pub fn literals(src: &str) -> Vec<String> {
                     test_mod = Some(depth);
                 }
                 test_mod_next = false;
+                if test_mod.is_none() {
+                    code.push(b'{');
+                }
                 i += 1;
             }
             b'}' => {
                 if test_mod == Some(depth) {
                     test_mod = None;
+                } else if test_mod.is_none() {
+                    code.push(b'}');
                 }
                 depth = depth.saturating_sub(1);
                 i += 1;
@@ -84,11 +103,20 @@ pub fn literals(src: &str) -> Vec<String> {
                         i += 1;
                     }
                     i += 1;
+                    if !skipping {
+                        code.extend_from_slice(b"''");
+                    }
                 } else {
                     let ch_len = src[i + 1..].chars().next().map_or(1, char::len_utf8);
                     if b.get(i + 1 + ch_len) == Some(&b'\'') {
                         i += 2 + ch_len;
+                        if !skipping {
+                            code.extend_from_slice(b"''");
+                        }
                     } else {
+                        if !skipping {
+                            code.push(b'\'');
+                        }
                         i += 1;
                     }
                 }
@@ -105,7 +133,7 @@ pub fn literals(src: &str) -> Vec<String> {
                     .windows(close.len())
                     .position(|w| w == close.as_slice())
                     .map_or(b.len(), |p| body + p);
-                push(&mut out, &src[body..end], skipping);
+                push(&mut out, &mut code, &src[body..end], skipping);
                 i = end + close.len();
             }
             b'"' => {
@@ -117,13 +145,18 @@ pub fn literals(src: &str) -> Vec<String> {
                     }
                     i += 1;
                 }
-                push(&mut out, &src[start..i.min(b.len())], skipping);
+                push(&mut out, &mut code, &src[start..i.min(b.len())], skipping);
                 i += 1;
             }
-            _ => i += 1,
+            c => {
+                if !skipping {
+                    code.push(c);
+                }
+                i += 1;
+            }
         }
     }
-    out
+    (out, String::from_utf8_lossy(&code).into_owned())
 }
 
 /// `r"`, `r#"`, `br"`, `b"`…: the number of `#`s and where the body starts.
