@@ -132,7 +132,9 @@ set_mods_choice(&profile_dir, Choice { choice: ChoiceKind::With,
   `bepinex6-il2cpp`, never wider than the data's `6.0.0-be.788` — or why the installed
   integration cannot: `IntegrationWithoutMods` (no table: listed, "only without mods for now";
   an Unreal runner, which chains a UE4SS 3 by itself), `NotSupported` (`not-installed`,
-  `platform`, …, `over-budget` for a folder past one evaluation's bounds). A loader Astra cannot
+  `platform`, …, `over-budget` for a folder past one evaluation's bounds or cut short by the
+  discovery's own budget, `outside-versions` for an integration declaring a build the data does
+  not hold, which no source can be offered with). A loader Astra cannot
   run beside at all (UE4SS 2) is `LoaderUnsupported` with `need` the loader it can (`UE4SS 3`).
 - **The choice.** `<profile>/mods-choice.json`
   (`{"schema":1,"choice":"with"|"without","source":{…},"added_roots":[…]}`), written atomically
@@ -190,7 +192,7 @@ set_mods_choice(&profile_dir, Choice { choice: ChoiceKind::With,
 | `mods-source-missing` | `prepare_launch` | `profile`, `manager`, `root`; `reason` = `no-preloader` (no loader the data recognises there now), or `file` (their .NET runtime) | Their mod profile is gone or broken: play without mods, or choose another. |
 | `mods-loader-unsupported` | `prepare_launch` | `have`, `need` (`5.4`, `6.0.0-be.788`), `profile` | Their BepInEx is too old (update it in their manager), or another build than the integration's: play with Astra alone, or with their mods without Astra. |
 | `mods-melonloader` | `prepare_launch` | `profile` | Their mods run through MelonLoader: Astra plays together with BepInEx only. |
-| `mods-unsupported` | `prepare_launch` | `reason` = `platform`, `no-doorstop`, `over-budget` (their folder is past one evaluation's bounds) | The installed integration declares the table and still cannot play with mods here: choose "without". |
+| `mods-unsupported` | `prepare_launch` | `reason` = `platform`, `no-doorstop`, `over-budget` (their folder is past one evaluation's bounds), `outside-versions` (the integration declares a build of their loader the built-in data does not hold) | The installed integration declares the table and still cannot play with mods here: choose "without". |
 
 A Play with mods can also answer an existing code: `unknown-key` / `manifest-invalid` /
 `path-escapes` for an `[integration.mods]` this launcher cannot use, `needs-reinstall` (`file`)
