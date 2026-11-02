@@ -1260,7 +1260,8 @@ const PREFIX: usize = 64 * 1024;
 
 /// Whether the by-bytes rules need all of a file whose first bytes are `head` (of `size`): a
 /// GLB under a GLB name (its format), a `.gltf`, a zip that is no bundle by name, and any text
-/// that is, or may yet be, JSON-looking. Anything else is decided by its first bytes.
+/// that is, or may yet be, JSON-looking. Anything else is decided by its first bytes. A part an
+/// entry declares is judged later by all its bytes, whatever this says (a bundle by name too).
 fn needs_whole(path: &str, head: &[u8], size: u64) -> bool {
     if head.len() as u64 >= size {
         return false; // it is whole
@@ -1686,7 +1687,16 @@ pub fn judge(
                 continue;
             }
             if ends_with_any(&k, INNER_PART_EXTS) && is_content_typed(&k, &d) {
-                let keep = declared.contains(k.as_str()).then(|| d.into_owned());
+                // A part an entry declares is judged by all its bytes, as a part of the
+                // release's own is (`Found::Release` reads it whole): the first 64 KiB of a
+                // bundle are not the bundle, and its digest is the whole entry's.
+                let keep = declared.contains(k.as_str()).then(|| {
+                    if (d.len() as u64) < size {
+                        w.data(i, None).into_owned()
+                    } else {
+                        d.into_owned()
+                    }
+                });
                 found.insert(k, Found::Inner(keep, beside.clone()));
             }
         }

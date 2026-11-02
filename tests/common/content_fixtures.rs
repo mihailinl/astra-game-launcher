@@ -2082,7 +2082,57 @@ pub fn hostile() -> Vec<Fixture> {
         )),
         near_miss_flagged: Vec::new(),
     });
+    // A bundle in a game's archive is judged by all its bytes, never its first 64 KiB: a
+    // harmless pack of exactly 64 KiB with the prohibited golden character after it is the
+    // character to every reader of the whole entry (its last end record is the character's).
+    let scout = fs::read(
+        root().join(
+            "testdata/games/content/releases/bundle-vrm-redistribution-prohibited/characters/scout.astrachar",
+        ),
+    )
+    .unwrap();
+    let cloaked = [pack_of_len(64 * 1024), scout].concat();
+    out.push(fx(
+        "a bundle in a jar whose first 64 KiB are another bundle",
+        inner_bundle_release(&cloaked),
+        vec![(ZIP_END_RECORD, INNER_BUNDLE)],
+        Some(inner_bundle_release(&pack_of_len(100 * 1024))),
+    ));
     out
+}
+
+/// Where [`inner_bundle_release`] declares its bundle.
+pub const INNER_BUNDLE: &str = "mods/pack.jar!packs/big.astrapack";
+
+/// A release of one mod jar holding `bundle` (Stored) at `packs/big.astrapack`, declared.
+pub fn inner_bundle_release(bundle: &[u8]) -> Vec<(String, Vec<u8>)> {
+    rel(
+        &part(INNER_BUNDLE, "animations", Some("CC-BY-4.0")),
+        &[(
+            "mods/pack.jar",
+            games_zip(
+                &[
+                    Z::deflated("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\n"),
+                    Z::new("packs/big.astrapack", bundle),
+                ],
+                b"",
+            ),
+        )],
+    )
+}
+
+/// A valid animation pack of exactly `len` bytes: one clip, padded until the pack is that long.
+pub fn pack_of_len(len: usize) -> Vec<u8> {
+    let mut pad = 0usize;
+    for _ in 0..16 {
+        let clip = [FBX, &vec![b'x'; pad]].concat();
+        let p = pack(&[("clips/a.fbx", &clip)]);
+        if p.len() == len {
+            return p;
+        }
+        pad = (pad + len).checked_sub(p.len()).expect("a pack that long");
+    }
+    panic!("no pack of exactly {len} bytes");
 }
 
 /// `fixture`'s near miss, when it has one, passes: no refusal, exactly its flags. And a near

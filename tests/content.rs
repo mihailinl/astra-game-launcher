@@ -24,8 +24,9 @@ use astra_game_launcher::content::{
 };
 use astra_game_launcher::{Manifest, codes};
 use content_fixtures::{
-    FBX, GateWant, PNG, VRM1_ALLOWED, fixture_failure, gate_vectors, glb, hostile, library_answer,
-    manifest, near_miss_failure, part, release_answer_agrees, release_vectors, vrm1, vrma, zip_of,
+    FBX, GateWant, INNER_BUNDLE, PNG, VRM1_ALLOWED, fixture_failure, gate_vectors, glb, hostile,
+    inner_bundle_release, library_answer, manifest, near_miss_failure, pack_of_len, part,
+    release_answer_agrees, release_vectors, vrm1, vrma, zip_of,
 };
 use serde_json::Value;
 
@@ -157,6 +158,34 @@ fn an_accepted_release_says_where_each_licence_came_from() {
     let p = &r.unwrap().parts[0];
     assert_eq!(p.licence_source, Some(LicenceSource::Declared));
     assert!(p.vrm_licence.is_none());
+}
+
+/// A bundle inside a game's archive is judged, and digested, by all its bytes, as a bundle of the
+/// release's own is: a valid pack over 64 KiB passes with the whole entry's sha256, and the same
+/// pack as a part of the release's own gets the same digest.
+#[test]
+fn a_bundle_in_an_archive_is_judged_and_digested_whole() {
+    let big = pack_of_len(100 * 1024);
+    let (refused, flags, r) = library_answer(&zip_of(&inner_bundle_release(&big)));
+    assert!(
+        refused.is_empty() && flags.is_empty(),
+        "{refused:?} {flags:?}"
+    );
+    let r = r.unwrap();
+    assert_eq!(r.parts.len(), 1);
+    assert_eq!(r.parts[0].path, INNER_BUNDLE);
+    assert_eq!(r.parts[0].sha256, common::sha(&big));
+    let top = manifest(&part(
+        "packs/big.astrapack",
+        "animations",
+        Some("CC-BY-4.0"),
+    ));
+    let (refused, _, r) = library_answer(&zip_of(&[
+        ("astra-gi.toml".to_owned(), top.into_bytes()),
+        ("packs/big.astrapack".to_owned(), big.clone()),
+    ]));
+    assert!(refused.is_empty(), "{refused:?}");
+    assert_eq!(r.unwrap().parts[0].sha256, common::sha(&big));
 }
 
 /// **The gate.** Each file of `content/vrm/` through [`content::vrm_gate`] alone, as AstraPlugins'
