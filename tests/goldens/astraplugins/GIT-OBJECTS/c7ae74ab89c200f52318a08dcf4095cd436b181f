@@ -1,0 +1,26 @@
+tree 6a423443e7fb08c1feeae1558144be67aaa3d3a7
+parent 7f80256bc27762bcd8c7233799a7bd11cdd48108
+parent 97b759e98b45ed5ace1225e3077c2d8bf6e01751
+author Mihailin <mishasamil32@outlook.com> 1793666226 -0800
+committer GitHub <noreply@github.com> 1793666226 -0800
+gpgsig -----BEGIN PGP SIGNATURE-----
+ 
+ wsFcBAABCAAQBQJq6SyyCRC1aQ7uu5UhlAAAoeoQAIKM2QFIyxEemzw5r/LAgb6G
+ rON55A9xa71gvZBXpq0TD7eaVhlnaxeYV2VEPnOr33jOMwuZjG434cQjOTWAC7jC
+ Jvzs8qmijaGbqsNY3ugfWu0ZEgfXCJtZrG9qT+xxCyEXDm1AbFrnDVWj2vWm22z6
+ sWlfQG+LnFtRvoUZCaF6BtEgCCEFFcv46VJNTzp5WOriEsbWFEjP7x/4JeVWYFXZ
+ XlM6Gaq8zeJIrQuRgBq6QrmHW+OCx2xXIrOGvJrpbbqNODNEBLVvUQlqa1EyBica
+ 7WnoL2H5dfEvX/aFLQMWEsYjS5LAP7o813oxo6jinpAet54E5oQNhTa5dxMdMTwf
+ dAHfvIiBRgfzDW+qH8yNVcrEvO5LaZpey+e9P1XKqIErT0z6isjDtBWm7O76wzYl
+ Wdp51w0ZAAwbuRIF7jMgGDeHqUvNolnJpNKrU7JTt6vFZ3LtmCqB9Co0mi+j2pqP
+ 47dUdOZZIchYiia+asEhEQUJ/MQsZNNAamvpDasZkdR899WK/l9gow2swYN2Z8ES
+ 6hy/FP9TZ60REGy2LV99W3OltobbWSTGDdPrX/aLEAdCvLGpsyUCxPC6L8sGjp0A
+ BAnH4Ft5i32pgu8pGVF4X6e5Vj6vQx9g4zdFtgpIxuHLwio5fdqBsU1wWozFLN0Q
+ r9UEu354rm0RAf5BjH2O
+ =d9gM
+ -----END PGP SIGNATURE-----
+ 
+
+Merge pull request #136 from mihailinl/spec/games-kind-key-retirement
+
+spec/games: a kind key retires per document schema, not per kind

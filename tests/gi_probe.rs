@@ -2818,19 +2818,24 @@ fn check_holds_the_links_files_to_the_zip() {
     assert_eq!(r["findings"][0]["params"]["path"], "astra/tools/gone.json");
 }
 
-/// `link.digest` (spec `manifest.md` §2.6.1, AstraPlugins PR #134): the library's
-/// `link_digest`, which `tests/link_digest.rs` holds to the spec's vectors; `link` is null with
-/// no table; a table it cannot digest is no digest and a finding of step 2.
+/// `link.digest` (spec `manifest.md` §2.6.1): the library's `link_digest`, which
+/// `tests/link_digest.rs` holds to the spec's vectors; `link` is null with no table; a table it
+/// cannot digest is no digest and a finding of step 2.
 #[test]
 fn check_reports_the_links_consent_digest() {
-    // The vector: the golden at the pin is #134's input byte for byte (`tests/link_digest.rs`).
-    let golden =
-        spec_goldens::root().join("testdata/games/manifests/valid/game-specific-link.toml");
+    // The pinned `link.digest` vector whose input is a whole manifest, as `check` reads one.
+    let vector = spec_goldens::vectors()["link"]["digest"]
+        .as_array()
+        .expect("vectors.json: link.digest")
+        .iter()
+        .find(|v| v["name"] == "game-specific-link")
+        .expect("vectors.json: link.digest game-specific-link");
+    let golden = spec_goldens::root()
+        .join("testdata/games")
+        .join(vector["manifest"].as_str().unwrap());
     let (_, r) = check(golden.to_str().unwrap(), &[]);
-    assert_eq!(
-        r["link"]["digest"], "e26a440ebf1c3cacc9891fc8b031d9c0d8cbde9276ceeba68d1866a972a35ea2",
-        "{r:#}"
-    );
+    assert!(vector["digest"].is_string(), "{vector}");
+    assert_eq!(r["link"]["digest"], vector["digest"], "{r:#}");
 
     // A release zip: the digest of the manifest it holds.
     let tmp = Tmp::new("check-link-digest");

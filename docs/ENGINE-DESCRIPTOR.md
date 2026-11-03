@@ -8,9 +8,9 @@ reads the places the definition leaves open. It is not a second copy of the defi
 ## The definition
 
 The normative text is AstraPlugins'
-[`spec/games/engine-descriptor-v1.md`](https://github.com/mihailinl/AstraPlugins/blob/db52804689bb7ed785c67cac9dc31b15da590477/spec/games/engine-descriptor-v1.md)
-at commit **`db52804689bb7ed785c67cac9dc31b15da590477`**, with its schema,
-[`spec/games/schemas/engine-descriptor-v1.schema.json`](https://github.com/mihailinl/AstraPlugins/blob/db52804689bb7ed785c67cac9dc31b15da590477/spec/games/schemas/engine-descriptor-v1.schema.json),
+[`spec/games/engine-descriptor-v1.md`](https://github.com/mihailinl/AstraPlugins/blob/c7ae74ab89c200f52318a08dcf4095cd436b181f/spec/games/engine-descriptor-v1.md)
+at commit **`c7ae74ab89c200f52318a08dcf4095cd436b181f`**, with its schema,
+[`spec/games/schemas/engine-descriptor-v1.schema.json`](https://github.com/mihailinl/AstraPlugins/blob/c7ae74ab89c200f52318a08dcf4095cd436b181f/spec/games/schemas/engine-descriptor-v1.schema.json),
 and its goldens, `testdata/games/descriptors/`. That commit is the one in
 `tests/goldens/astraplugins/PIN`: the launcher's copy of the goldens is vendored from it, and
 `tests/goldens.rs` holds the commit named here equal to `PIN`. A re-pin
@@ -57,7 +57,7 @@ plans.
 ## `mods`: the player's own mod loaders
 
 `mods` is the optional top-level member of `astra.engine/1` that the specification defines in
-[§7](https://github.com/mihailinl/AstraPlugins/blob/db52804689bb7ed785c67cac9dc31b15da590477/spec/games/engine-descriptor-v1.md#7-mods-the-players-own-mod-loaders-optional)
+[§7](https://github.com/mihailinl/AstraPlugins/blob/c7ae74ab89c200f52318a08dcf4095cd436b181f/spec/games/engine-descriptor-v1.md#7-mods-the-players-own-mod-loaders-optional)
 at the pin above, with `$defs/mods` in its schema: how the player's own mod loader is
 recognised, where its mods are, which of them are enabled and how Astra runs beside it.
 Launcher 0.5.0 accepted it and read nothing in it; 0.5.1 reads it (`engines::mods`).

@@ -1,0 +1,12 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# The vendored goldens are held byte for byte: SHA256SUMS, and the git-object chain from PIN to
+# every file's blob (tests/common/spec_goldens.rs). So git never converts a line ending in them,
+# on any checkout (a Windows `core.autocrlf=true` would rewrite every LF file, and the sums and
+# blob ids with it) — and testdata/games/link/digest/crlf.toml holds CRLF on purpose: the link
+# digest reads it as LF (manifest.md §2.6.1; AstraPlugins' own `.gitattributes` says `-text` for
+# it too). Here, beside astraplugins/ and not in it, because the vendor script replaces that
+# folder whole.
+astraplugins/** -text

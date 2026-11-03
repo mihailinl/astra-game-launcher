@@ -497,12 +497,12 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
      Link v1's counts, names and lengths (`link-invalid`), and `[integration.engine]` a
      descriptor Pass B admits. The report's `link.digest` is the link's consent digest
      (`link_digest`: SHA-256 of the RFC 8785 JCS of `[integration.link]` exactly as written, no
-     default added; AstraPlugins `manifest.md` §2.6.1, PR #134), `link` itself `null` with no
+     default added; AstraPlugins `manifest.md` §2.6.1), `link` itself `null` with no
      table; a number, float or datetime in the table is no digest and
      `link-invalid{reason=not-digestable}`. A raw CRLF inside a multi-line string is LF in it,
-     as the spec's reference (`tomllib`) reads it: a release checked out with CRLF has the LF
-     file's digest (`toml_newlines`, which `Manifest::parse` and `Descriptor::from_toml` read
-     through);
+     as §2.6.1 says (and its reference, `tomllib`, reads it): a release checked out with CRLF
+     has the LF file's digest (`toml_newlines`, which `Manifest::parse` and
+     `Descriptor::from_toml` read through);
   3. every file `[integration.link]` names is in the zip (schemas ≤4 KiB, the skill ≤16 KiB);
      holding the schemas to `link-v1.md` §6's restricted profile waits for `link-v1` to freeze;
   4. the descriptor claims none of the spec's negative folders (as `validate-descriptor`);

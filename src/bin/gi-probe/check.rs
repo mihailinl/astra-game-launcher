@@ -19,8 +19,8 @@
 //! 2. [`Manifest::lint`]: a community integration's identity (`reserved-id`, `reserved-name`),
 //!    `capability-undeclared`, Astra Link v1's counts, names and lengths (`link-invalid`), the
 //!    link's consent digest (`link.digest`: [`astra_game_launcher::link_digest`], spec
-//!    `manifest.md` §2.6.1 as AstraPlugins PR #134 writes it, a raw CRLF read as LF as its
-//!    reference reads it; a table it cannot digest is
+//!    `manifest.md` §2.6.1 at [`crate::descriptor::SPEC_SHA`], a raw CRLF read as LF as it
+//!    says; a table it cannot digest is
 //!    `link-invalid{reason=not-digestable}`, and the digest `null`), the foundation claim's keys,
 //!    `[integration.engine]` and Pass B's admission of it, and everything wrong inside
 //!    `[integration.engine.mods]` (`mods-invalid{field, reason}`, spec

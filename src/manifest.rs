@@ -1242,10 +1242,9 @@ fn lint_link(link: &toml::Value, out: &mut Vec<LauncherError>) {
 
 /// `[integration.link]`'s consent digest: what a catalogue entry carries as `link.digest`, and a
 /// client asks the player to consent again when it changes (AstraPlugins `spec/games/manifest.md`
-/// §2.6.1, PR #134). Pass [`Manifest::link`]; `None` (no table) is `None`, the entry's
+/// §2.6.1). Pass [`Manifest::link`]; `None` (no table) is `None`, the entry's
 /// `link: null`. A table parsed some other way must have been parsed from [`toml_newlines`]'
-/// text: a raw CRLF inside a multi-line string is LF in the digest, as the spec's reference
-/// reads it.
+/// text: a raw CRLF inside a multi-line string is LF in the digest, as §2.6.1 says.
 ///
 /// The table exactly as parsed, **no default added**: a key it leaves out (`skill`, `tools`,
 /// `triggers`, `events`) is absent from what is hashed, never `false`, `[]` or `null`, so writing

@@ -5,15 +5,14 @@
 //! [`link_digest`], `[integration.link]`'s consent digest (AstraPlugins `spec/games/manifest.md`
 //! §2.6.1): SHA-256 of the RFC 8785 JCS of the table exactly as parsed, no default added.
 //!
-//! The rule and its four `link.digest` vectors are AstraPlugins PR #134's, at its head
-//! [`PR_HEAD`], which is not merged yet: the vectors are final, so their inputs are vendored at
-//! `tests/goldens/astraplugins-pr134/` (its NOTICE), apart from the pinned goldens, each held
-//! here to its blob id at that commit. When #134 merges, the goldens are re-pinned to its merge
-//! commit and these read the pinned `vectors.json` (`docs/ENGINE-DESCRIPTORS-DEBT.md` row 53).
-//! The latest two, `crlf` and `crlf-as-lf`, are the spec's own CRLF-normalisation fixture — the
-//! same claim this crate's own hand-rolled
-//! [`a_crlf_checkout_is_the_lf_files_digest`] already tested, now checked against an
-//! independently-authored vector instead of only our own construction.
+//! The rule's vectors are `vectors.json`'s `link.digest`, read out of the goldens vendored at
+//! `tests/goldens/astraplugins/PIN` (AstraPlugins master, since PR #134 merged), whose every byte
+//! the pin proves (`spec_goldens::sums`): each vector there, whatever its number, is this crate's
+//! digest of its input. [`KNOWN`] names the four #134 wrote, so a re-pin that dropped one cannot
+//! leave this file vacuously green. `crlf` and `crlf-as-lf` are the spec's own
+//! CRLF-normalisation fixture — the same claim this crate's own hand-rolled
+//! [`a_crlf_checkout_is_the_lf_files_digest`] tests, checked against an independently-authored
+//! vector instead of only our own construction.
 //!
 //! Every other expected digest below was computed by two other JCS implementations (Python's
 //! `json.dumps(ensure_ascii=False)` with keys sorted by UTF-16, and JavaScript's
@@ -24,65 +23,70 @@ mod spec_goldens;
 
 use std::borrow::Cow;
 use std::fs;
-use std::path::Path;
 
 use astra_game_launcher::{LauncherError, Manifest, codes, link_digest, toml_newlines};
+use serde_json::Value;
 
-/// AstraPlugins PR #134's head: the commit the vendored inputs are copied from.
-const PR_HEAD: &str = "3177e797326db167360e526edb76789cb5ba6d8a";
+/// The `link.digest` vectors AstraPlugins PR #134 wrote: the pinned list must hold each of them.
+const KNOWN: [&str; 4] = ["game-specific-link", "edge", "crlf", "crlf-as-lf"];
 
-/// One `link.digest` vector of #134's `testdata/games/vectors.json`.
+/// One `link.digest` vector of the pinned `testdata/games/vectors.json`.
 struct Vector {
-    name: &'static str,
-    /// Its input, in `tests/goldens/astraplugins-pr134/`.
-    file: &'static str,
-    /// Its path in AstraPlugins, below `testdata/games/`.
-    spec_path: &'static str,
-    /// The input's git blob id at [`PR_HEAD`].
-    blob: &'static str,
-    digest: &'static str,
+    name: String,
+    /// Its input, below `testdata/games/` (the record's `manifest`).
+    input: String,
+    digest: String,
+    /// The record's `crlf`: the input's lines end in CRLF, which the digest reads as LF.
+    crlf: bool,
 }
 
-const VECTORS: [Vector; 4] = [
-    Vector {
-        name: "game-specific-link",
-        file: "game-specific-link.toml",
-        spec_path: "manifests/valid/game-specific-link.toml",
-        blob: "dc08074cf101f51a4626340a6f1dc291455ba369",
-        digest: "e26a440ebf1c3cacc9891fc8b031d9c0d8cbde9276ceeba68d1866a972a35ea2",
-    },
-    // Keys out of order, non-ASCII, a quote, a backslash, an empty array, absent keys absent.
-    Vector {
-        name: "edge",
-        file: "edge.toml",
-        spec_path: "link/digest/edge.toml",
-        blob: "47b2fb4cef729eee711e73899363c5a4098e0200",
-        digest: "e1ddacccb882c0a240d26f933b883cc9ea23da7e50cfb3679c432539d5b95dd2",
-    },
-    // CRLF line endings and a multi-line string whose own newlines are CRLF too; `-text` in
-    // AstraPlugins' `.gitattributes` (mirrored at `tests/goldens/astraplugins-pr134/.gitattributes`)
-    // keeps the bytes that way. Must equal `crlf-as-lf` below.
-    Vector {
-        name: "crlf",
-        file: "crlf.toml",
-        spec_path: "link/digest/crlf.toml",
-        blob: "0d5300ed8d56997dbfb87b43d3c93de1667c233e",
-        digest: "1c6ac6ebe826e018f2b91766c97fcb6a28a438644736c4711176ebb81eac6527",
-    },
-    // The same table, LF line endings throughout.
-    Vector {
-        name: "crlf-as-lf",
-        file: "crlf-as-lf.toml",
-        spec_path: "link/digest/crlf-as-lf.toml",
-        blob: "3161c679c7c59a5d7c733b10319f161bfeea2c32",
-        digest: "1c6ac6ebe826e018f2b91766c97fcb6a28a438644736c4711176ebb81eac6527",
-    },
-];
+/// Every `link.digest` vector at the pin, in its order. A record key this file does not read
+/// fails here, so a vector that one day says more than an input and its digest (a refusal, a
+/// TOML version) is read before it can pass for one that does not.
+fn vectors() -> Vec<Vector> {
+    let list = spec_goldens::vectors()["link"]["digest"]
+        .as_array()
+        .expect("vectors.json: link.digest is not an array");
+    list.iter()
+        .map(|r| {
+            let r = r.as_object().expect("vectors.json: a link.digest record is not an object");
+            for k in r.keys() {
+                assert!(
+                    matches!(k.as_str(), "name" | "manifest" | "digest" | "crlf" | "note"),
+                    "vectors.json: link.digest record {r:?} has {k:?}, which this file does not read"
+                );
+            }
+            let text = |k: &str| {
+                r.get(k)
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| panic!("vectors.json: link.digest {r:?} has no {k}"))
+                    .to_owned()
+            };
+            Vector {
+                name: text("name"),
+                input: text("manifest"),
+                digest: text("digest"),
+                crlf: match r.get("crlf") {
+                    None => false,
+                    Some(Value::Bool(b)) => *b,
+                    Some(x) => panic!("vectors.json: link.digest {r:?}: crlf = {x}"),
+                },
+            }
+        })
+        .collect()
+}
 
-fn fixture(file: &str) -> Vec<u8> {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/goldens/astraplugins-pr134")
-        .join(file);
+/// The pinned vector `name`.
+fn vector(name: &str) -> Vector {
+    vectors()
+        .into_iter()
+        .find(|v| v.name == name)
+        .unwrap_or_else(|| panic!("vectors.json at the pin has no link.digest vector {name:?}"))
+}
+
+/// The input's bytes, as vendored (and proven) at the pin.
+fn input(v: &Vector) -> Vec<u8> {
+    let p = spec_goldens::root().join("testdata/games").join(&v.input);
     fs::read(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
 }
 
@@ -101,63 +105,63 @@ fn digest_of(text: &str) -> Result<Option<String>, LauncherError> {
 }
 
 #[test]
-fn both_vectors_of_the_spec_are_this_digest() {
-    for v in &VECTORS {
-        let bytes = fixture(v.file);
-        assert_eq!(
-            spec_goldens::git_id("blob", &bytes),
-            v.blob,
-            "{}: not {} at {PR_HEAD}",
-            v.file,
-            v.spec_path
+fn every_vector_of_the_spec_is_this_digest() {
+    let all = vectors();
+    for name in KNOWN {
+        assert!(
+            all.iter().any(|v| v.name == name),
+            "vectors.json at the pin lost the link.digest vector {name:?}"
         );
+    }
+    for v in &all {
+        let bytes = input(v);
+        // Each input's line endings are what its record says, so a checkout that normalised
+        // them (the `-text` in `tests/goldens/.gitattributes` is what stops git doing it) fails
+        // here instead of testing the LF file twice.
+        assert_eq!(
+            bytes.windows(2).any(|w| w == b"\r\n"),
+            v.crlf,
+            "{}: {} CRLF bytes",
+            v.name,
+            if v.crlf { "lost its" } else { "has" }
+        );
+        if !v.crlf {
+            assert!(!bytes.contains(&b'\r'), "{}: a CR in an LF input", v.name);
+        }
         let text = String::from_utf8(bytes).unwrap();
         assert_eq!(
             digest_of(&text).unwrap().as_deref(),
-            Some(v.digest),
+            Some(v.digest.as_str()),
             "{}",
             v.name
         );
     }
 }
 
-/// `crlf` and `crlf-as-lf` (not only via the shared digest literal above, but cross-checked
-/// against each other independently), and proof the CRLF golden still holds real `\r\n` bytes —
-/// so a future `.gitattributes`/checkout normalisation that silently turned it to LF would fail
-/// loudly here instead of leaving this suite vacuously green.
+/// `crlf` and `crlf-as-lf`: the same table, so the same digest — cross-checked against each
+/// other as computed, not only each against its record.
 #[test]
 fn crlf_and_crlf_as_lf_golden_vectors_are_equal() {
-    let crlf_bytes = fixture(VECTORS[2].file);
-    let lf_bytes = fixture(VECTORS[3].file);
-    assert!(
-        crlf_bytes.windows(2).any(|w| w == b"\r\n"),
-        "{} lost its CRLF bytes",
-        VECTORS[2].file
-    );
-    assert!(
-        !lf_bytes.contains(&b'\r'),
-        "{} must hold no CR at all",
-        VECTORS[3].file
-    );
-    let crlf_digest = digest_of(&String::from_utf8(crlf_bytes).unwrap()).unwrap();
-    let lf_digest = digest_of(&String::from_utf8(lf_bytes).unwrap()).unwrap();
+    let (crlf, lf) = (vector("crlf"), vector("crlf-as-lf"));
+    assert!(crlf.crlf && !lf.crlf, "the records' crlf flags");
+    assert_eq!(crlf.digest, lf.digest, "the records' digests");
+    let crlf_digest = digest_of(&String::from_utf8(input(&crlf)).unwrap()).unwrap();
+    let lf_digest = digest_of(&String::from_utf8(input(&lf)).unwrap()).unwrap();
     assert_eq!(crlf_digest, lf_digest, "crlf must equal crlf-as-lf");
-    assert_eq!(crlf_digest.as_deref(), Some(VECTORS[2].digest));
+    assert_eq!(crlf_digest.as_deref(), Some(crlf.digest.as_str()));
 }
 
 /// The first vector is a whole manifest: through [`Manifest::parse`], as `gi-probe check` reads
-/// it, the same digest. And it is the golden vendored at the pin byte for byte, which is what
-/// lets `tests/gi_probe.rs` hold `check`'s report to the vector.
+/// it (`tests/gi_probe.rs` holds `check`'s report to the same vector), the same digest.
 #[test]
 fn a_parsed_manifest_gives_the_vectors_digest() {
-    let v = &VECTORS[0];
-    let bytes = fixture(v.file);
-    let pinned = spec_goldens::root()
-        .join("testdata/games")
-        .join(v.spec_path);
-    assert_eq!(bytes, fs::read(&pinned).unwrap(), "{}", pinned.display());
-    let m = Manifest::parse(std::str::from_utf8(&bytes).unwrap()).unwrap();
-    assert_eq!(link_digest(m.link()).unwrap().as_deref(), Some(v.digest));
+    let v = vector("game-specific-link");
+    assert_eq!(v.input, "manifests/valid/game-specific-link.toml");
+    let m = Manifest::parse(std::str::from_utf8(&input(&v)).unwrap()).unwrap();
+    assert_eq!(
+        link_digest(m.link()).unwrap().as_deref(),
+        Some(v.digest.as_str())
+    );
 }
 
 /// JCS sorts members, so neither the order keys are written in nor TOML's spelling of a table
@@ -177,7 +181,7 @@ params = "astra/tools/wave.json"
 "#;
     assert_eq!(
         digest_of(reordered).unwrap().as_deref(),
-        Some(VECTORS[1].digest)
+        Some(vector("edge").digest.as_str())
     );
 }
 
@@ -289,15 +293,15 @@ fn a_number_float_or_datetime_is_refused_never_digested() {
 /// (`tomllib` replaces every CRLF of the text before it parses; the `toml` crate keeps it): a
 /// release checked out with git's `autocrlf` on Windows has the LF file's digest. A `\r` written
 /// as an escape keeps its CR either way. The game-specific-link vector, its tool's description
-/// rewritten; each expected digest is #134's reference (`tomllib` and `tools/contentlite.py`'s
-/// JCS) and JavaScript's JCS over the same parse.
+/// rewritten; each expected digest is AstraPlugins' reference (`tomllib` and
+/// `tools/contentlite.py`'s JCS, as computed for #134) and JavaScript's JCS over the same parse.
 #[test]
 fn a_crlf_checkout_is_the_lf_files_digest() {
     const LF_IN_THE_STRING: &str =
         "24cc58cc7f228aecde0af2c009ba96b45b1dec8840010b9ce625c1398abc8de1";
     const CRLF_IN_THE_STRING: &str =
         "6980874cd460b6f7eb37b074eb03fcb8d22fabea552c8c6404444dc355b3052f";
-    let golden = String::from_utf8(fixture(VECTORS[0].file)).unwrap();
+    let golden = String::from_utf8(input(&vector("game-specific-link"))).unwrap();
     let line = "description = \"Drop the item the player holds\"";
     assert_eq!(golden.matches(line).count(), 1);
     assert!(!golden.contains('\r'));
