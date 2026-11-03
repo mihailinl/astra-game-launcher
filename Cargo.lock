@@ -34,10 +34,27 @@ dependencies = [
 [[package]]
 name = "astra-game-launcher"
 version = "0.5.0"
+source = "git+https://github.com/mihailinl/astra-game-launcher?rev=6d1851b6d86f3dea4ef2e1a06d26b583530a040a#6d1851b6d86f3dea4ef2e1a06d26b583530a040a"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml",
+ "windows-sys 0.61.2",
+ "zip 9.2.1",
+]
+
+[[package]]
+name = "astra-game-launcher"
+version = "0.5.1"
 dependencies = [
  "astra-game-launcher 0.3.1",
  "astra-game-launcher 0.4.1",
- "astra-game-launcher 0.5.0 (git+https://github.com/mihailinl/astra-game-launcher?rev=6d1851b6d86f3dea4ef2e1a06d26b583530a040a)",
+ "astra-game-launcher 0.5.0",
  "crc32fast",
  "flate2",
  "hex",
@@ -51,23 +68,6 @@ dependencies = [
  "toml_edit",
  "unicode-normalization",
  "ureq",
- "windows-sys 0.61.2",
- "zip 9.2.1",
-]
-
-[[package]]
-name = "astra-game-launcher"
-version = "0.5.0"
-source = "git+https://github.com/mihailinl/astra-game-launcher?rev=6d1851b6d86f3dea4ef2e1a06d26b583530a040a#6d1851b6d86f3dea4ef2e1a06d26b583530a040a"
-dependencies = [
- "crc32fast",
- "flate2",
- "hex",
- "libc",
- "serde",
- "serde_json",
- "sha2",
- "toml",
  "windows-sys 0.61.2",
  "zip 9.2.1",
 ]

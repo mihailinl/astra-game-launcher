@@ -566,7 +566,7 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
 
 ```json
 {"schema": "astra.gi-probe/1",
- "tool": {"version": "0.5.0", "source_tree_sha256": "<hex>"},
+ "tool": {"version": "0.5.1", "source_tree_sha256": "<hex>"},
  "subcommand": "compat", "verdict": "pass",
  "input": {}, "source": {}, "against": {"astra": {}, "launcher": {}},
  "steps": [{"step": 1, "check": "…", "status": "pass"}],
@@ -831,7 +831,7 @@ algorithm) and bakes it in:
 
 ```
 astra-game-launcher --version
-# astra-game-launcher 0.5.0 (source tree sha256 <hex>)
+# astra-game-launcher 0.5.1 (source tree sha256 <hex>)
 ```
 
 Astra's own release notes / About screen show the same hash for the commit it pinned. A GitHub
@@ -841,7 +841,7 @@ a hash you compute yourself. Recompute it from a clone of a tag with one line (r
 and `sha256sum`; `scripts/tree-hash.sh` is this same command, runnable against any directory):
 
 ```bash
-V=0.5.0 REPO=https://github.com/mihailinl/astra-game-launcher
+V=0.5.1 REPO=https://github.com/mihailinl/astra-game-launcher
 rm -rf /tmp/astra-gl-verify && mkdir -p /tmp/astra-gl-verify && \
 git clone --quiet --depth 1 --branch "v$V" "$REPO" /tmp/astra-gl-verify/src && \
 cd /tmp/astra-gl-verify/src && git archive "v$V" | tar -x -C /tmp/astra-gl-verify && \
