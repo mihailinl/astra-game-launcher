@@ -585,7 +585,9 @@ pub fn vac_verdict(
 ///
 /// **Before the update's files land** (0.5.2): for a Steam app (`appid`, the trusted one), the
 /// programs Steam's launch entries name ([`launch_programs`], every entry of a game's kind for the
-/// game's OS — `windows` under Proton) are held to the same signatures and markers by name
+/// game's OS — `windows` under Proton — a beta branch's only when the app's manifest says it is
+/// on that branch, [`crate::steam_app_branches`], and all of them when no manifest is found)
+/// are held to the same signatures and markers by name
 /// ([`anti_cheat_in_paths`]): Steam rewrites them when the app changes, before it downloads the
 /// depot, so a launch entry that became `start_protected_game.exe` (Easy Anti-Cheat),
 /// `EAAntiCheat.GameServiceLauncher.exe` (EA Javelin) or a `BEService*.exe` (BattlEye) refuses
@@ -612,8 +614,10 @@ pub(crate) fn refuse_anti_cheat(
         Platform::LinuxNative => "linux",
         Platform::Windows | Platform::LinuxProton { .. } => "windows",
     };
+    // A beta branch's entries count only for a person on it; not known, every one counts.
+    let branches = crate::game::steam_app_branches(&game.dir, appid);
     for file in appinfo_files(game) {
-        let Some(programs) = launch_programs(&file, appid, os) else {
+        let Some(programs) = launch_programs(&file, appid, os, branches.as_deref()) else {
             continue;
         };
         if let Some(kind) = anti_cheat_in_paths(&programs, engines).into_iter().next() {

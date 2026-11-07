@@ -755,7 +755,10 @@ to = "${astra_pack_inbox}/"
   install itself, writing nothing. A game that gained an anti-cheat after it was installed (an
   update added one, a driver was installed) never starts with the integration. For a Steam app
   the programs its launch entries name (`launch_programs`: every entry of a game's kind for the
-  game's OS, in every `appinfo.vdf` read for VAC) are held to the same names and markers
+  game's OS, in every `appinfo.vdf` read for VAC; an entry tied to beta branches only when the
+  app's manifest says it is on one of them, `steam_app_branches`, the `BetaKey` under
+  `UserConfig` or `MountedConfig`, and every one when no manifest is found) are held to the same
+  names and markers
   (`anti_cheat_in_paths`): Steam rewrites them before it downloads an update, so an update that
   points the game at `start_protected_game.exe`, `EAAntiCheat.GameServiceLauncher.exe` or a
   `BEService*.exe` is refused as that anti-cheat before its files land (one pass over each
@@ -763,7 +766,9 @@ to = "${astra_pack_inbox}/"
   while Steam has an update for the game it has not finished (the app's `StateFlags` in its
   library's `appmanifest_<appid>.acf`, `steam_app_state`, carry an update bit,
   `STEAM_UPDATE_STATES`; never "fully installed", a stale "app running", a validation or a
-  leftover byte count): Steam would install it before it starts the game, so what Play checked
+  leftover byte count; the library is looked up from the game folder as the caller names it
+  before the folder resolved, so a library folder linked to another disk is still in its
+  library): Steam would install it before it starts the game, so what Play checked
   would not be what starts. `launch` asks the anti-cheat gate (with the caller's markers then)
   and Steam's state again, under the profile lock, right before it spawns; a refusal there starts
   nothing and writes no play-arm. An update Steam has not learned of when it is asked to start

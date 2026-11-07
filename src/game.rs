@@ -232,17 +232,89 @@ pub fn steam_update_states(state_flags: u32) -> Vec<&'static str> {
 }
 
 /// Steam app `appid`'s `StateFlags`, from the `steamapps/appmanifest_<appid>.acf` of the library
-/// holding `game_dir` (the library's `steamapps/common/<folder>` is `game_dir` or one of its
-/// parents). `None` when the folder is in no Steam library, or the manifest is absent, not a
-/// regular file, larger than any Steam writes (1 MiB), unreadable, or gives no decimal
-/// `StateFlags` at its top level: nothing is known then, and nothing is refused on it.
+/// holding `game_dir` ([`steam_app_manifest`]). `None` when no such manifest is found: nothing is
+/// known then, and nothing is refused on it.
 pub fn steam_app_state(game_dir: &Path, appid: u32) -> Option<u32> {
+    manifest_state(&steam_app_manifest(game_dir, appid)?)
+}
+
+/// Steam's name for an app's default branch, as the `BetaKey` of a launch entry may spell it
+/// ([`steam_app_branches`]).
+pub const STEAM_DEFAULT_BRANCH: &str = "public";
+
+/// The branches Steam app `appid` is on, from the manifest [`steam_app_state`] reads: the
+/// `BetaKey` under `UserConfig` (the branch the person chose) and under `MountedConfig` (the one
+/// whose files are in the folder), each once, ignoring ASCII case; an absent or empty one is the
+/// default branch, [`STEAM_DEFAULT_BRANCH`]. The two differ while Steam has not finished moving
+/// the game to the chosen branch. This desk's real manifests (2026-11-07, 30 apps in three
+/// libraries): no `BetaKey` at all on the default branch, and `"BetaKey" "internal"` under both
+/// objects for an app on its `internal` branch.
+///
+/// `None` when no manifest is found: which branch is played is not known then.
+pub fn steam_app_branches(game_dir: &Path, appid: u32) -> Option<Vec<String>> {
+    let text = steam_app_manifest(game_dir, appid)?;
+    let mut out: Vec<String> = Vec::new();
+    for object in ["UserConfig", "MountedConfig"] {
+        let key = acf_at(&text, &[object, "BetaKey"]).unwrap_or_default();
+        let key = match key.trim() {
+            "" => STEAM_DEFAULT_BRANCH,
+            k => k,
+        };
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(key)) {
+            out.push(key.to_owned());
+        }
+    }
+    Some(out)
+}
+
+/// The text of Steam app `appid`'s `steamapps/appmanifest_<appid>.acf` in the library holding
+/// `game_dir` (the library's `steamapps/common/<folder>` is `game_dir` or one of its parents).
+/// The library is looked up from `game_dir` as the caller spells it (made absolute, links NOT
+/// resolved) first, then from `game_dir` resolved: a library's folder may be a link to another
+/// disk (`steamapps/common/Game -> /mnt/games/Game`, a Windows junction), and resolved first it
+/// would lie in no library at all. The first manifest found that is Steam's wins.
+///
+/// `None` when the folder is in no Steam library, or the manifest is absent, not a regular file,
+/// larger than any Steam writes (1 MiB), unreadable, or gives no decimal `StateFlags` at its top
+/// level (not Steam's): nothing is known then.
+fn steam_app_manifest(game_dir: &Path, appid: u32) -> Option<String> {
+    let mut tried: Vec<PathBuf> = Vec::new();
+    for dir in [
+        std::path::absolute(game_dir).ok(),
+        std::fs::canonicalize(game_dir).ok(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if tried.contains(&dir) {
+            continue;
+        }
+        let text = library_of(&dir).and_then(|steamapps| {
+            let path = steamapps.join(format!("appmanifest_{appid}.acf"));
+            let meta = std::fs::metadata(&path).ok()?;
+            if !meta.is_file() || meta.len() > 1 << 20 {
+                return None;
+            }
+            std::fs::read_to_string(&path).ok()
+        });
+        if let Some(text) = text.filter(|t| manifest_state(t).is_some()) {
+            return Some(text);
+        }
+        tried.push(dir);
+    }
+    None
+}
+
+/// The `steamapps` folder of the library holding `dir`: the first of `dir` and its parents that
+/// sits in a folder named `common` inside one named `steamapps` (names compared ignoring ASCII
+/// case), as spelled — nothing is resolved here.
+fn library_of(dir: &Path) -> Option<&Path> {
     let is = |p: Option<&Path>, name: &str| {
         p.and_then(Path::file_name)
             .and_then(|n| n.to_str())
             .is_some_and(|n| n.eq_ignore_ascii_case(name))
     };
-    let steamapps = game_dir.ancestors().find_map(|folder| {
+    dir.ancestors().find_map(|folder| {
         let common = folder.parent();
         let steamapps = common.and_then(Path::parent);
         if is(common, "common") && is(steamapps, "steamapps") {
@@ -250,25 +322,32 @@ pub fn steam_app_state(game_dir: &Path, appid: u32) -> Option<u32> {
         } else {
             None
         }
-    })?;
-    let path = steamapps.join(format!("appmanifest_{appid}.acf"));
-    let meta = std::fs::metadata(&path).ok()?;
-    if !meta.is_file() || meta.len() > 1 << 20 {
-        return None;
-    }
-    let text = std::fs::read_to_string(&path).ok()?;
-    acf_value(&text, "StateFlags")?.trim().parse().ok()
+    })
+}
+
+/// A manifest's top-level `StateFlags`, when it is decimal.
+fn manifest_state(text: &str) -> Option<u32> {
+    acf_value(text, "StateFlags")?.trim().parse().ok()
 }
 
 /// A top-level value of an `appmanifest_*.acf` (Valve's text KeyValues: `"AppState" { "key"
 /// "value" ... }`): the first `"key" "value"` pair directly inside the root object, key compared
 /// ignoring ASCII case. Nested objects are skipped.
 fn acf_value(text: &str, key: &str) -> Option<String> {
+    acf_at(text, &[key])
+}
+
+/// The value at `path` below an `appmanifest_*.acf`'s root object: `["StateFlags"]` directly
+/// inside it, `["UserConfig", "BetaKey"]` inside its `UserConfig` object. The first `"key"
+/// "value"` pair whose objects and key match `path`, each compared ignoring ASCII case; any other
+/// object is walked over.
+fn acf_at(text: &str, path: &[&str]) -> Option<String> {
     enum Tok {
         Str(String),
         Open,
         Close,
     }
+    let (key, objects) = path.split_last()?;
     let mut toks = Vec::new();
     let mut chars = text.chars();
     while let Some(c) = chars.next() {
@@ -289,14 +368,27 @@ fn acf_value(text: &str, key: &str) -> Option<String> {
             _ => {}
         }
     }
-    let mut depth = 0usize;
+    // The names of the objects open at this point, the root's first ("" for an unnamed one).
+    let mut open: Vec<&str> = Vec::new();
     let mut i = 0;
     while i < toks.len() {
         match (&toks[i], toks.get(i + 1)) {
-            (Tok::Open, _) => depth += 1,
-            (Tok::Close, _) => depth = depth.saturating_sub(1),
+            (Tok::Str(name), Some(Tok::Open)) => {
+                open.push(name);
+                i += 1;
+            }
+            (Tok::Open, _) => open.push(""),
+            (Tok::Close, _) => {
+                open.pop();
+            }
             (Tok::Str(k), Some(Tok::Str(v))) => {
-                if depth == 1 && k.eq_ignore_ascii_case(key) {
+                if open.len() == objects.len() + 1
+                    && k.eq_ignore_ascii_case(key)
+                    && open[1..]
+                        .iter()
+                        .zip(objects)
+                        .all(|(a, b)| a.eq_ignore_ascii_case(b))
+                {
                     return Some(v.clone());
                 }
                 i += 1;
@@ -322,5 +414,18 @@ mod tests {
             acf_value("\"AppState\" { \"appid\" \"unterminated", "appid"),
             None
         );
+    }
+
+    /// A value inside a named object: only there, never the same key elsewhere or deeper.
+    #[test]
+    fn acf_values_are_read_inside_the_object_named() {
+        let acf = "\"AppState\"\n{\n\t\"BetaKey\"\t\"top\"\n\t\"InstalledDepots\"\n\t{\n\t\t\"UserConfig\"\n\t\t{\n\t\t\t\"BetaKey\"\t\"deep\"\n\t\t}\n\t}\n\t\"userconfig\"\n\t{\n\t\t\"language\"\t\"english\"\n\t\t\"BETAKEY\"\t\"public_test\"\n\t}\n\t\"MountedConfig\"\n\t{\n\t}\n}\n";
+        assert_eq!(
+            acf_at(acf, &["UserConfig", "BetaKey"]).as_deref(),
+            Some("public_test")
+        );
+        assert_eq!(acf_at(acf, &["MountedConfig", "BetaKey"]), None);
+        assert_eq!(acf_at(acf, &["BetaKey"]).as_deref(), Some("top"));
+        assert_eq!(acf_at(acf, &[]), None);
     }
 }

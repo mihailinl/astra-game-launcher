@@ -110,7 +110,7 @@ impl Gate {
     /// update Steam has not finished ([`refuse_update_pending`]).
     fn refuse(&self, engines: &EngineSet) -> Result<()> {
         refuse_anti_cheat(&self.game, &self.game_dir, self.trusted, engines)?;
-        refuse_update_pending(&self.game_dir, self.trusted)
+        refuse_update_pending(&self.game.dir, self.trusted)
     }
 }
 
@@ -125,9 +125,12 @@ impl ProcessPlan {
 
 /// `game-update-pending` when Steam will change the game's files before it starts it: the
 /// `StateFlags` of `appid` in the library holding `game_dir` ([`crate::steam_app_state`]) carry
-/// an update bit ([`crate::STEAM_UPDATE_STATES`]), `state` naming them. Nothing is refused for a
-/// game outside a Steam library, with no appid, or whose manifest cannot be read: Steam's own
-/// state is not known then, and the folder's anti-cheat is checked all the same.
+/// an update bit ([`crate::STEAM_UPDATE_STATES`]), `state` naming them. `game_dir` is the
+/// caller's spelling ([`GameTarget::dir`]), never the folder resolved: a library's folder may be
+/// a link to another disk, and resolved it would lie in no library (the reader tries both, the
+/// caller's first). Nothing is refused for a game outside a Steam library, with no appid, or
+/// whose manifest cannot be read: Steam's own state is not known then, and the folder's
+/// anti-cheat is checked all the same.
 fn refuse_update_pending(game_dir: &Path, appid: Option<u32>) -> Result<()> {
     let Some(appid) = appid else {
         return Ok(());
@@ -562,7 +565,7 @@ pub fn prepare_launch_with(
     refuse_anti_cheat(game, &game_dir, trusted, engines)?;
     // An update Steam knows of and has not finished: Steam would install it before it starts the
     // game, so what was just checked would not be what starts. `launch` asks both again.
-    refuse_update_pending(&game_dir, trusted)?;
+    refuse_update_pending(&game.dir, trusted)?;
 
     // Every variable present, and safe where it goes.
     for name in m.variables() {

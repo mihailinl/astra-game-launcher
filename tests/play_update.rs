@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 
 use astra_game_launcher::{
     AntiCheatMarker, AntiCheatMarkerKind, EngineSet, LauncherError, PLAY_ARM_FILE_NAME, Platform,
-    ProcessPlan, STEAM_UPDATE_STATES, Spawn, codes, launch, prepare_launch, steam_app_state,
-    steam_update_states,
+    ProcessPlan, STEAM_UPDATE_STATES, Spawn, codes, launch, prepare_launch, steam_app_branches,
+    steam_app_state, steam_update_states,
 };
 use common::*;
 
@@ -261,4 +261,97 @@ fn a_plan_read_back_is_spawned_as_it_is() {
     launch(&back, &spawn, &EngineSet::empty()).unwrap();
     assert_eq!(*spawn.0.borrow(), 1);
     assert!(!w.arm().exists());
+}
+
+/// **A library's folder linked to another disk** (`steamapps/common/Game -> /mnt/games/Game`; on
+/// Windows a junction): the game's files lie in no Steam library once the link is resolved, so
+/// Steam's manifest is looked up from the folder as the caller names it, first. An update Steam
+/// has not finished refuses Play, and `launch` asks again through the same link; the branch the
+/// app is on is read there too.
+///
+/// Mutations (watched red): `refuse_update_pending` handed the resolved folder in
+/// `prepare_launch_with`, then in `Gate::refuse`; `steam_app_manifest` without its unresolved
+/// candidate.
+#[cfg(unix)]
+#[test]
+fn a_linked_library_folder_is_checked_through_its_link() {
+    let lib = Tmp::new("upd-link-lib");
+    let disk = Tmp::new("upd-link-disk");
+    let real = disk.join("Game");
+    unity_game(&real, "Game");
+    let link = lib.join("steamapps/common/Game");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let manifest = lib.join(&format!("steamapps/appmanifest_{APPID}.acf"));
+    let state = |flags: &str, beta: &str| {
+        write(
+            &manifest,
+            format!(
+                "\"AppState\"\n{{\n\t\"appid\"\t\t\"{APPID}\"\n\t\"StateFlags\"\t\t\"{flags}\"\n\t\"installdir\"\t\t\"Game\"\n\t\"UserConfig\"\n\t{{\n\t\t\"BetaKey\"\t\t\"{beta}\"\n\t}}\n}}\n"
+            )
+            .as_bytes(),
+        );
+    };
+    state("4", "");
+    let profiles = Tmp::new("upd-link-profiles");
+    let profile = profiles.join("p");
+    let game = target(&link, "Game.exe", Some(APPID), Platform::Windows);
+    plan_and_install(&runner(), &game, &profile);
+    let prepare = || {
+        prepare_launch(
+            &profile,
+            &game,
+            &vars(),
+            Some(Path::new("/opt/fake/steam")),
+            &EngineSet::empty(),
+        )
+    };
+    let play = || {
+        prepare()
+            .err()
+            .map(|e| (e.code.to_owned(), e.params.get("state").cloned()))
+    };
+    assert_eq!(play(), None, "fully installed: it plays");
+    assert!(
+        fs::canonicalize(&link).unwrap().ancestors().all(|a| a
+            .file_name()
+            .is_none_or(|n| !n.eq_ignore_ascii_case("steamapps"))),
+        "resolved, the folder lies in no library"
+    );
+
+    state("6", "");
+    assert_eq!(steam_app_state(&link, APPID), Some(6));
+    assert_eq!(steam_app_state(&link.join("Game_Data"), APPID), Some(6));
+    assert_eq!(
+        steam_app_state(&real, APPID),
+        None,
+        "the resolved folder alone"
+    );
+    assert_eq!(play(), pending("update-required"));
+
+    // Steam began the update after Play was prepared: `launch` asks through the link again.
+    state("4", "");
+    let plan = prepare().unwrap();
+    state("1030", "");
+    let spawn = Count(RefCell::new(0));
+    let e = launch(&plan, &spawn, &EngineSet::empty()).unwrap_err();
+    assert_eq!(
+        (e.code, e.param("state")),
+        (
+            codes::GAME_UPDATE_PENDING,
+            Some("update-required,update-started")
+        )
+    );
+    assert_eq!(*spawn.0.borrow(), 0, "nothing started");
+    state("4", "");
+    launch(&plan, &spawn, &EngineSet::empty()).unwrap();
+    assert_eq!(*spawn.0.borrow(), 1);
+
+    // The branch, through the same link.
+    state("4", "public_test");
+    assert_eq!(
+        steam_app_branches(&link, APPID),
+        Some(vec!["public_test".to_owned(), "public".to_owned()])
+    );
+    assert_eq!(steam_app_branches(&real, APPID), None);
 }

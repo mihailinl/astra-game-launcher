@@ -1369,9 +1369,9 @@ fn an_accepted_unread_flag_never_covers_a_vac_flag_at_play() {
 }
 
 /// `launch_programs` lists every entry a person may be started with on an OS — the default, a
-/// beta branch's, an `option<N>` — never another type, a URL or another OS's, each once, in the
-/// file's order; `None` for an app with no launch config, one not in the file, and a file cut
-/// short.
+/// beta branch's (every one while the branch is not known), an `option<N>` — never another type,
+/// a URL or another OS's, each once, in the file's order; `None` for an app with no launch
+/// config, one not in the file, and a file cut short.
 #[test]
 fn launch_programs_lists_every_entry_a_person_may_start() {
     for magic in [V28, V29] {
@@ -1380,32 +1380,36 @@ fn launch_programs_lists_every_entry_a_person_may_start() {
         let path = world.join("appinfo.vdf");
         std::fs::write(&path, &bytes).unwrap();
         assert_eq!(
-            launch_programs(&path, APP, "windows"),
+            launch_programs(&path, APP, "windows", None),
             Some(vec![
                 "bin/x64/Beta.exe".to_owned(),
                 "MiSideFull.exe".to_owned()
             ])
         );
         assert_eq!(
-            launch_programs(&path, APP, "LINUX"),
+            launch_programs(&path, APP, "LINUX", None),
             Some(vec!["Game.x86_64".to_owned()])
         );
         assert_eq!(
-            launch_programs(&path, APP, "macos"),
+            launch_programs(&path, APP, "macos", None),
             Some(vec!["Game.app".to_owned()])
         );
         assert_eq!(
-            launch_programs(&path, 10, "windows"),
+            launch_programs(&path, 10, "windows", None),
             None,
             "no launch config"
         );
         assert_eq!(
-            launch_programs(&path, 12_345, "windows"),
+            launch_programs(&path, 12_345, "windows", None),
             None,
             "not in the file"
         );
         std::fs::write(&path, &bytes[..app_end - 3]).unwrap();
-        assert_eq!(launch_programs(&path, APP, "windows"), None, "cut short");
+        assert_eq!(
+            launch_programs(&path, APP, "windows", None),
+            None,
+            "cut short"
+        );
     }
     // Each program once, whatever its letter case; `option<N>` and `none` count.
     let world = Tmp::new("launch-programs-options");
@@ -1418,8 +1422,96 @@ fn launch_programs_lists_every_entry_a_person_may_start() {
     ];
     std::fs::write(&path, file(V29, &[(APP, app(APP, Some(launch)))]).0).unwrap();
     assert_eq!(
-        launch_programs(&path, APP, "windows"),
+        launch_programs(&path, APP, "windows", None),
         Some(vec!["Game.exe".to_owned(), "Safe.exe".to_owned()])
+    );
+}
+
+/// **A beta branch's launch entries count only on that branch** (0.5.2). `config/BetaKey` is a
+/// list in real files, separated by commas (this desk's Space Marine 2 PTS: `"dev_test,
+/// test_pts"`) or by spaces (Apex Legends: `"r5dev non_rebase_build r5-260 …"`),
+/// matched ignoring case against the branches the app is on; the default branch answers to
+/// `public` and `default` alike (Schedule I ties its own program to `default`), and a key spelled
+/// `-<branch>` (The Backrooms Deluxe 2's `-staging`) counts on every branch. An entry tied to no
+/// branch always counts, and with the branch not known (`None`) every entry does.
+///
+/// Mutation (watched red): `launch_programs` without its `on_branch` filter.
+#[test]
+fn a_beta_branchs_entries_count_only_on_that_branch() {
+    let world = Tmp::new("launch-programs-betas");
+    let path = world.join("appinfo.vdf");
+    let beta = |key: &'static str| vec![("oslist", Str("windows")), ("BetaKey", Str(key))];
+    let launch = vec![
+        ("0", entry("Game.exe", Some("default"), vec![])),
+        (
+            "1",
+            entry("Pts.exe", Some("default"), beta("dev_test, TEST_pts")),
+        ),
+        ("2", entry("Public.exe", Some("option1"), beta("public"))),
+        ("3", entry("Default.exe", Some("option2"), beta("default"))),
+        ("4", entry("NotStaging.exe", Some("none"), beta("-staging"))),
+        ("5", entry("Blank.exe", Some("option3"), beta(" , "))),
+        (
+            "6",
+            entry(
+                "R5.exe",
+                Some("option4"),
+                beta("r5dev non_rebase_build\tr5-310"),
+            ),
+        ),
+    ];
+    std::fs::write(&path, file(V29, &[(APP, app(APP, Some(launch)))]).0).unwrap();
+    let on = |branches: &[&str]| {
+        let branches: Vec<String> = branches.iter().map(|b| (*b).to_owned()).collect();
+        launch_programs(&path, APP, "windows", Some(&branches))
+    };
+    let names = |n: &[&str]| Some(n.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>());
+    let default_branch = names(&[
+        "Game.exe",
+        "Public.exe",
+        "Default.exe",
+        "NotStaging.exe",
+        "Blank.exe",
+    ]);
+    assert_eq!(on(&["public"]), default_branch);
+    assert_eq!(on(&["Default"]), default_branch);
+    assert_eq!(
+        on(&["test_pts"]),
+        names(&["Game.exe", "Pts.exe", "NotStaging.exe", "Blank.exe"])
+    );
+    assert_eq!(
+        on(&["public", "dev_test"]),
+        names(&[
+            "Game.exe",
+            "Pts.exe",
+            "Public.exe",
+            "Default.exe",
+            "NotStaging.exe",
+            "Blank.exe",
+        ]),
+        "moving between branches: both count"
+    );
+    assert_eq!(
+        on(&["other"]),
+        names(&["Game.exe", "NotStaging.exe", "Blank.exe"])
+    );
+    assert_eq!(
+        on(&["non_rebase_build"]),
+        names(&["Game.exe", "NotStaging.exe", "Blank.exe", "R5.exe"]),
+        "a list separated by spaces"
+    );
+    assert_eq!(
+        launch_programs(&path, APP, "windows", None),
+        names(&[
+            "Game.exe",
+            "Pts.exe",
+            "Public.exe",
+            "Default.exe",
+            "NotStaging.exe",
+            "Blank.exe",
+            "R5.exe",
+        ]),
+        "not known: every entry"
     );
 }
 
@@ -1543,4 +1635,127 @@ fn an_anti_cheat_steams_launch_entry_names_is_refused_before_its_files_land() {
     // Back to the game's own program: it plays.
     launches(plain());
     assert_eq!(play(&none), None);
+}
+
+/// **A beta's bootstrapper refuses only a person on that beta** (0.5.2). A public test branch
+/// whose launch entry moved to `start_protected_game.exe` refuses Play and planning for a person
+/// on it — the branch Steam's manifest names under `UserConfig` (chosen) or `MountedConfig` (in
+/// the folder) — and nobody on the default branch, whose folder is clean. Outside any Steam
+/// library the branch is not known, and the entry refuses (the safe side).
+///
+/// Mutation (watched red): `refuse_anti_cheat` passing `None` for the branches.
+#[test]
+fn a_betas_bootstrapper_refuses_only_a_person_on_that_beta() {
+    use astra_game_launcher::{EngineSet, plan_install_in, steam_app_branches};
+    let world = Tmp::new("launch-beta");
+    let path = world.join("appinfo.vdf");
+    let lib = Tmp::new("launch-beta-lib");
+    let dir = lib.join("steamapps/common/Some Game");
+    unity_game(&dir, "Some Game");
+    let manifest = lib.join(&format!("steamapps/appmanifest_{LAUNCHES}.acf"));
+    let on = |user: &str, mounted: &str| {
+        let beta = |b: &str| {
+            if b.is_empty() {
+                String::new()
+            } else {
+                format!("\t\t\"BetaKey\"\t\t\"{b}\"\n")
+            }
+        };
+        std::fs::write(
+            &manifest,
+            format!(
+                "\"AppState\"\n{{\n\t\"appid\"\t\t\"{LAUNCHES}\"\n\t\"StateFlags\"\t\t\"4\"\n\t\"installdir\"\t\t\"Some Game\"\n\t\"UserConfig\"\n\t{{\n\t\t\"language\"\t\t\"english\"\n{}\t}}\n\t\"MountedConfig\"\n\t{{\n\t\t\"language\"\t\t\"english\"\n{}\t}}\n}}\n",
+                beta(user),
+                beta(mounted)
+            ),
+        )
+        .unwrap();
+    };
+    on("", "");
+    let launches = |beta_exe: &'static str| {
+        let entries = vec![
+            ("0", entry("Some Game.exe", Some("default"), vec![])),
+            (
+                "1",
+                entry(
+                    beta_exe,
+                    Some("default"),
+                    vec![
+                        ("oslist", Str("windows")),
+                        ("BetaKey", Str("public_test, qa")),
+                    ],
+                ),
+            ),
+        ];
+        std::fs::write(
+            &path,
+            file(V29, &[(LAUNCHES, app(LAUNCHES, Some(entries)))]).0,
+        )
+        .unwrap();
+    };
+    launches("Some Game.exe");
+    let profiles = Tmp::new("launch-beta-profiles");
+    let mut at = target(&dir, "Some Game.exe", Some(LAUNCHES), Platform::Windows);
+    at.steam_appinfo = Some(path.clone());
+    plan_and_install(&runner(), &at, &profiles.join("p"));
+    let steam = Some(Path::new("/opt/fake/steam"));
+    let none = EngineSet::empty();
+    let play = |at: &astra_game_launcher::GameTarget| {
+        prepare_launch(&profiles.join("p"), at, &vars(), steam, &none)
+            .err()
+            .map(|e| (e.code.to_owned(), e.params.get("kind").cloned()))
+    };
+    let plan = |at: &astra_game_launcher::GameTarget| {
+        let fresh = Tmp::new("launch-beta-plan");
+        plan_install_in(
+            &runner(),
+            at,
+            &fresh.join("p"),
+            &none,
+            astra_game_launcher::Provenance::FirstParty,
+            None,
+        )
+        .err()
+        .map(|e| (e.code.to_owned(), e.params.get("kind").cloned()))
+    };
+    let eac = Some((
+        codes::ANTI_CHEAT.to_owned(),
+        Some("easy-anti-cheat".to_owned()),
+    ));
+    assert_eq!(play(&at), None, "nothing tied to a beta yet");
+
+    // The public test branch moved to Easy Anti-Cheat's bootstrapper.
+    launches("start_protected_game.exe");
+    assert_eq!(
+        steam_app_branches(&dir, LAUNCHES),
+        Some(vec!["public".to_owned()])
+    );
+    assert_eq!(play(&at), None, "the default branch: it plays");
+    assert_eq!(plan(&at), None, "and plans");
+    for (user, mounted) in [
+        ("public_test", "public_test"),
+        ("QA", ""),
+        ("", "public_test"),
+    ] {
+        on(user, mounted);
+        assert_eq!(play(&at), eac, "on {user:?} / {mounted:?}");
+        assert_eq!(plan(&at), eac, "planning, on {user:?} / {mounted:?}");
+    }
+    on("other_beta", "other_beta");
+    assert_eq!(play(&at), None, "another beta: it plays");
+    on("", "");
+    assert_eq!(play(&at), None);
+
+    // The same game outside any Steam library: the branch is not known, and the entry refuses.
+    let loose = Tmp::new("launch-beta-loose");
+    unity_game(loose.path(), "Some Game");
+    let mut away = target(
+        loose.path(),
+        "Some Game.exe",
+        Some(LAUNCHES),
+        Platform::Windows,
+    );
+    away.steam_appinfo = Some(path.clone());
+    assert_eq!(steam_app_branches(loose.path(), LAUNCHES), None);
+    assert_eq!(plan(&away), eac, "not known: refused");
 }

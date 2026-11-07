@@ -97,7 +97,7 @@ const T_END_ALT: u8 = 0x0B;
 /// first whose `type` is `default` (or absent). Real apps need two fallbacks, taken only when no
 /// such entry exists: a launch option of type `option<N>` or `none` (PEAK offers only
 /// `option1`–`option3` on Windows; Red Dead Redemption 2's one entry is `none`), and then an
-/// entry tied to a beta branch (`config/betakey`), which the default branch does not run. An
+/// entry tied to a beta branch (`config/BetaKey`), which the default branch does not run. An
 /// entry whose executable is a URL (`steam://…`) is not a program and never counts.
 ///
 /// `None` when the file is missing, unreadable or corrupt, the app is absent, or no entry fits.
@@ -122,17 +122,29 @@ pub fn launch_executables(
         .collect()
 }
 
-/// EVERY program Steam may start for `appid` on `os` when the person plays it: the executable of
-/// each launch entry of a game's kind (`type` `default`, absent, `none` or `option<N>`) whose
-/// `config/oslist` names `os` or is empty, beta-branch entries included (a person on that branch
-/// starts that one), relative to the game's folder with `/` separators, in the file's order,
-/// each once. A URL (`steam://…`) is no program. Steam rewrites these from its servers when the
-/// app changes, before an update's files are downloaded, so they can name a program the folder
-/// does not hold yet: what the anti-cheat gate planning and Play share reads them for.
+/// EVERY program Steam may start for `appid` on `os` when a person on `branches` plays it: the
+/// executable of each launch entry of a game's kind (`type` `default`, absent, `none` or
+/// `option<N>`) whose `config/oslist` names `os` or is empty, relative to the game's folder with
+/// `/` separators, in the file's order, each once. A URL (`steam://…`) is no program. Steam
+/// rewrites these from its servers when the app changes, before an update's files are
+/// downloaded, so they can name a program the folder does not hold yet: what the anti-cheat gate
+/// planning and Play share reads them for.
+///
+/// An entry tied to beta branches (`config/BetaKey`, a list separated by commas or spaces: this
+/// desk's real file has `"dev_test, test_pts"` and Apex Legends' `"r5dev non_rebase_build
+/// r5-260 …"`) counts only for a person on one of them ([`on_branch`]):
+/// `branches` are the ones the app is on ([`crate::steam_app_branches`]), so a public test
+/// branch that moved to an anti-cheat's bootstrapper refuses no one on the default branch.
+/// `None` for `branches` is not known (no manifest was found): every beta entry counts then.
 ///
 /// `None` when the file is missing, unreadable or corrupt, or the app is absent or has no
 /// `config/launch`: NOT KNOWN. `Some` of an empty list is an app none of whose entries fits.
-pub fn launch_programs(appinfo_path: &Path, appid: u32, os: &str) -> Option<Vec<String>> {
+pub fn launch_programs(
+    appinfo_path: &Path,
+    appid: u32,
+    os: &str,
+    branches: Option<&[String]>,
+) -> Option<Vec<String>> {
     let wanted = std::collections::BTreeSet::from([appid]);
     let app = read_apps(appinfo_path, &wanted).remove(&appid)?;
     let launch = LAUNCH_PATH
@@ -144,6 +156,11 @@ pub fn launch_programs(appinfo_path: &Path, appid: u32, os: &str) -> Option<Vec<
         let Some(entry) = game_entry(e, os) else {
             continue;
         };
+        if let Some(on) = branches
+            && !on_branch(&entry.betas, on)
+        {
+            continue;
+        }
         if !out.iter().any(|o| o.eq_ignore_ascii_case(&entry.exe)) {
             out.push(entry.exe);
         }
@@ -155,9 +172,31 @@ pub fn launch_programs(appinfo_path: &Path, appid: u32, os: &str) -> Option<Vec<
 struct GameEntry {
     /// `0` for `type` `default` (or absent), `1` for `none` or `option<N>`.
     kind_tier: u8,
-    /// Tied to a beta branch (`config/betakey`), which the default branch does not run.
-    beta: bool,
+    /// The beta branches it is tied to (`config/BetaKey`, split at its commas and white space,
+    /// the empty ones dropped); none for an entry every branch runs.
+    betas: Vec<String>,
     exe: String,
+}
+
+/// Whether a launch entry tied to `betas` (its `config/BetaKey`) is one a person on `branches`
+/// ([`crate::steam_app_branches`]) may start: an entry tied to none always is; otherwise one of
+/// `betas` names one of `branches`, ignoring ASCII case, the default branch being spelled
+/// `public` or `default` alike (this desk's real file ties Schedule I's own program to
+/// `default`). A key spelled `-<branch>` (The Backrooms Deluxe 2's `-staging`) may mean "every
+/// branch but that one", so such an entry counts for every branch: the anti-cheat gate errs
+/// towards refusing.
+pub(crate) fn on_branch(betas: &[String], branches: &[String]) -> bool {
+    let default = |b: &str| {
+        b.eq_ignore_ascii_case(crate::game::STEAM_DEFAULT_BRANCH)
+            || b.eq_ignore_ascii_case("default")
+    };
+    betas.is_empty()
+        || betas.iter().any(|b| {
+            b.starts_with('-')
+                || branches
+                    .iter()
+                    .any(|on| b.eq_ignore_ascii_case(on) || (default(b) && default(on)))
+        })
 }
 
 /// One launch entry when it starts the game on `os`: a game's kind (never `server`, `editor`,
@@ -197,7 +236,11 @@ fn game_entry(e: &Kv, os: &str) -> Option<GameEntry> {
         .and_then(normalise)?;
     Some(GameEntry {
         kind_tier,
-        beta: !field("betakey").is_empty(),
+        betas: field("BetaKey")
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|b| !b.is_empty())
+            .map(str::to_owned)
+            .collect(),
         exe,
     })
 }
@@ -326,10 +369,10 @@ fn pick(app: &Kv, os: &str) -> Option<String> {
     let ranked = launch.iter().enumerate().filter_map(|(i, (key, e))| {
         let GameEntry {
             kind_tier,
-            beta,
+            betas,
             exe,
         } = game_entry(e, os)?;
-        let beta_tier: u8 = if beta { 2 } else { 0 };
+        let beta_tier: u8 = if betas.is_empty() { 0 } else { 2 };
         let n = key.parse::<u32>().ok();
         Some(((beta_tier + kind_tier, n.is_none(), n, i), exe))
     });

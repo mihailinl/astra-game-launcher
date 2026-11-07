@@ -65,8 +65,9 @@ pub use fetch::UreqFetch;
 pub use fetch::{Fetch, MAX_DOWNLOAD_BYTES, fetch_verified};
 pub use former::FormerKind;
 pub use game::{
-    GameTarget, Platform, STEAM_UPDATE_STATES, proton_prefix_for, steam_app_state,
-    steam_appid_of_dir, steam_appids_of_dir, steam_update_states,
+    GameTarget, Platform, STEAM_DEFAULT_BRANCH, STEAM_UPDATE_STATES, proton_prefix_for,
+    steam_app_branches, steam_app_state, steam_appid_of_dir, steam_appids_of_dir,
+    steam_update_states,
 };
 pub use install::{
     KEPT_FOLDER_GAINED_FILES, UninstallReport, install, install_in, installed, restore_game_files,
