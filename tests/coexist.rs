@@ -627,7 +627,7 @@ fn launch_writes_the_play_arm_immediately_before_it_asks_steam_to_start_the_game
 
     let spawn = FakeSpawn::new(&w, false);
     let from = now_ms();
-    launch(&plan, &spawn).unwrap();
+    launch(&plan, &spawn, &no_markers()).unwrap();
     let to = now_ms();
 
     // Already there when Steam was asked.
@@ -654,7 +654,7 @@ fn launch_writes_the_play_arm_immediately_before_it_asks_steam_to_start_the_game
         "{ledger:?}"
     );
     let again = w.plan().unwrap();
-    launch(&again, &FakeSpawn::new(&w, false)).unwrap();
+    launch(&again, &FakeSpawn::new(&w, false), &no_markers()).unwrap();
     let next: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(w.play_arm()).unwrap()).unwrap();
     assert!(next["started_unix_ms"].as_u64().unwrap() >= started);
@@ -676,18 +676,23 @@ fn a_refusal_between_prepare_and_launch_leaves_no_arm() {
 #[test]
 fn a_spawn_that_fails_puts_back_what_was_there() {
     let w = World::installed();
-    let e = launch(&w.plan().unwrap(), &FakeSpawn::new(&w, true)).unwrap_err();
+    let e = launch(&w.plan().unwrap(), &FakeSpawn::new(&w, true), &no_markers()).unwrap_err();
     assert_eq!(e.code, codes::IO);
     assert!(
         !w.play_arm().exists(),
         "no arm for a launch that never happened"
     );
 
-    launch(&w.plan().unwrap(), &FakeSpawn::new(&w, false)).unwrap();
+    launch(
+        &w.plan().unwrap(),
+        &FakeSpawn::new(&w, false),
+        &no_markers(),
+    )
+    .unwrap();
     let earlier = fs::read(w.play_arm()).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(5));
     let failing = FakeSpawn::new(&w, true);
-    launch(&w.plan().unwrap(), &failing).unwrap_err();
+    launch(&w.plan().unwrap(), &failing, &no_markers()).unwrap_err();
     assert!(
         failing.seen.borrow()[0].is_some(),
         "written before the spawn"
@@ -702,7 +707,7 @@ fn an_arm_that_cannot_be_written_fails_the_launch_before_anything_starts() {
     let plan = w.plan().unwrap();
     fs::create_dir_all(w.play_arm()).unwrap();
     let spawn = FakeSpawn::new(&w, false);
-    launch(&plan, &spawn).unwrap_err();
+    launch(&plan, &spawn, &no_markers()).unwrap_err();
     assert!(spawn.seen.borrow().is_empty(), "nothing was started");
 }
 
@@ -718,7 +723,7 @@ fn an_arm_write_that_fails_or_a_link_in_its_place_starts_nothing() {
     let writable = fs::metadata(&profile).unwrap().permissions();
     fs::set_permissions(&profile, fs::Permissions::from_mode(0o555)).unwrap();
     let spawn = FakeSpawn::new(&w, false);
-    let result = launch(&plan, &spawn);
+    let result = launch(&plan, &spawn, &no_markers());
     fs::set_permissions(&profile, writable).unwrap();
     result.unwrap_err();
     assert!(spawn.seen.borrow().is_empty(), "nothing was started");
@@ -732,7 +737,7 @@ fn an_arm_write_that_fails_or_a_link_in_its_place_starts_nothing() {
     fs::write(&target, b"not an arm").unwrap();
     std::os::unix::fs::symlink(&target, w.play_arm()).unwrap();
     let spawn = FakeSpawn::new(&w, false);
-    launch(&plan, &spawn).unwrap_err();
+    launch(&plan, &spawn, &no_markers()).unwrap_err();
     assert!(spawn.seen.borrow().is_empty(), "nothing was started");
     assert!(
         fs::symlink_metadata(w.play_arm())
@@ -759,7 +764,7 @@ fn a_game_without_a_steam_appid_gets_no_play_arm() {
         seen: RefCell::new(Vec::new()),
         arm: profile.join(PLAY_ARM_FILE_NAME),
     };
-    launch(&plan, &spawn).unwrap();
+    launch(&plan, &spawn, &no_markers()).unwrap();
     assert_eq!(spawn.seen.borrow().as_slice(), [None]);
     assert!(!profile.join(PLAY_ARM_FILE_NAME).exists());
 }

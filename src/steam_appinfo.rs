@@ -122,6 +122,86 @@ pub fn launch_executables(
         .collect()
 }
 
+/// EVERY program Steam may start for `appid` on `os` when the person plays it: the executable of
+/// each launch entry of a game's kind (`type` `default`, absent, `none` or `option<N>`) whose
+/// `config/oslist` names `os` or is empty, beta-branch entries included (a person on that branch
+/// starts that one), relative to the game's folder with `/` separators, in the file's order,
+/// each once. A URL (`steam://…`) is no program. Steam rewrites these from its servers when the
+/// app changes, before an update's files are downloaded, so they can name a program the folder
+/// does not hold yet: what the anti-cheat gate planning and Play share reads them for.
+///
+/// `None` when the file is missing, unreadable or corrupt, or the app is absent or has no
+/// `config/launch`: NOT KNOWN. `Some` of an empty list is an app none of whose entries fits.
+pub fn launch_programs(appinfo_path: &Path, appid: u32, os: &str) -> Option<Vec<String>> {
+    let wanted = std::collections::BTreeSet::from([appid]);
+    let app = read_apps(appinfo_path, &wanted).remove(&appid)?;
+    let launch = LAUNCH_PATH
+        .iter()
+        .try_fold(&app, |kv, key| kv.get(key))?
+        .object()?;
+    let mut out: Vec<String> = Vec::new();
+    for (_, e) in launch {
+        let Some(entry) = game_entry(e, os) else {
+            continue;
+        };
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(&entry.exe)) {
+            out.push(entry.exe);
+        }
+    }
+    Some(out)
+}
+
+/// A launch entry that starts the game on `os`.
+struct GameEntry {
+    /// `0` for `type` `default` (or absent), `1` for `none` or `option<N>`.
+    kind_tier: u8,
+    /// Tied to a beta branch (`config/betakey`), which the default branch does not run.
+    beta: bool,
+    exe: String,
+}
+
+/// One launch entry when it starts the game on `os`: a game's kind (never `server`, `editor`,
+/// `manual`, `vr`, `tool`, `config`, …), its `config/oslist` naming `os` or empty, and an
+/// executable that is not a URL. [`launch_executable`] picks among these, [`launch_programs`]
+/// lists them all.
+fn game_entry(e: &Kv, os: &str) -> Option<GameEntry> {
+    let kind = e
+        .get("type")
+        .and_then(Kv::string)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let kind_tier: u8 = if kind.is_empty() || kind == "default" {
+        0
+    } else if kind == "none" || kind.starts_with("option") {
+        1
+    } else {
+        return None;
+    };
+    let config = e.get("config");
+    let field = |name: &str| {
+        config
+            .and_then(|c| c.get(name))
+            .and_then(Kv::string)
+            .unwrap_or("")
+            .trim()
+    };
+    let oslist = field("oslist");
+    if !(oslist.is_empty() || oslist.split(',').any(|o| o.trim().eq_ignore_ascii_case(os))) {
+        return None;
+    }
+    let exe = e
+        .get("executable")
+        .and_then(Kv::string)
+        .filter(|x| !x.contains("://"))
+        .and_then(normalise)?;
+    Some(GameEntry {
+        kind_tier,
+        beta: !field("betakey").is_empty(),
+        exe,
+    })
+}
+
 /// Whether Steam marks `appid` as protected by Valve Anti-Cheat: its `appinfo/common/category`
 /// lists [`VAC_CATEGORY`] ("Valve Anti-Cheat enabled") with a value other than `0`.
 ///
@@ -244,38 +324,12 @@ fn pick(app: &Kv, os: &str) -> Option<String> {
     // Ranked by (tier, Steam's order). Steam's order is the numeric key; any other key keeps its
     // place in the file, after.
     let ranked = launch.iter().enumerate().filter_map(|(i, (key, e))| {
-        let kind = e
-            .get("type")
-            .and_then(Kv::string)
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase();
-        let kind_tier: u8 = if kind.is_empty() || kind == "default" {
-            0
-        } else if kind == "none" || kind.starts_with("option") {
-            1
-        } else {
-            // server, editor, manual, vr, tool, config, ...: not the game.
-            return None;
-        };
-        let config = e.get("config");
-        let field = |name: &str| {
-            config
-                .and_then(|c| c.get(name))
-                .and_then(Kv::string)
-                .unwrap_or("")
-                .trim()
-        };
-        let oslist = field("oslist");
-        if !(oslist.is_empty() || oslist.split(',').any(|o| o.trim().eq_ignore_ascii_case(os))) {
-            return None;
-        }
-        let beta_tier: u8 = if field("betakey").is_empty() { 0 } else { 2 };
-        let exe = e
-            .get("executable")
-            .and_then(Kv::string)
-            .filter(|x| !x.contains("://"))
-            .and_then(normalise)?;
+        let GameEntry {
+            kind_tier,
+            beta,
+            exe,
+        } = game_entry(e, os)?;
+        let beta_tier: u8 = if beta { 2 } else { 0 };
         let n = key.parse::<u32>().ok();
         Some(((beta_tier + kind_tier, n.is_none(), n, i), exe))
     });

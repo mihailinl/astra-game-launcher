@@ -51,7 +51,8 @@ pub use content::{ContentKind, ContentPart};
 pub use ctx::{Ctx, Progress};
 pub use detect::{
     ANTI_CHEAT_CODES, ANTI_CHEAT_SIGNATURES, AntiCheatSignature, Binary, Confidence, Detection,
-    Engine, ExePick, SignatureName, detect, detect_with, detect_with_engines, unity_version_parts,
+    Engine, ExePick, SignatureName, anti_cheat_in_paths, detect, detect_with, detect_with_engines,
+    unity_version_parts,
 };
 pub use digest::toml_newlines;
 pub use engines::{
@@ -63,7 +64,10 @@ pub use error::{LauncherError, Result, codes};
 pub use fetch::UreqFetch;
 pub use fetch::{Fetch, MAX_DOWNLOAD_BYTES, fetch_verified};
 pub use former::FormerKind;
-pub use game::{GameTarget, Platform, proton_prefix_for, steam_appid_of_dir, steam_appids_of_dir};
+pub use game::{
+    GameTarget, Platform, STEAM_UPDATE_STATES, proton_prefix_for, steam_app_state,
+    steam_appid_of_dir, steam_appids_of_dir, steam_update_states,
+};
 pub use install::{
     KEPT_FOLDER_GAINED_FILES, UninstallReport, install, install_in, installed, restore_game_files,
     uninstall,
@@ -101,9 +105,9 @@ pub use plan::{
 };
 pub use running::is_running;
 pub use steam_appinfo::{
-    ONLINE_CATEGORIES, VAC_CATEGORY, launch_executable, launch_executables, online_codes,
-    online_game, steam_roots, store_categories, store_categories_of, valve_anti_cheat,
-    valve_anti_cheat_of,
+    ONLINE_CATEGORIES, VAC_CATEGORY, launch_executable, launch_executables, launch_programs,
+    online_codes, online_game, steam_roots, store_categories, store_categories_of,
+    valve_anti_cheat, valve_anti_cheat_of,
 };
 pub use steam_userconfig::{launch_options_pass_doorstop, steam_user_launch_options};
 

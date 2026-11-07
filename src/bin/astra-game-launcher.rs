@@ -52,7 +52,9 @@ NOTES
   (appinfo's `common/category` lists store category 8), read from --steam-root or Steam's usual
   places (both: a wrong --steam-root does not switch Steam's usual places off). The appid is
   --appid, else the manifest's. When nothing answers, the plan says `vac-unchecked` and
-  `install` needs --accept-vac-unchecked besides --yes. `launch` checks VAC again.
+  `install` needs --accept-vac-unchecked besides --yes. `launch` checks VAC again, and the
+  game's anti-cheat right before it starts Steam; it refuses `game-update-pending` while Steam
+  has an update for the game it has not finished (appmanifest's StateFlags).
   `plan`/`install --user-pack-root <dir>` names the desktop companion's user root (Astra's
   <config>/companion/pack, the engine's ASTRA_USER_PACK): an integration that brings its own
   animation packs (`${astra_pack_inbox}`) puts them in <dir>/inbox/packs/<id>/, and is refused
@@ -535,16 +537,18 @@ fn run(argv: &[String]) -> Result<Output, LauncherError> {
             let steam = a.one("--steam").map(PathBuf::from).or_else(gl::find_steam);
             // The command line holds no catalogue: no markers, as `plan` and `install` here.
             // The folder signatures, kernel drivers and VAC are checked all the same.
+            let markers = gl::EngineSet::empty();
             let plan = gl::prepare_launch(
                 Path::new(a.need("--profile")?),
                 &game,
                 &vars,
                 steam.as_deref(),
-                &gl::EngineSet::empty(),
+                &markers,
             )?;
             let dry = a.flag("--dry-run");
             if !dry {
-                gl::launch(&plan, &gl::StdSpawn)?;
+                // Checked again right before the start, with the same (empty) set.
+                gl::launch(&plan, &gl::StdSpawn, &markers)?;
             }
             let mut text = format!(
                 "{} {}\n{}\n",

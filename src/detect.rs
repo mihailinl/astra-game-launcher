@@ -502,6 +502,34 @@ fn anti_cheat_beyond_the_walk(
     out
 }
 
+/// The anti-cheat codes paths name, by name alone, as the walk would see them once they are in
+/// the game's folder: each path relative and `/`-separated (Steam's launch entries,
+/// [`crate::launch_programs`]), every component but the last a folder and the last a file. The
+/// signatures ([`ANTI_CHEAT_SIGNATURES`]: `start_protected_game.exe`, `EasyAntiCheat/`,
+/// `BEService*.exe`, `BattlEye/`, `EAAntiCheat.*.exe`, …), then `listed-anti-cheat` for a folder
+/// or file marker `engines` carries; each code once, in that order. Nothing touches the disk.
+pub fn anti_cheat_in_paths(paths: &[String], engines: &EngineSet) -> Vec<String> {
+    let mut entries = Vec::new();
+    for p in paths {
+        let comps: Vec<String> = p
+            .split(['/', '\\'])
+            .filter(|c| !c.is_empty() && *c != ".")
+            .map(str::to_owned)
+            .collect();
+        for k in 1..=comps.len() {
+            entries.push(Entry {
+                rel: comps[..k].to_vec(),
+                is_dir: k < comps.len(),
+            });
+        }
+    }
+    let mut found = anti_cheat_of(&entries);
+    if engines.markers().listed_in(&entries) {
+        add_codes(&mut found, vec![codes::LISTED_ANTI_CHEAT.to_owned()]);
+    }
+    found
+}
+
 /// `more` added to `to`, each once, after what it holds.
 fn add_codes(to: &mut Vec<String>, more: Vec<String>) {
     for c in more {

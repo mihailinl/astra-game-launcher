@@ -70,6 +70,11 @@ pub mod codes {
     pub const PROTON_PREFIX_MISSING: &str = "proton-prefix-missing";
     // Launch.
     pub const STEAM_NOT_FOUND: &str = "steam-not-found";
+    /// Play: Steam will change the game's files before it starts it — an update it knows of and
+    /// has not finished (`state`: the names of `StateFlags`' update bits,
+    /// [`crate::STEAM_UPDATE_STATES`], comma-separated; `appid`). What Play checked is not what
+    /// would start, and an update may add an anti-cheat: let Steam finish, then Play again.
+    pub const GAME_UPDATE_PENDING: &str = "game-update-pending";
     // Play with the player's own mods.
     /// Play: the integration can play together with the player's own mods, some are offered
     /// (`sources`, how many) and the player was never asked — or their answer cannot be read
@@ -284,6 +289,7 @@ pub mod codes {
         RESTORE_PARTIAL,
         PROTON_PREFIX_MISSING,
         STEAM_NOT_FOUND,
+        GAME_UPDATE_PENDING,
         MODS_CHOICE_NEEDED,
         MODS_SOURCE_MISSING,
         MODS_LOADER_UNSUPPORTED,
@@ -435,6 +441,9 @@ impl LauncherError {
                 "the game's Proton prefix does not exist yet; start the game once from Steam"
             }
             codes::STEAM_NOT_FOUND => "Steam was not found",
+            codes::GAME_UPDATE_PENDING => {
+                "Steam has an update for the game it has not finished; let Steam finish updating the game, then play"
+            }
             codes::MODS_CHOICE_NEEDED => {
                 "the game can be played together with your own mods; choose with or without them first"
             }

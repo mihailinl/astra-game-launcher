@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::detect::{anti_cheat_scan, engine_of_exe_with, is_walked_program};
+use crate::detect::{anti_cheat_in_paths, anti_cheat_scan, engine_of_exe_with, is_walked_program};
 use crate::digest::sha256_hex;
 use crate::doorstop;
 use crate::engines::{Descriptor, EngineCode, EngineSet, Moderation, Origin};
@@ -25,7 +25,7 @@ use crate::paths::{
     FileState, absolute, canonical_dir, checked_rel, existing_target, file_state, find_any_case,
     real_case, resolve_lenient,
 };
-use crate::steam_appinfo::{launch_executable, steam_roots, valve_anti_cheat};
+use crate::steam_appinfo::{launch_executable, launch_programs, steam_roots, valve_anti_cheat};
 
 /// What happens to one file beside the game's exe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -582,18 +582,45 @@ pub fn vac_verdict(
 /// Only the markers and the services read `engines`, never its descriptors. Play asks it at every
 /// launch, so a game that gained an anti-cheat after it was installed (an update added one, or a
 /// kernel driver) is never started with the integration; VAC is [`vac_check`], beside it.
+///
+/// **Before the update's files land** (0.5.2): for a Steam app (`appid`, the trusted one), the
+/// programs Steam's launch entries name ([`launch_programs`], every entry of a game's kind for the
+/// game's OS — `windows` under Proton) are held to the same signatures and markers by name
+/// ([`anti_cheat_in_paths`]): Steam rewrites them when the app changes, before it downloads the
+/// depot, so a launch entry that became `start_protected_game.exe` (Easy Anti-Cheat),
+/// `EAAntiCheat.GameServiceLauncher.exe` (EA Javelin) or a `BEService*.exe` (BattlEye) refuses
+/// as that anti-cheat while the folder does not hold it yet. Every `appinfo.vdf` [`vac_check`]
+/// reads is read, and any one naming an anti-cheat refuses; one that cannot be read says nothing.
+/// The folder is asked first.
 pub(crate) fn refuse_anti_cheat(
     game: &GameTarget,
     game_dir: &Path,
+    appid: Option<u32>,
     engines: &EngineSet,
 ) -> Result<()> {
-    match anti_cheat_scan(game_dir, &absolute(&game.dir)?, engines)?
+    let refuse = |kind: String| Err(LauncherError::new(codes::ANTI_CHEAT).with("kind", kind));
+    if let Some(kind) = anti_cheat_scan(game_dir, &absolute(&game.dir)?, engines)?
         .into_iter()
         .next()
     {
-        Some(kind) => Err(LauncherError::new(codes::ANTI_CHEAT).with("kind", kind)),
-        None => Ok(()),
+        return refuse(kind);
     }
+    let Some(appid) = appid else {
+        return Ok(());
+    };
+    let os = match game.platform {
+        Platform::LinuxNative => "linux",
+        Platform::Windows | Platform::LinuxProton { .. } => "windows",
+    };
+    for file in appinfo_files(game) {
+        let Some(programs) = launch_programs(&file, appid, os) else {
+            continue;
+        };
+        if let Some(kind) = anti_cheat_in_paths(&programs, engines).into_iter().next() {
+            return refuse(kind);
+        }
+    }
+    Ok(())
 }
 
 /// What the game file at `path` will be once the current install (if any) is uninstalled:
@@ -1264,7 +1291,7 @@ pub(crate) fn plan_install_with(
     // installed from the game's folder; a descriptor's claim adds its own in `engine_check`.
     // Steam's store categories (an online game) never refuse here; that is the daemon's offer
     // rule. Play asks the very same ([`refuse_anti_cheat`]).
-    refuse_anti_cheat(game, &game_dir, how.engines)?;
+    refuse_anti_cheat(game, &game_dir, trusted, how.engines)?;
     // Cleared only for an appid the caller gave or the folder proves; the manifest's appid can
     // only add a refusal. No trusted appid is UNCHECKED, never clear.
     let vac = vac_check(game, trusted, m.target.steam_appid)?;

@@ -26,11 +26,14 @@
 //! the runner knows that the start it sees is one Astra asked for, and when:
 //! `{"schema":1,"appid":<steam appid>,"started_unix_ms":<ms since the UNIX epoch>}`.
 //! [`prepare_launch`] writes nothing: the plan it returns for a Steam game carries the arm, and
-//! [`launch`] writes it atomically, under the profile lock, immediately before it spawns Steam.
+//! [`launch`] writes it atomically, under the profile lock, immediately before it spawns Steam
+//! (after asking the anti-cheat gate and Steam's update state again).
 //! So whatever the caller refuses between the two (Astra's daemon checks its bridge engine there)
 //! leaves no fresh arm for a later plain Steam start to be taken for Astra's, and a spawn that
 //! fails puts back what was there. `started_unix_ms` is the moment Astra asked Steam to start the
-//! game, not the moment the game's process started: Steam may update the game first. A failed
+//! game, not the moment the game's process started: Steam may update the game first (an update
+//! it already knows of is refused, `game-update-pending`; one it learns of only once asked is
+//! not seen, docs/ENGINE-DESCRIPTORS-DEBT.md row 56). A failed
 //! write fails the launch before anything is spawned. A game without a Steam appid gets none. The
 //! one way an arm a launch left is taken away is [`remove_play_arm_if_older`] (the daemon's crash
 //! guard: under the lock, only an arm older than its decision); uninstall leaves it (removing the
@@ -78,29 +81,67 @@ pub struct ProcessPlan {
     /// pack's Doorstop settings was left out). Never a reason not to play.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
-    /// The play-arm [`launch`] writes right before it spawns (a Steam game). Only
-    /// [`prepare_launch`] sets it, and it is never serialised or read back, so no plan made
-    /// elsewhere can have `launch` write into another folder.
+    /// What [`launch`] checks again under the profile lock right before it spawns, and the
+    /// play-arm it writes then (a Steam game). Only [`prepare_launch`] sets it, and it is never
+    /// serialised or read back, so no plan made elsewhere can have `launch` write into another
+    /// folder (a plan read back is spawned as it is, checking nothing).
     #[serde(skip)]
-    arm: Option<Arm>,
+    gate: Option<Gate>,
 }
 
-/// Where a launch's `play-arm.json` goes, and the Steam app it names.
+/// The game a plan was prepared for, as [`prepare_launch`] resolved it: what [`launch`] asks the
+/// anti-cheat gate and Steam's update state about again, and where its `play-arm.json` goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Arm {
+struct Gate {
     /// The profile, as [`prepare_launch`] resolved it.
     profile: PathBuf,
-    appid: u32,
+    game: GameTarget,
+    /// The game's folder, resolved.
+    game_dir: PathBuf,
+    /// The Steam appid the game is known to be (`plan::trusted_appid`).
+    trusted: Option<u32>,
+    /// The Steam app the play-arm names; `None` for a game started without Steam (no arm).
+    arm: Option<u32>,
+}
+
+impl Gate {
+    /// The refusals that can become true between [`prepare_launch`] and the spawn: the anti-cheat
+    /// the game carries now (`plan::refuse_anti_cheat`, with the caller's markers now) and an
+    /// update Steam has not finished ([`refuse_update_pending`]).
+    fn refuse(&self, engines: &EngineSet) -> Result<()> {
+        refuse_anti_cheat(&self.game, &self.game_dir, self.trusted, engines)?;
+        refuse_update_pending(&self.game_dir, self.trusted)
+    }
 }
 
 impl ProcessPlan {
     /// The `play-arm.json` [`launch`] writes immediately before it spawns this plan, and the
     /// Steam appid it names; `None` for a game started without Steam.
     pub fn play_arm(&self) -> Option<(PathBuf, u32)> {
-        self.arm
-            .as_ref()
-            .map(|a| (a.profile.join(PLAY_ARM_FILE), a.appid))
+        let g = self.gate.as_ref()?;
+        g.arm.map(|appid| (g.profile.join(PLAY_ARM_FILE), appid))
     }
+}
+
+/// `game-update-pending` when Steam will change the game's files before it starts it: the
+/// `StateFlags` of `appid` in the library holding `game_dir` ([`crate::steam_app_state`]) carry
+/// an update bit ([`crate::STEAM_UPDATE_STATES`]), `state` naming them. Nothing is refused for a
+/// game outside a Steam library, with no appid, or whose manifest cannot be read: Steam's own
+/// state is not known then, and the folder's anti-cheat is checked all the same.
+fn refuse_update_pending(game_dir: &Path, appid: Option<u32>) -> Result<()> {
+    let Some(appid) = appid else {
+        return Ok(());
+    };
+    let Some(flags) = crate::game::steam_app_state(game_dir, appid) else {
+        return Ok(());
+    };
+    let states = crate::game::steam_update_states(flags);
+    if states.is_empty() {
+        return Ok(());
+    }
+    Err(LauncherError::new(codes::GAME_UPDATE_PENDING)
+        .with("appid", appid.to_string())
+        .with("state", states.join(",")))
 }
 
 /// [`ProcessPlan::warnings`]: a Steam user's own launch options for the game carry `--doorstop-…`
@@ -176,16 +217,28 @@ impl Spawn for StdSpawn {
     }
 }
 
-/// Runs a prepared command. For a Steam game it first writes `<profile>/play-arm.json` (the
-/// module docs), under the profile lock and immediately before the spawn: a failed write fails
-/// the launch with nothing started, and a failed spawn puts back what was there before, since an
-/// arm left by a launch that never happened would vouch for the next plain start of the game.
-pub fn launch(plan: &ProcessPlan, spawner: &dyn Spawn) -> Result<()> {
-    let Some(arm) = &plan.arm else {
+/// Runs a prepared command. Under the profile lock and immediately before the spawn it asks
+/// again what may have changed since [`prepare_launch`] released the lock (the daemon starts its
+/// bridge engine in between, for seconds): the anti-cheat gate with `engines` (the caller's set
+/// now; only its markers are read), refusing `anti-cheat{kind}` as `prepare_launch` does, and
+/// Steam's update state (`game-update-pending`). Then, for a Steam game, it writes
+/// `<profile>/play-arm.json` (the module docs): a failed write fails the launch with nothing
+/// started, and a failed spawn puts back what was there before, since an arm left by a launch
+/// that never happened would vouch for the next plain start of the game. A refusal here starts
+/// nothing and writes nothing.
+///
+/// What it cannot see: an update Steam has not discovered yet when it is asked to start the game
+/// (docs/ENGINE-DESCRIPTORS-DEBT.md row 56).
+pub fn launch(plan: &ProcessPlan, spawner: &dyn Spawn, engines: &EngineSet) -> Result<()> {
+    let Some(gate) = &plan.gate else {
         return spawner.spawn(plan);
     };
-    let _lock = ProfileLock::acquire(&arm.profile)?;
-    let path = arm.profile.join(PLAY_ARM_FILE);
+    let _lock = ProfileLock::acquire(&gate.profile)?;
+    gate.refuse(engines)?;
+    let Some(appid) = gate.arm else {
+        return spawner.spawn(plan);
+    };
+    let path = gate.profile.join(PLAY_ARM_FILE);
     // A link or a folder there is not an arm of ours: never read through it, never replace it.
     check_regular_or_absent(&path)?;
     let previous = match fs::read(&path) {
@@ -193,7 +246,7 @@ pub fn launch(plan: &ProcessPlan, spawner: &dyn Spawn) -> Result<()> {
         Err(e) if e.kind() == ErrorKind::NotFound => None,
         Err(e) => return Err(LauncherError::io_at(&e, &path)),
     };
-    write_play_arm(&path, arm.appid)?;
+    write_play_arm(&path, appid)?;
     if let Err(e) = spawner.spawn(plan) {
         let _ = match previous {
             Some(bytes) => write_atomic(&path, &bytes),
@@ -426,9 +479,20 @@ fn write_play_arm(path: &Path, appid: u32) -> Result<()> {
 /// (the signed catalogue's `anticheat[]` now, [`EngineSet::with_anti_cheat_markers`]; only its
 /// markers are read) and `kernel-anti-cheat` for a kernel driver installed from the game's
 /// folder (Windows). A game that gained an anti-cheat after it was installed — an update added
-/// one, a driver was installed — is never started with the integration. VAC is checked again
-/// too (`valve-anti-cheat`; `vac-unchecked` when Steam's flag cannot be read now and the person
-/// did not accept that at install). Nothing is written before either refusal.
+/// one, a driver was installed — is never started with the integration. For a Steam app the
+/// programs Steam's launch entries name are held to the same signatures and markers, so an
+/// update that points the game at `start_protected_game.exe` is refused before its files land.
+/// VAC is checked again too (`valve-anti-cheat`; `vac-unchecked` when Steam's flag cannot be
+/// read now and the person did not accept that at install). Nothing is written before either
+/// refusal.
+///
+/// **An update Steam has not finished** (0.5.2): Steam installs a pending update before it starts
+/// the game, so the folder just checked would not be the one that starts, and the update may add
+/// an anti-cheat. `game-update-pending` (`appid`, `state`) when the app's `StateFlags`
+/// ([`crate::steam_app_state`]) carry an update bit ([`crate::STEAM_UPDATE_STATES`]): an update
+/// required, running, paused or started, a reconfiguration, a download, staging or committing.
+/// Right after the anti-cheat gate, before anything about the install itself. [`launch`] asks the
+/// anti-cheat gate and this again, under the lock, right before the spawn.
 pub fn prepare_launch(
     profile_dir: &Path,
     game: &GameTarget,
@@ -489,10 +553,16 @@ pub fn prepare_launch_with(
             .with("got", exe_rel));
     }
 
+    // The appid this game is known to be: the caller's, or the one its folder proves.
+    let trusted = crate::plan::trusted_appid(game)?;
     // The anti-cheat this game carries NOW, as install asks it (the one gate both share): an
-    // update may have added one since, or installed a kernel driver. Before anything about the
+    // update may have added one since, installed a kernel driver, or pointed Steam's launch
+    // entry at an anti-cheat's bootstrapper before its files land. Before anything about the
     // install itself, so the person is told why it may never start rather than sent to Install.
-    refuse_anti_cheat(game, &game_dir, engines)?;
+    refuse_anti_cheat(game, &game_dir, trusted, engines)?;
+    // An update Steam knows of and has not finished: Steam would install it before it starts the
+    // game, so what was just checked would not be what starts. `launch` asks both again.
+    refuse_update_pending(&game_dir, trusted)?;
 
     // Every variable present, and safe where it goes.
     for name in m.variables() {
@@ -615,7 +685,6 @@ pub fn prepare_launch_with(
     refuse_if_running(&exe_file)?;
     // Steam can flag a game VAC after it was installed: check again at every Play. Still unread
     // now: only an install the person accepted that for may start.
-    let trusted = crate::plan::trusted_appid(game)?;
     let vac_checked = crate::plan::vac_check(game, trusted, m.target.steam_appid)?;
     if !vac_checked && !ledger.vac_unchecked_accepted {
         return Err(LauncherError::new(codes::VAC_UNCHECKED));
@@ -747,6 +816,13 @@ pub fn prepare_launch_with(
         })?;
     }
 
+    let gate = |arm: Option<u32>| Gate {
+        profile: profile.clone(),
+        game: game.clone(),
+        game_dir: game_dir.clone(),
+        trusted,
+        arm,
+    };
     let mut plan = match game.steam_appid {
         Some(appid) => {
             let steam = steam_exe.expect("checked above");
@@ -758,11 +834,9 @@ pub fn prepare_launch_with(
                 env: Vec::new(),
                 cwd: None,
                 warnings: steam_warnings(game, appid),
-                // Written by `launch`, right before Steam is asked to start the game.
-                arm: Some(Arm {
-                    profile: profile.clone(),
-                    appid,
-                }),
+                // Checked again, and the arm written, by `launch`, right before Steam is asked to
+                // start the game.
+                gate: Some(gate(Some(appid))),
             }
         }
         None => {
@@ -778,7 +852,7 @@ pub fn prepare_launch_with(
                 env,
                 cwd: Some(plain(&game_root)),
                 warnings: Vec::new(),
-                arm: None,
+                gate: Some(gate(None)),
             }
         }
     };

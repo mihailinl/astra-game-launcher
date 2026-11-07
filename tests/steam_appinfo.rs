@@ -10,10 +10,10 @@ mod common;
 use std::path::Path;
 
 use astra_game_launcher::{
-    Accept, Ctx, ONLINE_CATEGORIES, Platform, VAC_CATEGORY, VALVE_ANTI_CHEAT, codes, install,
-    installed, launch_executable, online_codes, online_game, plan_install, prepare_launch,
-    store_categories, store_categories_of, uninstall, vac_verdict, valve_anti_cheat,
-    valve_anti_cheat_of,
+    ANTI_CHEAT_SIGNATURES, Accept, Ctx, ONLINE_CATEGORIES, Platform, VAC_CATEGORY,
+    VALVE_ANTI_CHEAT, codes, install, installed, launch_executable, launch_programs, online_codes,
+    online_game, plan_install, prepare_launch, store_categories, store_categories_of, uninstall,
+    vac_verdict, valve_anti_cheat, valve_anti_cheat_of,
 };
 use common::*;
 
@@ -888,11 +888,18 @@ fn the_categories_of_real_apps_read_as_their_store_pages_say() {
             Ok(plan) => {
                 assert!(!vac && plan.vac_checked, "{name}: {:?}", plan.warnings);
             }
-            Err(e) => assert_eq!(
-                (*vac, e.code, e.param("kind")),
-                (true, codes::ANTI_CHEAT, Some(VALVE_ANTI_CHEAT)),
-                "{name}"
-            ),
+            // VAC, from the recorded file; or, where this machine's own Steam knows the app
+            // (every appinfo is read), the anti-cheat its launch entries start (Apex Legends:
+            // EA Javelin's `EAAntiCheat.GameServiceLauncher.exe`). Never an online code.
+            Err(e) => {
+                let kind = e.param("kind");
+                assert_eq!(e.code, codes::ANTI_CHEAT, "{name}");
+                assert!(
+                    (*vac && kind == Some(VALVE_ANTI_CHEAT))
+                        || ANTI_CHEAT_SIGNATURES.iter().any(|s| Some(s.code) == kind),
+                    "{name}: {kind:?}"
+                );
+            }
         }
     }
 }
@@ -1359,4 +1366,181 @@ fn an_accepted_unread_flag_never_covers_a_vac_flag_at_play() {
         (e.code, e.param("kind")),
         (codes::ANTI_CHEAT, Some(VALVE_ANTI_CHEAT))
     );
+}
+
+/// `launch_programs` lists every entry a person may be started with on an OS — the default, a
+/// beta branch's, an `option<N>` — never another type, a URL or another OS's, each once, in the
+/// file's order; `None` for an app with no launch config, one not in the file, and a file cut
+/// short.
+#[test]
+fn launch_programs_lists_every_entry_a_person_may_start() {
+    for magic in [V28, V29] {
+        let (bytes, app_end) = standard(magic);
+        let world = Tmp::new("launch-programs");
+        let path = world.join("appinfo.vdf");
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            launch_programs(&path, APP, "windows"),
+            Some(vec![
+                "bin/x64/Beta.exe".to_owned(),
+                "MiSideFull.exe".to_owned()
+            ])
+        );
+        assert_eq!(
+            launch_programs(&path, APP, "LINUX"),
+            Some(vec!["Game.x86_64".to_owned()])
+        );
+        assert_eq!(
+            launch_programs(&path, APP, "macos"),
+            Some(vec!["Game.app".to_owned()])
+        );
+        assert_eq!(
+            launch_programs(&path, 10, "windows"),
+            None,
+            "no launch config"
+        );
+        assert_eq!(
+            launch_programs(&path, 12_345, "windows"),
+            None,
+            "not in the file"
+        );
+        std::fs::write(&path, &bytes[..app_end - 3]).unwrap();
+        assert_eq!(launch_programs(&path, APP, "windows"), None, "cut short");
+    }
+    // Each program once, whatever its letter case; `option<N>` and `none` count.
+    let world = Tmp::new("launch-programs-options");
+    let path = world.join("appinfo.vdf");
+    let launch = vec![
+        ("0", entry("Game.exe", Some("default"), vec![])),
+        ("1", entry("GAME.EXE", Some("option1"), vec![])),
+        ("2", entry("Safe.exe", Some("none"), vec![])),
+        ("3", entry("Server.exe", Some("server"), vec![])),
+    ];
+    std::fs::write(&path, file(V29, &[(APP, app(APP, Some(launch)))]).0).unwrap();
+    assert_eq!(
+        launch_programs(&path, APP, "windows"),
+        Some(vec!["Game.exe".to_owned(), "Safe.exe".to_owned()])
+    );
+}
+
+/// The app the launch-entry tests use; no real Steam holds it.
+const LAUNCHES: u32 = 4_000_030;
+
+/// **An anti-cheat Steam will start, before its files land** (0.5.2). Steam rewrites an app's
+/// launch entries from its servers when the app changes, before it downloads the update's
+/// depot; an update that adds Easy Anti-Cheat points the entry at `start_protected_game.exe`
+/// while the folder does not hold it yet. Plan and Play refuse it as that anti-cheat, through the
+/// one gate both ask, by the signatures' names (a file, or a folder on the way) and the
+/// catalogue's markers; a refused Play writes nothing. Only the game's OS counts (Windows here),
+/// and a launch entry of a game's kind: a server's does not.
+///
+/// Mutation (watched red): `refuse_anti_cheat` without its launch-entry loop.
+#[test]
+fn an_anti_cheat_steams_launch_entry_names_is_refused_before_its_files_land() {
+    use astra_game_launcher::{AntiCheatMarker, AntiCheatMarkerKind, EngineSet, plan_install_in};
+    let world = Tmp::new("launch-ac");
+    let path = world.join("appinfo.vdf");
+    let game = Tmp::new("launch-ac-game");
+    unity_game(game.path(), "Some Game");
+    let profiles = Tmp::new("launch-ac-profiles");
+    let mut at = target(
+        game.path(),
+        "Some Game.exe",
+        Some(LAUNCHES),
+        Platform::Windows,
+    );
+    at.steam_appinfo = Some(path.clone());
+    let steam = Some(Path::new("/opt/fake/steam"));
+    let launches = |entries: Vec<(&'static str, V)>| {
+        std::fs::write(
+            &path,
+            file(V29, &[(LAUNCHES, app(LAUNCHES, Some(entries)))]).0,
+        )
+        .unwrap();
+    };
+    let plain = || vec![("0", entry("Some Game.exe", Some("default"), vec![]))];
+    launches(plain());
+    plan_and_install(&runner(), &at, &profiles.join("p"));
+    let none = EngineSet::empty();
+    let play = |set: &EngineSet| {
+        prepare_launch(&profiles.join("p"), &at, &vars(), steam, set)
+            .err()
+            .map(|e| (e.code.to_owned(), e.params.get("kind").cloned()))
+    };
+    let plan = |set: &EngineSet| {
+        let fresh = Tmp::new("launch-ac-plan");
+        plan_install_in(
+            &runner(),
+            &at,
+            &fresh.join("p"),
+            set,
+            astra_game_launcher::Provenance::FirstParty,
+            None,
+        )
+        .err()
+        .map(|e| (e.code.to_owned(), e.params.get("kind").cloned()))
+    };
+    let anti_cheat = |kind: &str| Some((codes::ANTI_CHEAT.to_owned(), Some(kind.to_owned())));
+    assert_eq!(play(&none), None, "the game's own program: it plays");
+
+    let snapshot_all = || (snapshot(&profiles.join("p")), snapshot(game.path()));
+    for (exe, kind) in [
+        ("start_protected_game.exe", "easy-anti-cheat"),
+        (
+            r"EasyAntiCheat\EasyAntiCheat_EOS_Setup.exe",
+            "easy-anti-cheat",
+        ),
+        ("EAAntiCheat.GameServiceLauncher.exe", "ea-javelin"),
+        ("BEService_x64.exe", "battleye"),
+        ("BattlEye/Launcher.exe", "battleye"),
+    ] {
+        // As the default entry, and as a second option beside the game's own program.
+        for entries in [
+            vec![("0", entry(exe, Some("default"), vec![]))],
+            vec![
+                ("0", entry("Some Game.exe", Some("default"), vec![])),
+                (
+                    "1",
+                    entry(exe, Some("option1"), vec![("oslist", Str("windows"))]),
+                ),
+            ],
+        ] {
+            launches(entries);
+            let before = snapshot_all();
+            assert_eq!(play(&none), anti_cheat(kind), "{exe}");
+            assert!(
+                snapshot_all() == before,
+                "a refused Play wrote nothing ({exe})"
+            );
+            assert_eq!(plan(&none), anti_cheat(kind), "{exe}: planning refuses too");
+        }
+    }
+    // A catalogue marker names a launch entry's program too.
+    launches(vec![(
+        "0",
+        entry(r"bin\Guard.exe", Some("default"), vec![]),
+    )]);
+    assert_eq!(play(&none), None);
+    let guard = EngineSet::empty().with_anti_cheat_markers(vec![AntiCheatMarker {
+        kind: AntiCheatMarkerKind::ProcessName,
+        value: "guard.exe".to_owned(),
+    }]);
+    assert_eq!(play(&guard), anti_cheat(codes::LISTED_ANTI_CHEAT));
+    // Another OS's entry, and a server's, do not count for a Windows game.
+    launches(vec![
+        ("0", entry("Some Game.exe", Some("default"), vec![])),
+        (
+            "1",
+            entry(
+                "start_protected_game.exe",
+                Some("default"),
+                vec![("oslist", Str("linux"))],
+            ),
+        ),
+        ("2", entry("BEService.exe", Some("server"), vec![])),
+    ]);
+    assert_eq!(play(&none), None);
+    // Back to the game's own program: it plays.
+    launches(plain());
+    assert_eq!(play(&none), None);
 }

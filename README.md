@@ -59,8 +59,9 @@ astra-game-launcher plan astra-gi.zip --sha256 7b58b7… --game ~/.steam/steam/s
 let pkg = GiPackage::open(&zip_bytes, sha256)?;                  // verify, check, read manifest
 let plan = plan_install(&pkg, &game, &profile_dir)?;             // the consent sheet, as data
 install(&pkg, &plan, &game, &Ctx::silent())?;                     // exactly the plan, or nothing
-let cmd = prepare_launch(&profile_dir, &game, &vars, steam, &EngineSet::empty())?; // anti-cheat again, INI keys, Proton override
-launch(&cmd, &StdSpawn)?;                                         // or the caller's own `Spawn`
+let markers = EngineSet::empty();                                 // or the catalogue's markers
+let cmd = prepare_launch(&profile_dir, &game, &vars, steam, &markers)?; // anti-cheat again, INI keys, Proton override
+launch(&cmd, &StdSpawn, &markers)?;                               // asks again, then the caller's `Spawn`
 uninstall(&profile_dir, &game)?;                                  // everything back
 restore_game_files(&profile_dir, &game)?;                         // the game's files back, the profile kept
 ```
@@ -78,6 +79,12 @@ Every refusal is a `LauncherError { code, params }`; the codes are stable
 
 `foreign-loader` (`file`) now also comes from `plan_install` / `install` for another Doorstop
 beside the game under another name than ours (`version.dll`, `winmm.dll`).
+
+Added in 0.5.2 (and `launch` takes the caller's `&EngineSet`, as `prepare_launch` does):
+
+| code | from | params | what the person can do |
+|---|---|---|---|
+| `game-update-pending` | `prepare_launch`, `launch` | `appid`; `state` (comma-separated: `update-required`, `update-running`, `update-paused`, `update-started`, `reconfiguring`, `adding-files`, `preallocating`, `downloading`, `staging`, `committing`, `update-stopping`; `STEAM_UPDATE_STATES`) | Steam has an update for the game it has not finished, and would install it before starting the game. Let Steam finish updating the game, then play. |
 
 `UninstallReport::kept` can now name a loader proxy we added that another BepInEx runs through,
 and `UninstallReport::proton_overrides_kept` the Wine overrides left for it. `Ledger` gains
@@ -746,7 +753,21 @@ to = "${astra_pack_inbox}/"
   drivers are checked all the same) and refuses `anti-cheat{kind}` exactly as planning does,
   through the one gate both ask, once the game is the install's own and before anything about the
   install itself, writing nothing. A game that gained an anti-cheat after it was installed (an
-  update added one, a driver was installed) never starts with the integration. A Steam app is also refused
+  update added one, a driver was installed) never starts with the integration. For a Steam app
+  the programs its launch entries name (`launch_programs`: every entry of a game's kind for the
+  game's OS, in every `appinfo.vdf` read for VAC) are held to the same names and markers
+  (`anti_cheat_in_paths`): Steam rewrites them before it downloads an update, so an update that
+  points the game at `start_protected_game.exe`, `EAAntiCheat.GameServiceLauncher.exe` or a
+  `BEService*.exe` is refused as that anti-cheat before its files land (one pass over each
+  file, about 40 µs for this desk's 2 MB `appinfo.vdf`). And Play refuses `game-update-pending`
+  while Steam has an update for the game it has not finished (the app's `StateFlags` in its
+  library's `appmanifest_<appid>.acf`, `steam_app_state`, carry an update bit,
+  `STEAM_UPDATE_STATES`; never "fully installed", a stale "app running", a validation or a
+  leftover byte count): Steam would install it before it starts the game, so what Play checked
+  would not be what starts. `launch` asks the anti-cheat gate (with the caller's markers then)
+  and Steam's state again, under the profile lock, right before it spawns; a refusal there starts
+  nothing and writes no play-arm. An update Steam has not learned of when it is asked to start
+  the game is not seen (docs/ENGINE-DESCRIPTORS-DEBT.md row 56). A Steam app is also refused
   (`anti-cheat`, kind `valve-anti-cheat`) when Steam's `appinfo.vdf` lists store category 8 ("Valve
   Anti-Cheat enabled") in its `common/category`, at plan time and again at every launch. Steam's
   other store categories are read too (`store_categories`, `online_game`: Online PvP 36, PvP 49,
@@ -797,7 +818,8 @@ to = "${astra_pack_inbox}/"
   `{"schema":1,"appid":<steam appid>,"started_unix_ms":<ms since the UNIX epoch>}`. Steam starts
   the game, so this is how the runner tells a start Astra asked for (and when) from any other.
   `started_unix_ms` is when Astra asked, not when the game's process started (Steam may update
-  the game first). `prepare_launch` writes none, so a refusal between the two leaves no fresh arm;
+  the game first, an update it did not know of when asked). `prepare_launch` writes none, so a
+  refusal between the two leaves no fresh arm;
   a failed write fails the launch before anything starts, and a failed spawn puts back what was
   there. A game without a Steam appid gets none. It is not a file of the ledger's, uninstall
   leaves it (removing the profile folder is the caller's; the one deletion is

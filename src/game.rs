@@ -191,6 +191,75 @@ pub fn steam_appids_of_dir(game_dir: &Path) -> Vec<u32> {
     found
 }
 
+/// The bits of an app's `StateFlags` (its `steamapps/appmanifest_<appid>.acf`) that say Steam
+/// will change the game's files before it next starts it, each with the name a
+/// `game-update-pending` refusal gives it (`state`). Steam's own app states (`EAppState`):
+/// `2` an update is required (Steam knows of one and has not started it: with "only update this
+/// game when I launch it", a scheduled download window, an update released minutes ago), `256`
+/// running, `512` paused, `1024` started, `65536` reconfiguring (a DLC, language or beta branch
+/// changed), `262144` adding files, `524288` preallocating, `1048576` downloading, `2097152`
+/// staging, `4194304` committing, `8388608` stopping. Asked to start the game, Steam finishes
+/// these first, so what Play scanned would not be what starts.
+///
+/// The other bits never refuse: `4` fully installed, `1` uninstalled, `16` locked, `32` files
+/// missing, `64` app running (a stale one is common: this desk's Half-Life 2 episodes carry
+/// `68` with nothing running), `128` files corrupt, `2048` uninstalling, `4096` backup running,
+/// `131072` validating — none of them is a new build. Nor do `BytesToDownload` and
+/// `BytesDownloaded`: two up-to-date apps on this desk (`StateFlags` `4`, `TargetBuildID` equal
+/// to `buildid`) keep `BytesToDownload` above a `BytesDownloaded` of `0` from an earlier download.
+pub const STEAM_UPDATE_STATES: &[(u32, &str)] = &[
+    (2, "update-required"),
+    (256, "update-running"),
+    (512, "update-paused"),
+    (1024, "update-started"),
+    (65_536, "reconfiguring"),
+    (262_144, "adding-files"),
+    (524_288, "preallocating"),
+    (1_048_576, "downloading"),
+    (2_097_152, "staging"),
+    (4_194_304, "committing"),
+    (8_388_608, "update-stopping"),
+];
+
+/// The names ([`STEAM_UPDATE_STATES`]) of the update bits set in `state_flags`, in that table's
+/// order; empty when Steam will start the game as its folder is now.
+pub fn steam_update_states(state_flags: u32) -> Vec<&'static str> {
+    STEAM_UPDATE_STATES
+        .iter()
+        .filter(|(bit, _)| state_flags & bit != 0)
+        .map(|(_, name)| *name)
+        .collect()
+}
+
+/// Steam app `appid`'s `StateFlags`, from the `steamapps/appmanifest_<appid>.acf` of the library
+/// holding `game_dir` (the library's `steamapps/common/<folder>` is `game_dir` or one of its
+/// parents). `None` when the folder is in no Steam library, or the manifest is absent, not a
+/// regular file, larger than any Steam writes (1 MiB), unreadable, or gives no decimal
+/// `StateFlags` at its top level: nothing is known then, and nothing is refused on it.
+pub fn steam_app_state(game_dir: &Path, appid: u32) -> Option<u32> {
+    let is = |p: Option<&Path>, name: &str| {
+        p.and_then(Path::file_name)
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case(name))
+    };
+    let steamapps = game_dir.ancestors().find_map(|folder| {
+        let common = folder.parent();
+        let steamapps = common.and_then(Path::parent);
+        if is(common, "common") && is(steamapps, "steamapps") {
+            steamapps
+        } else {
+            None
+        }
+    })?;
+    let path = steamapps.join(format!("appmanifest_{appid}.acf"));
+    let meta = std::fs::metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() > 1 << 20 {
+        return None;
+    }
+    let text = std::fs::read_to_string(&path).ok()?;
+    acf_value(&text, "StateFlags")?.trim().parse().ok()
+}
+
 /// A top-level value of an `appmanifest_*.acf` (Valve's text KeyValues: `"AppState" { "key"
 /// "value" ... }`): the first `"key" "value"` pair directly inside the root object, key compared
 /// ignoring ASCII case. Nested objects are skipped.

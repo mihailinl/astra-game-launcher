@@ -224,7 +224,7 @@ fn a_game_not_on_steam_is_started_directly_with_args_and_env() {
         }
     }
     let rec = Record(RefCell::new(Vec::new()));
-    launch(&p, &rec).unwrap();
+    launch(&p, &rec, &no_markers()).unwrap();
     assert_eq!(rec.0.borrow().as_slice(), std::slice::from_ref(&p));
 }
 
