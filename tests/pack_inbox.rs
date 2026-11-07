@@ -223,7 +223,8 @@ fn the_destination_resolves_below_the_root_the_caller_names() {
     );
 
     w.engine_imports();
-    prepare_launch(&w.profile(), &w.target(), &vars(), None).expect("Play never asks for a pack");
+    prepare_launch(&w.profile(), &w.target(), &vars(), None, &no_markers())
+        .expect("Play never asks for a pack");
 }
 
 /// No root given: refused at plan with its own code, never a guessed path — by every planning

@@ -700,6 +700,7 @@ fn under_proton_a_proxy_kept_for_its_folder_keeps_its_override() {
         &game,
         &vars(),
         Some(Path::new("/opt/fake/steam")),
+        &no_markers(),
     )
     .unwrap();
     w.put("Mods/theirs.lua", b"-- theirs");
@@ -734,6 +735,7 @@ fn play_relinks_only_the_doorstop_sharing_names() {
         &w.at("Game.exe"),
         &vars(),
         Some(Path::new("/opt/fake/steam")),
+        &no_markers(),
     )
     .unwrap_err();
     assert_eq!(

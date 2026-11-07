@@ -59,7 +59,7 @@ astra-game-launcher plan astra-gi.zip --sha256 7b58b7… --game ~/.steam/steam/s
 let pkg = GiPackage::open(&zip_bytes, sha256)?;                  // verify, check, read manifest
 let plan = plan_install(&pkg, &game, &profile_dir)?;             // the consent sheet, as data
 install(&pkg, &plan, &game, &Ctx::silent())?;                     // exactly the plan, or nothing
-let cmd = prepare_launch(&profile_dir, &game, &vars, steam)?;     // INI keys, Proton override
+let cmd = prepare_launch(&profile_dir, &game, &vars, steam, &EngineSet::empty())?; // anti-cheat again, INI keys, Proton override
 launch(&cmd, &StdSpawn)?;                                         // or the caller's own `Spawn`
 uninstall(&profile_dir, &game)?;                                  // everything back
 restore_game_files(&profile_dir, &game)?;                         // the game's files back, the profile kept
@@ -566,7 +566,7 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
 
 ```json
 {"schema": "astra.gi-probe/1",
- "tool": {"version": "0.5.1", "source_tree_sha256": "<hex>"},
+ "tool": {"version": "0.5.2", "source_tree_sha256": "<hex>"},
  "subcommand": "compat", "verdict": "pass",
  "input": {}, "source": {}, "against": {"astra": {}, "launcher": {}},
  "steps": [{"step": 1, "check": "…", "status": "pass"}],
@@ -740,7 +740,13 @@ to = "${astra_pack_inbox}/"
   game's folder; `listed-anti-cheat`), and, on Windows, one whose folder a kernel-mode driver
   service is installed from (`kernel-anti-cheat`; a system-wide driver elsewhere ties to no
   game). These apply to every game, whatever engine detection found, and are checked before the
-  engine; every code is `ANTI_CHEAT_CODES`. A Steam app is also refused
+  engine; every code is `ANTI_CHEAT_CODES`. **Play asks them all again** (0.5.2): `prepare_launch`
+  takes the caller's `EngineSet` (the catalogue's markers as they are at Play; a caller holding no
+  catalogue, such as the command line, passes `EngineSet::empty()`, and the signatures and kernel
+  drivers are checked all the same) and refuses `anti-cheat{kind}` exactly as planning does,
+  through the one gate both ask, once the game is the install's own and before anything about the
+  install itself, writing nothing. A game that gained an anti-cheat after it was installed (an
+  update added one, a driver was installed) never starts with the integration. A Steam app is also refused
   (`anti-cheat`, kind `valve-anti-cheat`) when Steam's `appinfo.vdf` lists store category 8 ("Valve
   Anti-Cheat enabled") in its `common/category`, at plan time and again at every launch. Steam's
   other store categories are read too (`store_categories`, `online_game`: Online PvP 36, PvP 49,
@@ -831,7 +837,7 @@ algorithm) and bakes it in:
 
 ```
 astra-game-launcher --version
-# astra-game-launcher 0.5.1 (source tree sha256 <hex>)
+# astra-game-launcher 0.5.2 (source tree sha256 <hex>)
 ```
 
 Astra's own release notes / About screen show the same hash for the commit it pinned. A GitHub
@@ -841,7 +847,7 @@ a hash you compute yourself. Recompute it from a clone of a tag with one line (r
 and `sha256sum`; `scripts/tree-hash.sh` is this same command, runnable against any directory):
 
 ```bash
-V=0.5.1 REPO=https://github.com/mihailinl/astra-game-launcher
+V=0.5.2 REPO=https://github.com/mihailinl/astra-game-launcher
 rm -rf /tmp/astra-gl-verify && mkdir -p /tmp/astra-gl-verify && \
 git clone --quiet --depth 1 --branch "v$V" "$REPO" /tmp/astra-gl-verify/src && \
 cd /tmp/astra-gl-verify/src && git archive "v$V" | tar -x -C /tmp/astra-gl-verify && \

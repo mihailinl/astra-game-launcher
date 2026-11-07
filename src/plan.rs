@@ -573,6 +573,29 @@ pub fn vac_verdict(
     Ok(!for_trusted.is_empty())
 }
 
+/// **The anti-cheat gate, shared by plan and Play** (launcher 0.5.2): `anti-cheat{kind}` with
+/// the first code [`anti_cheat_scan`] finds in the game's folder now — a folder signature
+/// ([`crate::ANTI_CHEAT_SIGNATURES`]), `listed-anti-cheat` (a marker `engines` carries,
+/// [`EngineSet::with_anti_cheat_markers`]) or `kernel-anti-cheat` (a kernel driver whose image
+/// is in the folder, [`crate::anti_cheat_services`]). `game_dir` is the folder resolved
+/// ([`canonical_dir`]); the services are compared with the folder as the caller spelled it too.
+/// Only the markers and the services read `engines`, never its descriptors. Play asks it at every
+/// launch, so a game that gained an anti-cheat after it was installed (an update added one, or a
+/// kernel driver) is never started with the integration; VAC is [`vac_check`], beside it.
+pub(crate) fn refuse_anti_cheat(
+    game: &GameTarget,
+    game_dir: &Path,
+    engines: &EngineSet,
+) -> Result<()> {
+    match anti_cheat_scan(game_dir, &absolute(&game.dir)?, engines)?
+        .into_iter()
+        .next()
+    {
+        Some(kind) => Err(LauncherError::new(codes::ANTI_CHEAT).with("kind", kind)),
+        None => Ok(()),
+    }
+}
+
 /// What the game file at `path` will be once the current install (if any) is uninstalled:
 /// uninstall removes our `add`s and restores our `replace`s, while they still have our digest. An
 /// added Doorstop someone else's loader now runs through is no exception here: replacing the
@@ -1240,13 +1263,8 @@ pub(crate) fn plan_install_with(
     // folder signatures, the catalogue's markers `how.engines` carries, and a kernel driver
     // installed from the game's folder; a descriptor's claim adds its own in `engine_check`.
     // Steam's store categories (an online game) never refuse here; that is the daemon's offer
-    // rule.
-    if let Some(kind) = anti_cheat_scan(&game_dir, &absolute(&game.dir)?, how.engines)?
-        .into_iter()
-        .next()
-    {
-        return Err(LauncherError::new(codes::ANTI_CHEAT).with("kind", kind));
-    }
+    // rule. Play asks the very same ([`refuse_anti_cheat`]).
+    refuse_anti_cheat(game, &game_dir, how.engines)?;
     // Cleared only for an appid the caller gave or the folder proves; the manifest's appid can
     // only add a refusal. No trusted appid is UNCHECKED, never clear.
     let vac = vac_check(game, trusted, m.target.steam_appid)?;

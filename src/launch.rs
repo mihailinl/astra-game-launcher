@@ -47,6 +47,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::doorstop;
+use crate::engines::EngineSet;
 use crate::error::{LauncherError, Result, codes};
 use crate::game::{GameTarget, Platform};
 use crate::ini;
@@ -59,7 +60,7 @@ use crate::paths::{
     file_state, is_private, parse_jailed, plain, prepare_target, real_case, write_atomic,
     write_atomic_private,
 };
-use crate::plan::{GameAction, LoaderPolicy, is_loader_proxy};
+use crate::plan::{GameAction, LoaderPolicy, is_loader_proxy, refuse_anti_cheat};
 use crate::proton;
 use crate::running::refuse_if_running;
 
@@ -418,13 +419,31 @@ fn write_play_arm(path: &Path, appid: u32) -> Result<()> {
 /// once nothing can refuse this Play any more. Nothing of theirs is written. "Without", or an
 /// integration without the table: exactly the Play of 0.3.2, argument for argument. The mod
 /// managers' folders looked in are this process's ([`ModsEnv::from_process`]).
+///
+/// **Anti-cheat, at every Play as at install** (0.5.2): once the install is known to be this
+/// game's, `anti-cheat{kind}` exactly as planning refuses it (`plan::refuse_anti_cheat`, the
+/// one gate both ask): a folder signature, `listed-anti-cheat` for a marker `engines` carries
+/// (the signed catalogue's `anticheat[]` now, [`EngineSet::with_anti_cheat_markers`]; only its
+/// markers are read) and `kernel-anti-cheat` for a kernel driver installed from the game's
+/// folder (Windows). A game that gained an anti-cheat after it was installed — an update added
+/// one, a driver was installed — is never started with the integration. VAC is checked again
+/// too (`valve-anti-cheat`; `vac-unchecked` when Steam's flag cannot be read now and the person
+/// did not accept that at install). Nothing is written before either refusal.
 pub fn prepare_launch(
     profile_dir: &Path,
     game: &GameTarget,
     vars: &BTreeMap<String, String>,
     steam_exe: Option<&Path>,
+    engines: &EngineSet,
 ) -> Result<ProcessPlan> {
-    prepare_launch_with(profile_dir, game, vars, steam_exe, &ModsEnv::from_process())
+    prepare_launch_with(
+        profile_dir,
+        game,
+        vars,
+        steam_exe,
+        engines,
+        &ModsEnv::from_process(),
+    )
 }
 
 /// [`prepare_launch`], looking for the player's mods in the mod managers' folders `mods_env` names.
@@ -433,6 +452,7 @@ pub fn prepare_launch_with(
     game: &GameTarget,
     vars: &BTreeMap<String, String>,
     steam_exe: Option<&Path>,
+    engines: &EngineSet,
     mods_env: &ModsEnv,
 ) -> Result<ProcessPlan> {
     let profile =
@@ -453,7 +473,8 @@ pub fn prepare_launch_with(
     let m = Manifest::parse(&ledger.manifest)?;
 
     // This profile's install is THIS game: the folder and the program the ledger recorded.
-    let dir = plain(&canonical_dir(&game.dir)?);
+    let game_dir = canonical_dir(&game.dir)?;
+    let dir = plain(&game_dir);
     if dir != ledger.game.dir {
         return Err(LauncherError::new(codes::GAME_MISMATCH)
             .with("field", "dir")
@@ -467,6 +488,11 @@ pub fn prepare_launch_with(
             .with("want", ledger.game.exe.clone())
             .with("got", exe_rel));
     }
+
+    // The anti-cheat this game carries NOW, as install asks it (the one gate both share): an
+    // update may have added one since, or installed a kernel driver. Before anything about the
+    // install itself, so the person is told why it may never start rather than sent to Install.
+    refuse_anti_cheat(game, &game_dir, engines)?;
 
     // Every variable present, and safe where it goes.
     for name in m.variables() {

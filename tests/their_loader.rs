@@ -100,6 +100,7 @@ fn launch(w: &World) -> Vec<String> {
         &w.target(),
         &vars(),
         Some(std::path::Path::new("/opt/fake/steam")),
+        &no_markers(),
     )
     .unwrap()
     .args
@@ -633,14 +634,14 @@ fn under_proton_the_override_that_loads_a_kept_proxy_stays_too() {
 
     // Nothing of theirs: everything back, byte for byte.
     plan_and_install(&doorstop_runner(&ours()), &game, &w.profile());
-    prepare_launch(&w.profile(), &game, &vars(), steam).unwrap();
+    prepare_launch(&w.profile(), &game, &vars(), steam, &no_markers()).unwrap();
     let report = uninstall(&w.profile(), &game).unwrap();
     assert!(report.proton_restored && report.proton_overrides_kept.is_empty());
     assert_eq!(fs::read_to_string(pfx.join("user.reg")).unwrap(), USER_REG);
 
     // Their BepInEx arrived and runs through our proxy: under Proton it needs the override too.
     plan_and_install(&doorstop_runner(&ours()), &game, &w.profile());
-    prepare_launch(&w.profile(), &game, &vars(), steam).unwrap();
+    prepare_launch(&w.profile(), &game, &vars(), steam, &no_markers()).unwrap();
     write(&w.game.join("doorstop_config.ini"), BEPINEX_INI);
     w.bepinex_folder();
     let report = uninstall(&w.profile(), &game).unwrap();
@@ -761,6 +762,7 @@ fn a_path_with_spaces_is_one_argument_and_carries_no_quotes() {
         &game,
         &vars(),
         Some(std::path::Path::new("/opt/fake/steam")),
+        &no_markers(),
     )
     .unwrap()
     .args;

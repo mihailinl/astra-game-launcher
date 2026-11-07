@@ -140,7 +140,7 @@ fn a_source2_foundation_installs_plays_and_uninstalls_on_a_source2_game() {
         d.digest(),
         "the ledger keeps the descriptor the plan pinned"
     );
-    prepare_launch(&profile, &game, &vars(), None).unwrap();
+    prepare_launch(&profile, &game, &vars(), None, &no_markers()).unwrap();
 
     // Uninstall: the game folder byte for byte as it was.
     uninstall(&profile, &game).unwrap();
@@ -202,7 +202,7 @@ fn a_foundation_whose_descriptor_carries_mods_installs_as_without_it() {
             assert_eq!(pinned.sha256, d.digest());
             let ledger = install(&pkg, &plan, &game, ACCEPT, &Ctx::silent()).unwrap();
             assert_eq!(ledger.descriptor_sha256.as_deref(), Some(d.digest()));
-            prepare_launch(&profile, &game, &vars(), None).unwrap();
+            prepare_launch(&profile, &game, &vars(), None, &no_markers()).unwrap();
             uninstall(&profile, &game).unwrap();
             assert_eq!(snapshot(dir.path()), before);
             (
@@ -470,7 +470,7 @@ fn a_restored_source2_foundation_refuses_play_and_uninstalls() {
     let profile = profiles.join("p");
     let plan = plan_install_in(&pkg, &game, &profile, &set, Provenance::Community, None).unwrap();
     install(&pkg, &plan, &game, ACCEPT, &Ctx::silent()).unwrap();
-    prepare_launch(&profile, &game, &vars(), None).unwrap();
+    prepare_launch(&profile, &game, &vars(), None, &no_markers()).unwrap();
 
     let r = restore_game_files(&profile, &game).unwrap();
     assert_eq!(r.removed, ["s2bridge.ini", "dinput8.dll"]);
@@ -491,7 +491,7 @@ fn a_restored_source2_foundation_refuses_play_and_uninstalls() {
         plan.engine_descriptor.map(|d| d.sha256)
     );
 
-    let e = prepare_launch(&profile, &game, &vars(), None).unwrap_err();
+    let e = prepare_launch(&profile, &game, &vars(), None, &no_markers()).unwrap_err();
     assert_eq!(
         (e.code, e.param("reason")),
         (codes::NEEDS_REINSTALL, Some("restored"))

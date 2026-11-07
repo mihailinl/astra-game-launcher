@@ -1198,6 +1198,7 @@ fn an_unchecked_plan_needs_its_own_accept_and_play_checks_vac_again() {
         &at(ABSENT),
         &vars(),
         Some(Path::new("/opt/fake/steam")),
+        &no_markers(),
     )
     .unwrap();
     uninstall(&profiles.join("u"), &at(ABSENT)).unwrap();
@@ -1214,7 +1215,14 @@ fn an_unchecked_plan_needs_its_own_accept_and_play_checks_vac_again() {
     )
     .unwrap();
     let steam = Some(Path::new("/opt/fake/steam"));
-    prepare_launch(&profiles.join("c"), &at(CLEAR), &vars(), steam).unwrap();
+    prepare_launch(
+        &profiles.join("c"),
+        &at(CLEAR),
+        &vars(),
+        steam,
+        &no_markers(),
+    )
+    .unwrap();
 
     // The ledger keeps the person's acceptance only where one was given.
     assert!(
@@ -1237,7 +1245,14 @@ fn an_unchecked_plan_needs_its_own_accept_and_play_checks_vac_again() {
     unity_game(other.path(), "Some Game");
     let mut elsewhere = at(CLEAR);
     elsewhere.dir = other.path().to_path_buf();
-    let e = prepare_launch(&profiles.join("c"), &elsewhere, &vars(), steam).unwrap_err();
+    let e = prepare_launch(
+        &profiles.join("c"),
+        &elsewhere,
+        &vars(),
+        steam,
+        &no_markers(),
+    )
+    .unwrap_err();
     assert_eq!(
         (e.code, e.param("field")),
         (codes::GAME_MISMATCH, Some("dir"))
@@ -1245,7 +1260,14 @@ fn an_unchecked_plan_needs_its_own_accept_and_play_checks_vac_again() {
     std::fs::write(game.join("Other.exe"), b"MZ").unwrap();
     let mut other_exe = at(CLEAR);
     other_exe.exe = "Other.exe".into();
-    let e = prepare_launch(&profiles.join("c"), &other_exe, &vars(), steam).unwrap_err();
+    let e = prepare_launch(
+        &profiles.join("c"),
+        &other_exe,
+        &vars(),
+        steam,
+        &no_markers(),
+    )
+    .unwrap_err();
     assert_eq!(
         (e.code, e.param("field")),
         (codes::GAME_MISMATCH, Some("exe"))
@@ -1253,7 +1275,14 @@ fn an_unchecked_plan_needs_its_own_accept_and_play_checks_vac_again() {
 
     // Steam's appinfo cannot be read now, and nobody accepted an unread flag for this install.
     std::fs::rename(&path, world.join("away.vdf")).unwrap();
-    let e = prepare_launch(&profiles.join("c"), &at(CLEAR), &vars(), steam).unwrap_err();
+    let e = prepare_launch(
+        &profiles.join("c"),
+        &at(CLEAR),
+        &vars(),
+        steam,
+        &no_markers(),
+    )
+    .unwrap_err();
     assert_eq!(e.code, codes::VAC_UNCHECKED);
     std::fs::rename(world.join("away.vdf"), &path).unwrap();
 
@@ -1267,7 +1296,65 @@ fn an_unchecked_plan_needs_its_own_accept_and_play_checks_vac_again() {
     )
     .0;
     std::fs::write(&path, flagged).unwrap();
-    let e = prepare_launch(&profiles.join("c"), &at(CLEAR), &vars(), steam).unwrap_err();
+    let e = prepare_launch(
+        &profiles.join("c"),
+        &at(CLEAR),
+        &vars(),
+        steam,
+        &no_markers(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.param("kind")),
+        (codes::ANTI_CHEAT, Some(VALVE_ANTI_CHEAT))
+    );
+}
+
+/// The person's acceptance at install covers an UNREAD VAC flag and nothing else: an install
+/// accepted while Steam's appinfo could not be read plays while it still cannot, and while it
+/// reads clear; once Steam flags the game VAC, Play refuses it (`valve-anti-cheat`) whatever was
+/// accepted, as planning would. The ledger records only that acceptance
+/// (`vac_unchecked_accepted`), never a "VAC accepted": there is no such thing to accept.
+///
+/// Mutation (watched red): Play skipping `vac_check` when `vac_unchecked_accepted` is set.
+#[test]
+fn an_accepted_unread_flag_never_covers_a_vac_flag_at_play() {
+    let world = Tmp::new("vac-later");
+    let path = world.join("appinfo.vdf");
+    let game = Tmp::new("game");
+    unity_game(game.path(), "Some Game");
+    let profiles = Tmp::new("profiles");
+    let mut at = target(game.path(), "Some Game.exe", Some(CLEAR), Platform::Windows);
+    at.steam_appinfo = Some(path.clone());
+    let steam = Some(Path::new("/opt/fake/steam"));
+    let play = || prepare_launch(&profiles.join("p"), &at, &vars(), steam, &no_markers());
+
+    // Nothing to read at install: accepted, recorded, and it plays.
+    let pkg = runner();
+    let plan = plan_install(&pkg, &at, &profiles.join("p")).unwrap();
+    assert!(!plan.vac_checked);
+    install(&pkg, &plan, &at, ACCEPT, &Ctx::silent()).unwrap();
+    assert!(
+        installed(&profiles.join("p"))
+            .unwrap()
+            .unwrap()
+            .vac_unchecked_accepted
+    );
+    play().unwrap();
+    // Read and clear: it plays.
+    std::fs::write(&path, vac_file(V29)).unwrap();
+    play().unwrap();
+    // Flagged VAC since: refused, the acceptance notwithstanding.
+    let flagged = file(
+        V29,
+        &[(
+            CLEAR,
+            app_with_categories(CLEAR, vec![("category_8", Str("1"))]),
+        )],
+    )
+    .0;
+    std::fs::write(&path, flagged).unwrap();
+    let e = play().unwrap_err();
     assert_eq!(
         (e.code, e.param("kind")),
         (codes::ANTI_CHEAT, Some(VALVE_ANTI_CHEAT))

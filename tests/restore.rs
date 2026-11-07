@@ -282,7 +282,8 @@ fn a_restore_keeps_the_backup_it_could_not_put_back() {
             "gone {gone}"
         );
         assert!(l.proton.is_empty() && l.proxy_folders.is_empty());
-        let e = prepare_launch(&w.profile(), &w.target(), &vars(), None).unwrap_err();
+        let e =
+            prepare_launch(&w.profile(), &w.target(), &vars(), None, &no_markers()).unwrap_err();
         assert_eq!(e.param("reason"), Some("restored"));
         // Again: nothing changes, the backup stays.
         restore_game_files(&w.profile(), &w.target()).unwrap();
@@ -416,6 +417,7 @@ fn what_our_own_loaders_write_never_keeps_our_proxy() {
             &target,
             &vars(),
             Some(std::path::Path::new("/opt/fake/steam")),
+            &no_markers(),
         )
         .unwrap();
         let ledger = installed(&profile).unwrap().unwrap();
@@ -537,9 +539,9 @@ fn a_clean_restore_puts_the_game_folder_back_and_keeps_the_profile() {
 #[test]
 fn play_after_a_restore_is_refused() {
     let w = World::new().install();
-    prepare_launch(&w.profile(), &w.target(), &vars(), None).unwrap();
+    prepare_launch(&w.profile(), &w.target(), &vars(), None, &no_markers()).unwrap();
     restore_game_files(&w.profile(), &w.target()).unwrap();
-    let e = prepare_launch(&w.profile(), &w.target(), &vars(), None).unwrap_err();
+    let e = prepare_launch(&w.profile(), &w.target(), &vars(), None, &no_markers()).unwrap_err();
     assert_eq!(
         (e.code, e.param("reason")),
         (codes::NEEDS_REINSTALL, Some("restored"))
@@ -595,7 +597,7 @@ fn an_install_over_a_restored_ledger_is_a_fresh_install() {
     );
     let again = install(&pkg, &plan, &w.target(), ACCEPT, &Ctx::silent()).unwrap();
     assert_eq!(again, first);
-    prepare_launch(&w.profile(), &w.target(), &vars(), None).unwrap();
+    prepare_launch(&w.profile(), &w.target(), &vars(), None, &no_markers()).unwrap();
     uninstall(&w.profile(), &w.target()).unwrap();
     assert_eq!(snapshot(w.game.path()), before);
 }

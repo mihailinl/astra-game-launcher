@@ -28,7 +28,7 @@ use astra_game_launcher::{
     ANTI_CHEAT_CODES, ANTI_CHEAT_SIGNATURES, AntiCheatMarker, AntiCheatMarkerKind, Ctx, Descriptor,
     Detection, EngineSet, Moderation, ONLINE_CATEGORIES, Origin, Platform, Provenance,
     SignatureName, VALVE_ANTI_CHEAT, codes, detect_with, detect_with_engines, install, install_in,
-    installed, plan_install_in, uninstall,
+    installed, plan_install_in, prepare_launch, uninstall,
 };
 use common::scrape::{literals, rust_files};
 use common::*;
@@ -286,6 +286,212 @@ fn install_plans_again_with_the_markers_the_catalogue_has_now() {
     uninstall(&p, &game).unwrap();
     let plan = plan_with(&p, &EngineSet::empty());
     install(&runner(), &plan, &game, ACCEPT, &Ctx::silent()).unwrap();
+}
+
+/// A Unity game installed (first-party, no markers) in a fresh profile, and how Play goes for it
+/// with `set` now: its refusal's code and `kind`, or `None` when it plays.
+struct Played {
+    game: Tmp,
+    profiles: Tmp,
+}
+
+impl Played {
+    fn installed() -> Played {
+        let game = Tmp::new("ac-play");
+        unity_game(game.path(), "Game");
+        let profiles = Tmp::new("ac-play-profiles");
+        let w = Played { game, profiles };
+        plan_and_install(&runner(), &w.target(), &w.profile());
+        w
+    }
+
+    fn profile(&self) -> std::path::PathBuf {
+        self.profiles.join("p")
+    }
+
+    fn target(&self) -> astra_game_launcher::GameTarget {
+        target(self.game.path(), "Game.exe", None, Platform::Windows)
+    }
+
+    fn play(&self, set: &EngineSet) -> Option<(String, Option<String>)> {
+        prepare_launch(&self.profile(), &self.target(), &vars(), None, set)
+            .err()
+            .map(|e| (e.code.to_owned(), e.params.get("kind").cloned()))
+    }
+
+    /// Every byte of the profile and of the game folder.
+    fn bytes(&self) -> (BTreeMap<String, Vec<u8>>, BTreeMap<String, Vec<u8>>) {
+        (snapshot(&self.profile()), snapshot(self.game.path()))
+    }
+}
+
+/// **Play checks anti-cheat as install does** (0.5.2): a signature an update put into the game's
+/// folder after the install — every name of every signature — refuses the Play with the very
+/// `anti-cheat{kind}` planning gives, and writes nothing (the profile and the game folder byte
+/// for byte); gone again, it plays. Before 0.5.2 Play read no anti-cheat but VAC, and launched
+/// the integration into a game that now bans for it.
+///
+/// Mutation (watched red): `prepare_launch_with` without its `refuse_anti_cheat` call.
+#[test]
+fn play_refuses_a_signature_that_arrived_after_the_install() {
+    let w = Played::installed();
+    assert_eq!(
+        w.play(&EngineSet::empty()),
+        None,
+        "nothing detected: it plays"
+    );
+    for sig in ANTI_CHEAT_SIGNATURES {
+        for n in sig.names {
+            let (name, is_dir) = instance(n);
+            // Beside the program, and deeper: an update's own folder.
+            for at in [
+                w.game.path().to_path_buf(),
+                w.game.join("Game_Data/Plugins"),
+            ] {
+                lay(&at, &name, is_dir);
+                let before = w.bytes();
+                assert_eq!(
+                    w.play(&EngineSet::empty()),
+                    anti_cheat(sig.code),
+                    "{name} in {}",
+                    at.display()
+                );
+                assert!(w.bytes() == before, "a refused Play wrote nothing ({name})");
+                let laid = at.join(&name);
+                if is_dir {
+                    fs::remove_dir_all(&laid).unwrap();
+                } else {
+                    fs::remove_file(&laid).unwrap();
+                }
+                assert_eq!(w.play(&EngineSet::empty()), None, "{name} gone: it plays");
+            }
+        }
+    }
+}
+
+/// A marker of the signed catalogue's `anticheat[]` refuses the Play of a game installed before
+/// the catalogue listed it (`listed-anti-cheat`), for a folder and for a `process-name` file:
+/// the markers are the caller's NOW, never the plan's. A marker the game does not hold, and no
+/// markers at all, change nothing.
+///
+/// Mutation (watched red): `prepare_launch` handing `prepare_launch_with` `EngineSet::empty()`
+/// in place of the caller's set.
+#[test]
+fn play_refuses_a_marker_the_catalogue_added_after_the_install() {
+    use AntiCheatMarkerKind::*;
+    let w = Played::installed();
+    lay(&w.game.join("Game_Data"), "Guard", true);
+    lay(w.game.path(), "guard.bin", false);
+    assert_eq!(w.play(&EngineSet::empty()), None, "no markers: it plays");
+    assert_eq!(
+        w.play(&markers(&[
+            (FolderMarker, "NotHere"),
+            (ProcessName, "nothere.bin")
+        ])),
+        None,
+        "markers the game does not hold change nothing"
+    );
+    let before = w.bytes();
+    for set in [
+        markers(&[(FolderMarker, "guard")]),
+        markers(&[(ProcessName, "GUARD.BIN")]),
+    ] {
+        assert_eq!(w.play(&set), anti_cheat(codes::LISTED_ANTI_CHEAT));
+        assert!(w.bytes() == before, "a refused Play wrote nothing");
+    }
+}
+
+/// Anti-cheat is asked before anything about the install itself: a game that gained one and
+/// whose install is broken too is told why it may never start, not sent to Install (which would
+/// only refuse it there). A Play that is not this install's game is still `game-mismatch` first.
+#[test]
+fn play_says_anti_cheat_before_the_install_is_checked() {
+    let w = Played::installed();
+    lay(w.game.path(), "EasyAntiCheat", true);
+    // Broken twice over: a file of ours in the profile gone, and the proxy we added beside the
+    // game gone.
+    let ledger = installed(&w.profile()).unwrap().unwrap();
+    fs::remove_file(w.profile().join(&ledger.files[0].rel)).unwrap();
+    fs::remove_file(w.game.join("winhttp.dll")).unwrap();
+    assert_eq!(w.play(&EngineSet::empty()), anti_cheat("easy-anti-cheat"));
+    fs::remove_dir_all(w.game.join("EasyAntiCheat")).unwrap();
+    assert_eq!(
+        w.play(&EngineSet::empty()).map(|r| r.0),
+        Some(codes::NEEDS_REINSTALL.to_owned())
+    );
+    let other = Tmp::new("ac-play-other");
+    unity_game(other.path(), "Game");
+    lay(other.path(), "EasyAntiCheat", true);
+    let e = prepare_launch(
+        &w.profile(),
+        &target(other.path(), "Game.exe", None, Platform::Windows),
+        &vars(),
+        None,
+        &EngineSet::empty(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        (e.code, e.param("field")),
+        (codes::GAME_MISMATCH, Some("dir"))
+    );
+}
+
+/// Play and planning ask ONE anti-cheat gate, `plan::refuse_anti_cheat`, and it is the only
+/// caller of the scan that reads every signal — the folder signatures, the markers and the
+/// machine's kernel-driver services (`anti_cheat_services::ServiceTree::System`, Windows). So
+/// the kernel signal reaches Play by construction: no test here can install a service under
+/// `HKLM`, and `a_service_is_tied_to_the_game_by_its_image_path` holds the reading itself.
+///
+/// Mutation (watched red): `refuse_anti_cheat` calling a copy of the scan without the services.
+#[test]
+fn play_and_plan_share_one_anti_cheat_gate() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let code_of = |f: &str| common::scrape::code(&fs::read_to_string(root.join(f)).unwrap());
+    let body = |src: &str, name: &str| -> String {
+        let at = src
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("fn {name}"));
+        let open = at + src[at..].find('{').unwrap();
+        let mut depth = 0;
+        for (i, c) in src[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return src[open..=open + i].to_owned();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("fn {name} never closes")
+    };
+    let launch = code_of("launch.rs");
+    let plan = code_of("plan.rs");
+    let detect = code_of("detect.rs");
+    assert!(body(&launch, "prepare_launch_with").contains("refuse_anti_cheat("));
+    assert!(body(&plan, "plan_install_with").contains("refuse_anti_cheat("));
+    assert!(body(&plan, "refuse_anti_cheat").contains("anti_cheat_scan("));
+    assert!(body(&detect, "anti_cheat_scan").contains("anti_cheat_beyond_the_walk("));
+    assert!(body(&detect, "anti_cheat_beyond_the_walk").contains("ServiceTree::System"));
+    // Nobody else scans for a gate of their own.
+    let mut files = Vec::new();
+    rust_files(&root, &mut files);
+    let callers: Vec<String> = files
+        .iter()
+        .filter(|f| !f.ends_with("detect.rs"))
+        .filter(|f| {
+            common::scrape::code(&fs::read_to_string(f).unwrap()).contains("anti_cheat_scan(")
+        })
+        .map(|f| f.display().to_string())
+        .collect();
+    assert_eq!(callers.len(), 1, "{callers:?}");
+    assert_eq!(
+        plan.matches("anti_cheat_scan(").count(),
+        1,
+        "in refuse_anti_cheat alone"
+    );
 }
 
 /// A game Pass A recognised (closed to descriptors) still carries a listed marker; so does one

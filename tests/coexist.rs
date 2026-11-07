@@ -115,7 +115,13 @@ impl World {
     }
 
     fn plan(&self) -> Result<ProcessPlan, LauncherError> {
-        prepare_launch(&self.profile(), &self.target(), &vars(), steam())
+        prepare_launch(
+            &self.profile(),
+            &self.target(),
+            &vars(),
+            steam(),
+            &no_markers(),
+        )
     }
 
     fn play_arm(&self) -> PathBuf {
@@ -491,7 +497,7 @@ fn a_play_refused_after_the_game_files_were_checked_records_nothing() {
     let ledger = w.ledger();
 
     // Steam is nowhere.
-    let e = prepare_launch(&w.profile(), &w.target(), &vars(), None).unwrap_err();
+    let e = prepare_launch(&w.profile(), &w.target(), &vars(), None, &no_markers()).unwrap_err();
     assert_eq!(e.code, codes::STEAM_NOT_FOUND);
     assert_eq!(w.ledger(), ledger);
 
@@ -745,7 +751,7 @@ fn a_game_without_a_steam_appid_gets_no_play_arm() {
     let profile = profiles.join("p");
     let t = target(game.path(), &format!("{GAME}.exe"), None, Platform::Windows);
     plan_and_install(&doorstop_runner(&ours()), &t, &profile);
-    let plan = prepare_launch(&profile, &t, &vars(), None).unwrap();
+    let plan = prepare_launch(&profile, &t, &vars(), None, &no_markers()).unwrap();
     assert_eq!(plan.program, game.join(&format!("{GAME}.exe")));
     assert_eq!(plan.play_arm(), None);
     let spawn = FakeSpawn {

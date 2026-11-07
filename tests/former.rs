@@ -143,6 +143,7 @@ fn a_lost_profile_is_installed_again_and_asks_again() {
             &w.target(),
             &vars(),
             Some(Path::new("/opt/fake/steam")),
+            &no_markers(),
             &env,
         )
     };

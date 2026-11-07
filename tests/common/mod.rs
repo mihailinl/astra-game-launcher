@@ -660,3 +660,9 @@ pub fn appinfo_launch(apps: &[(u32, &str, &str)]) -> Vec<u8> {
     out.extend_from_slice(&0u32.to_le_bytes());
     out
 }
+
+/// No anti-cheat markers: what Play is given by a caller holding no catalogue (the command line),
+/// and the set a test hands `prepare_launch` when markers are not what it is about.
+pub fn no_markers() -> astra_game_launcher::EngineSet {
+    astra_game_launcher::EngineSet::empty()
+}

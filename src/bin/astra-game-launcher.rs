@@ -533,11 +533,14 @@ fn run(argv: &[String]) -> Result<Output, LauncherError> {
             let game = game_target(&a)?;
             let vars = read_vars(&a)?;
             let steam = a.one("--steam").map(PathBuf::from).or_else(gl::find_steam);
+            // The command line holds no catalogue: no markers, as `plan` and `install` here.
+            // The folder signatures, kernel drivers and VAC are checked all the same.
             let plan = gl::prepare_launch(
                 Path::new(a.need("--profile")?),
                 &game,
                 &vars,
                 steam.as_deref(),
+                &gl::EngineSet::empty(),
             )?;
             let dry = a.flag("--dry-run");
             if !dry {
