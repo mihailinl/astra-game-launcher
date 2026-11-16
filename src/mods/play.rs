@@ -203,7 +203,7 @@ pub(crate) fn resolve_play(
     };
     if !matches!(
         game.platform,
-        Platform::Windows | Platform::LinuxProton { .. }
+        Platform::Windows | Platform::LinuxProton { .. } | Platform::LinuxWine { .. }
     ) {
         return Err(unsupported("platform"));
     }

@@ -612,7 +612,7 @@ pub(crate) fn refuse_anti_cheat(
     };
     let os = match game.platform {
         Platform::LinuxNative => "linux",
-        Platform::Windows | Platform::LinuxProton { .. } => "windows",
+        Platform::Windows | Platform::LinuxProton { .. } | Platform::LinuxWine { .. } => "windows",
     };
     // A beta branch's entries count only for a person on it; not known, every one counts.
     let branches = crate::game::steam_app_branches(&game.dir, appid);
@@ -1124,13 +1124,14 @@ fn target_exists(dir: &Path, target: &str, platform: &Platform) -> bool {
     if cfg!(windows) && matches!(platform, Platform::Windows) {
         return Path::new(target).exists();
     }
-    let Platform::LinuxProton { prefix } = platform else {
-        return true;
+    let prefix = match platform {
+        Platform::LinuxProton { prefix } => prefix.as_deref(),
+        Platform::LinuxWine { runner } => Some(runner.prefix.as_path()),
+        _ => return true,
     };
     let root = if drive && parts.len() > 1 {
         let letter = first[..1].to_ascii_lowercase();
         prefix
-            .as_deref()
             .map(|p| p.join("dosdevices").join(format!("{letter}:")))
             .filter(|r| r.exists())
             .or_else(|| (letter == "z").then(|| PathBuf::from("/")))
@@ -1427,7 +1428,7 @@ pub(crate) fn plan_install_with(
     if loader_checks
         && matches!(
             game.platform,
-            Platform::Windows | Platform::LinuxProton { .. }
+            Platform::Windows | Platform::LinuxProton { .. } | Platform::LinuxWine { .. }
         )
     {
         for (f, a) in pkg.game_files.iter().zip(&game_files) {
@@ -1572,7 +1573,7 @@ fn engine_check(
 fn planning_hint(game: &GameTarget, trusted: Option<u32>) -> Option<String> {
     let appid = trusted?;
     let os = match game.platform {
-        Platform::Windows | Platform::LinuxProton { .. } => "windows",
+        Platform::Windows | Platform::LinuxProton { .. } | Platform::LinuxWine { .. } => "windows",
         Platform::LinuxNative => "linux",
     };
     appinfo_files(game)

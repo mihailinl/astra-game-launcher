@@ -819,7 +819,17 @@ pub fn prepare_launch_with(
             .with("platform", "linux-proton")
             .with("reason", "needs-steam-appid"));
     }
-    if game.steam_appid.is_some() && steam.is_none() {
+    // A game under the caller's own Wine/Proton is started by that runner, never through Steam,
+    // whatever appid the caller also knows it by: no Steam command, no play-arm, no grant.
+    let wine = match &game.platform {
+        Platform::LinuxWine { runner } => {
+            runner.check(&profile)?;
+            Some(runner)
+        }
+        _ => None,
+    };
+    let start_appid = game.steam_appid.filter(|_| wine.is_none());
+    if start_appid.is_some() && steam.is_none() {
         return Err(LauncherError::new(codes::STEAM_NOT_FOUND));
     }
 
@@ -828,7 +838,7 @@ pub fn prepare_launch_with(
     let mods = resolved.with;
 
     let flavor = match game.platform {
-        Platform::LinuxProton { .. } => Flavor::Proton,
+        Platform::LinuxProton { .. } | Platform::LinuxWine { .. } => Flavor::Proton,
         _ => Flavor::Native,
     };
     let x = Expander {
@@ -888,7 +898,7 @@ pub fn prepare_launch_with(
     // everything this plan hands the game from the profile must be in it. Refused before
     // `[[config_writes]]` and the Proton override write anything.
     let sandbox_grant = match steam {
-        Some(s) if s.flatpak && game.steam_appid.is_some() => sandbox_layout(
+        Some(s) if s.flatpak && start_appid.is_some() => sandbox_layout(
             &profile,
             &x.profile,
             &args,
@@ -951,7 +961,7 @@ pub fn prepare_launch_with(
         flatpak,
         grant,
     };
-    let mut plan = match game.steam_appid {
+    let mut plan = match start_appid {
         Some(appid) => {
             let steam = steam.expect("checked above");
             let mut argv = steam.prefix_args.clone();
@@ -981,8 +991,26 @@ pub fn prepare_launch_with(
                 .iter()
                 .map(|(k, v)| Ok((k.clone(), x.expand(v)?)))
                 .collect::<Result<Vec<_>>>()?;
+            let exe = plain(&game_root.join(&exe_file));
+            let (program, args, env) = match wine {
+                // The integration's Wine overrides ride `WINEDLLOVERRIDES`, with Doorstop's
+                // `winhttp` when it loads the game's proxy (a Steam launch carries that in the
+                // user's launch options, a Proton prefix in `user.reg`; neither is ours here).
+                Some(runner) => {
+                    let mut overrides = m.proton_overrides();
+                    if (through_doorstop || with_mods.is_some())
+                        && !overrides
+                            .iter()
+                            .any(|(d, _)| d.eq_ignore_ascii_case("winhttp"))
+                    {
+                        overrides.push(("winhttp".to_owned(), "n,b".to_owned()));
+                    }
+                    runner.command(&exe, args, env, &overrides)
+                }
+                None => (exe, args, env),
+            };
             ProcessPlan {
-                program: plain(&game_root.join(&exe_file)),
+                program,
                 args,
                 env,
                 cwd: Some(plain(&game_root)),

@@ -47,6 +47,7 @@ mod running;
 mod safe_dir;
 pub mod steam_appinfo;
 mod steam_userconfig;
+mod wine;
 mod zip_consistency;
 
 pub use content::{ContentKind, ContentPart};
@@ -70,9 +71,9 @@ pub use flatpak::{
 };
 pub use former::FormerKind;
 pub use game::{
-    GameTarget, Platform, STEAM_DEFAULT_BRANCH, STEAM_UPDATE_STATES, proton_prefix_for,
-    steam_app_branches, steam_app_state, steam_appid_of_dir, steam_appids_of_dir,
-    steam_update_states,
+    GameTarget, Platform, RunnerKind, STEAM_DEFAULT_BRANCH, STEAM_UPDATE_STATES, WineRunner,
+    proton_prefix_for, steam_app_branches, steam_app_state, steam_appid_of_dir,
+    steam_appids_of_dir, steam_update_states,
 };
 pub use install::{
     KEPT_FOLDER_GAINED_FILES, PROTON_RECORD_REFUSED, UninstallReport, install, install_in,

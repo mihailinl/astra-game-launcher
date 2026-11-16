@@ -20,6 +20,40 @@ pub enum Platform {
         prefix: Option<PathBuf>,
     },
     LinuxNative,
+    /// A Windows game on Linux under a Wine or Proton the CALLER chose (Heroic, Lutris, Bottles…),
+    /// not Steam's. Started by the launcher itself through [`WineRunner`]; nothing is written
+    /// into the runner's prefix (`crate::wine`). Needs no Steam and no appid.
+    LinuxWine {
+        runner: WineRunner,
+    },
+}
+
+/// What kind of program [`WineRunner::bin`] is, which decides how the game's exe is handed to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunnerKind {
+    /// A `wine` binary: `bin <exe> <args…>`.
+    Wine,
+    /// A Proton's `proton` script: `bin run <exe> <args…>`.
+    Proton,
+    /// `umu-run`: `bin <exe> <args…>`, with `GAMEID` in [`WineRunner::env`].
+    Umu,
+}
+
+/// The Wine/Proton a game is started with, as the caller read it from the launcher that owns the
+/// game. Checked by [`WineRunner::check`] before anything is spawned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WineRunner {
+    pub kind: RunnerKind,
+    /// Absolute path of the `wine` / `proton` / `umu-run` program.
+    pub bin: PathBuf,
+    /// Absolute path of the existing Wine prefix (`WINEPREFIX`). Never written to.
+    pub prefix: PathBuf,
+    /// The environment the runner needs, carried to the process as given (the caller filters
+    /// it). Keys are `[A-Z_][A-Z0-9_]*`; a `WINEDLLOVERRIDES` here is merged with the
+    /// integration's, not replaced.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
 }
 
 impl Platform {
@@ -29,6 +63,8 @@ impl Platform {
             Platform::Windows => "windows-x64",
             Platform::LinuxProton { .. } => "linux-proton",
             Platform::LinuxNative => "linux-x64",
+            // A Windows game under Wine: the same manifest platform as under Proton.
+            Platform::LinuxWine { .. } => "linux-proton",
         }
     }
 }
