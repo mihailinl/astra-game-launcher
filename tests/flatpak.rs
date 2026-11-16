@@ -3,10 +3,11 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Play through Flathub's Steam (0.5.3): the plan is `flatpak run com.valvesoftware.Steam
-//! -applaunch …`, and `launch` grants Steam's sandbox read/write access to exactly the profile
-//! folder in the user's Flatpak overrides, right before the spawn, after reading Steam's
-//! permissions; `uninstall` takes exactly that entry out again. Every overrides file here is a
-//! temporary one and every `flatpak` a script: nothing touches this machine's Flatpak.
+//! -applaunch …`, and `launch` grants Steam's sandbox read/write access to exactly
+//! `<profile>/BepInEx` — never the profile, whose root holds the ledger, the backups and the
+//! grant's own record — in the user's Flatpak overrides, right before the spawn, after reading
+//! Steam's permissions; `uninstall` takes out exactly what the grant added. Every overrides file
+//! here is a temporary one and every `flatpak` a script: nothing touches this machine's Flatpak.
 
 #![cfg(unix)]
 
@@ -17,9 +18,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use astra_game_launcher::{
-    FLATPAK_GRANT_FILE_NAME, FLATPAK_REVOKE_FAILED, FlatpakGrant, LauncherError,
-    PLAY_ARM_FILE_NAME, Platform, ProcessPlan, STEAM_FLATPAK_APP, Spawn, SteamCommand, codes,
-    flatpak::grant_profile_access, launch_with, prepare_launch, uninstall,
+    FLATPAK_GRANT_FILE_NAME, FLATPAK_REVOKE_FAILED, FlatpakGrant, LEDGER_FILE_NAME, LauncherError,
+    MODS_CHOICE_FILE_NAME, PLAY_ARM_FILE_NAME, Platform, ProcessPlan, SANDBOX_FOLDER,
+    STEAM_FLATPAK_APP, Spawn, SteamCommand, UninstallReport, codes, flatpak::grant_sandbox_access,
+    launch_with, prepare_launch, uninstall_with,
 };
 use common::*;
 
@@ -39,9 +41,14 @@ struct World {
 }
 
 impl World {
-    /// An installed integration, and a `flatpak` that answers `info --show-permissions` with
+    /// The test runner installed, and a `flatpak` that answers `info --show-permissions` with
     /// `permissions`.
     fn installed(permissions: &str) -> World {
+        World::installed_with(&runner_manifest(""), permissions)
+    }
+
+    /// The package of `manifest` installed.
+    fn installed_with(manifest: &str, permissions: &str) -> World {
         let w = World {
             game: Tmp::new("fp-game"),
             profiles: Tmp::new("fp-profiles"),
@@ -49,7 +56,8 @@ impl World {
             data: Tmp::new("fp-data"),
         };
         unity_game(w.game.path(), "Game");
-        plan_and_install(&runner(), &w.target(), &w.profile());
+        let pkg = open(&runner_zip(manifest)).unwrap();
+        plan_and_install(&pkg, &w.target(), &w.profile());
         let script = format!(
             "#!/bin/sh\nif [ \"$1\" = info ] && [ \"$2\" = --show-permissions ] && [ \"$3\" = {STEAM_FLATPAK_APP} ]; then\ncat <<'EOF'\n{permissions}EOF\nexit 0\nfi\nexit 1\n"
         );
@@ -59,6 +67,10 @@ impl World {
 
     fn profile(&self) -> PathBuf {
         self.profiles.join("p")
+    }
+
+    fn granted(&self) -> PathBuf {
+        self.profile().join(SANDBOX_FOLDER)
     }
 
     fn target(&self) -> astra_game_launcher::GameTarget {
@@ -84,10 +96,10 @@ impl World {
     }
 
     fn entry(&self) -> String {
-        format!("{}:rw", self.profile().display())
+        format!("{}:rw", self.granted().display())
     }
 
-    fn plan(&self) -> ProcessPlan {
+    fn prepare(&self) -> Result<ProcessPlan, LauncherError> {
         prepare_launch(
             &self.profile(),
             &self.target(),
@@ -95,11 +107,18 @@ impl World {
             Some(&self.steam()),
             &no_markers(),
         )
-        .unwrap()
+    }
+
+    fn plan(&self) -> ProcessPlan {
+        self.prepare().unwrap()
     }
 
     fn launch(&self, plan: &ProcessPlan, spy: &Spy) -> Result<(), LauncherError> {
         launch_with(plan, spy, &no_markers(), Some(&self.overrides()))
+    }
+
+    fn uninstall(&self) -> UninstallReport {
+        uninstall_with(&self.profile(), &self.target(), Some(&self.overrides())).unwrap()
     }
 
     fn record(&self) -> Option<FlatpakGrant> {
@@ -144,7 +163,7 @@ fn unusable(e: &LauncherError, reason: &str) {
 }
 
 /// The plan through Flathub's Steam is the native plan behind `flatpak run
-/// com.valvesoftware.Steam`, and only it carries a sandbox grant: the profile, canonical.
+/// com.valvesoftware.Steam`, and only it carries a sandbox grant: `<profile>/BepInEx`.
 ///
 /// Mutation (watched red): `prepare_launch_with` setting `sandbox_grant` for every Steam.
 #[test]
@@ -165,10 +184,7 @@ fn the_flatpak_plan_is_the_native_one_behind_flatpak_run() {
         ["run", STEAM_FLATPAK_APP, "-applaunch", &APPID.to_string()]
     );
     assert_eq!(flat.args[2..], native.args[..]);
-    assert_eq!(
-        flat.sandbox_grant.as_deref(),
-        Some(fs::canonicalize(w.profile()).unwrap().as_path())
-    );
+    assert_eq!(flat.sandbox_grant.as_deref(), Some(w.granted().as_path()));
     assert_eq!(native.program, PathBuf::from("/opt/fake/steam"));
     assert_eq!(native.args[..2], ["-applaunch", &APPID.to_string()]);
     assert_eq!(native.sandbox_grant, None);
@@ -177,12 +193,99 @@ fn the_flatpak_plan_is_the_native_one_behind_flatpak_run() {
     assert_eq!(w.record(), None);
 }
 
-/// The grant lands before the spawn, adds exactly `<profile>:rw` to the user's own overrides, is
-/// recorded, is not added twice, and uninstall takes exactly it out again: the file comes back
-/// byte for byte.
+/// The grant is `<profile>/BepInEx` and nothing above it: the ledger, the backups, the grant's
+/// own record, the play-arm and the mods choice — every file the launcher trusts outside the
+/// sandbox — are outside the folder granted, and so is the profile itself.
+///
+/// Mutation (watched red): `grant_sandbox_access` granting the profile instead of its `BepInEx`.
+#[test]
+fn the_grant_is_bepinex_alone_never_the_profiles_root() {
+    let w = World::installed(PERMISSIONS);
+    w.launch(&w.plan(), &Spy::on(&w)).unwrap();
+    let record = w.record().unwrap();
+    assert_eq!(record.entry, w.entry());
+    let granted = PathBuf::from(record.entry.strip_suffix(":rw").unwrap());
+    assert_eq!(granted, w.granted());
+    assert!(granted.is_dir());
+    for name in [
+        LEDGER_FILE_NAME,
+        FLATPAK_GRANT_FILE_NAME,
+        PLAY_ARM_FILE_NAME,
+        MODS_CHOICE_FILE_NAME,
+        "astra-launcher-backup",
+        "astra-launcher-ledger.lock",
+    ] {
+        let p = w.profile().join(name);
+        assert!(!p.starts_with(&granted), "{name} inside the grant");
+    }
+    assert!(w.profile().join(LEDGER_FILE_NAME).is_file());
+    assert!(w.profile().join(FLATPAK_GRANT_FILE_NAME).is_file());
+    assert!(!w.profile().starts_with(&granted));
+    // Everything the game is handed from the profile is inside it.
+    let plan = w.plan();
+    let profile = w.profile().display().to_string();
+    for arg in plan.args.iter().filter(|a| a.contains(&profile)) {
+        assert!(
+            arg.contains(&format!("{profile}/{SANDBOX_FOLDER}/")),
+            "{arg}"
+        );
+    }
+}
+
+/// A plan that hands the game a profile path outside `BepInEx` — a `[[config_writes]]` file at the
+/// profile's root, a launch argument naming another folder of it, the profile itself — is refused
+/// rather than granted more, before anything is written. The native Steam plays it as before.
+///
+/// Mutation (watched red): `sandbox_layout` without its `[[config_writes]]` check; without its
+/// argument check.
+#[test]
+fn a_plan_that_needs_more_than_bepinex_is_refused() {
+    let at_root = runner_manifest("").replace(
+        "file = \"${profile}/BepInEx/config/astra.cfg\"",
+        "file = \"${profile}/astra.cfg\"",
+    );
+    let elsewhere = runner_manifest("").replace(
+        "\"${profile}/BepInEx/core/BepInEx.Preloader.dll\"]",
+        "\"${profile}/BepInEx/core/BepInEx.Preloader.dll\", \"--doorstop-clr-corlib-dir\", \"${profile}/dotnet\"]",
+    );
+    let the_profile = runner_manifest("").replace(
+        "\"${profile}/BepInEx/core/BepInEx.Preloader.dll\"]",
+        "\"${profile}/BepInEx/core/BepInEx.Preloader.dll\", \"--root\", \"${profile}\"]",
+    );
+    for (manifest, path) in [
+        (&at_root, "${profile}/astra.cfg".to_owned()),
+        (&elsewhere, "dotnet".to_owned()),
+        (&the_profile, String::new()),
+    ] {
+        assert_ne!(manifest, &runner_manifest(""));
+        let w = World::installed_with(manifest, PERMISSIONS);
+        let before = snapshot(&w.profile());
+        let e = w.prepare().unwrap_err();
+        unusable(&e, "layout");
+        assert!(e.params["path"].ends_with(&path), "{e:?}");
+        assert!(
+            snapshot(&w.profile()) == before,
+            "a refused Play wrote nothing"
+        );
+        prepare_launch(
+            &w.profile(),
+            &w.target(),
+            &vars(),
+            fake_steam(),
+            &no_markers(),
+        )
+        .unwrap();
+    }
+}
+
+/// The grant lands before the spawn, adds exactly `<profile>/BepInEx:rw` to the user's own
+/// overrides, is recorded, is not added twice, and uninstall takes out exactly what it added: the
+/// file comes back byte for byte, whatever shape the user's list had — closed, not closed by a
+/// `;`, empty, ending in a space, with CRLF lines, in a group with no list, in a file with no
+/// `[Context]`, no newline at the end.
 ///
 /// Mutation (watched red): `launch_with` without its grant; `uninstall` without
-/// `revoke_recorded`.
+/// `revoke_recorded`; `remove_entry` ignoring the recorded `separator`.
 #[test]
 fn a_users_overrides_survive_play_and_uninstall_byte_for_byte() {
     let w = World::installed(PERMISSIONS);
@@ -201,64 +304,87 @@ fn a_users_overrides_survive_play_and_uninstall_byte_for_byte() {
         "granted before the spawn"
     );
     assert_eq!(w.overrides_text().as_deref(), Some(granted.as_str()));
+    let record = w.record().unwrap();
     assert_eq!(
-        w.record(),
-        Some(FlatpakGrant {
-            app: STEAM_FLATPAK_APP.to_owned(),
-            entry: w.entry(),
-            overrides: w.overrides(),
-            preexisting: false,
-        })
+        (
+            record.app.as_str(),
+            record.entry.clone(),
+            record.overrides.clone(),
+            record.preexisting
+        ),
+        (STEAM_FLATPAK_APP, w.entry(), w.overrides(), false)
     );
     // Again: nothing added twice, and still ours.
     w.launch(&w.plan(), &spy).unwrap();
     assert_eq!(w.overrides_text().as_deref(), Some(granted.as_str()));
     assert!(!w.record().unwrap().preexisting);
-
-    let r = uninstall(&w.profile(), &w.target()).unwrap();
+    let r = w.uninstall();
     assert!(r.warnings.is_empty(), "{:?}", r.warnings);
     assert_eq!(w.overrides_text().as_deref(), Some(USERS));
     assert_eq!(w.record(), None);
+
+    for seed in [
+        "[Context]\nfilesystems=/home/u/Games:ro\n",
+        "[Context]\nfilesystems=\n",
+        "[Context]\nfilesystems=/home/u/Games:ro; \n",
+        "[Context]\r\nfilesystems=/a;/b\r\nshared=ipc;\r\n",
+        "[Context]\nshared=network;\n",
+        "[Session Bus Policy]\norg.kde.StatusNotifierWatcher=talk",
+        "",
+    ] {
+        let w = World::installed(PERMISSIONS);
+        write(&w.overrides(), seed.as_bytes());
+        w.launch(&w.plan(), &Spy::on(&w)).unwrap();
+        assert!(
+            w.overrides_text()
+                .unwrap()
+                .contains(&format!("{};", w.entry()))
+        );
+        let r = w.uninstall();
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert_eq!(w.overrides_text().as_deref(), Some(seed), "{seed:?}");
+    }
 }
 
-/// With no overrides file, the grant creates it (and its folders) and uninstall leaves the group
-/// with no list.
+/// With no overrides file, the grant creates it (and its folders), and uninstall deletes it again.
+///
+/// Mutation (watched red): `revoke_recorded` never deleting a file the grant created.
 #[test]
-fn an_absent_overrides_file_is_created() {
+fn an_absent_overrides_file_is_created_and_deleted_again() {
     let w = World::installed(PERMISSIONS);
     w.launch(&w.plan(), &Spy::on(&w)).unwrap();
     assert_eq!(
         w.overrides_text(),
         Some(format!("[Context]\nfilesystems={};\n", w.entry()))
     );
-    uninstall(&w.profile(), &w.target()).unwrap();
-    assert_eq!(w.overrides_text().as_deref(), Some("[Context]\n"));
+    assert!(w.uninstall().warnings.is_empty());
+    assert!(!w.overrides().exists());
 }
 
-/// A profile the user listed already, in any mode, is theirs: nothing is written, and uninstall
+/// A folder the user listed already, in any mode, is theirs: nothing is written, and uninstall
 /// takes nothing out.
 #[test]
-fn an_already_listed_profile_is_the_users() {
+fn an_already_listed_folder_is_the_users() {
     let w = World::installed(PERMISSIONS);
     let seed = format!(
         "[Context]\nfilesystems={}:ro;\nshared=network;\n",
-        w.profile().display()
+        w.granted().display()
     );
     write(&w.overrides(), seed.as_bytes());
     w.launch(&w.plan(), &Spy::on(&w)).unwrap();
     assert_eq!(w.overrides_text().as_deref(), Some(seed.as_str()));
     assert!(w.record().unwrap().preexisting);
-    let r = uninstall(&w.profile(), &w.target()).unwrap();
+    let r = w.uninstall();
     assert!(r.warnings.is_empty());
     assert_eq!(w.overrides_text().as_deref(), Some(seed.as_str()));
     assert_eq!(w.record(), None);
 }
 
-/// A profile the user denies Steam (`!<profile>`) is refused, never overridden.
+/// A folder the user denies Steam (`!<folder>`) is refused, never overridden.
 #[test]
-fn a_denied_profile_is_refused() {
+fn a_denied_folder_is_refused() {
     let w = World::installed(PERMISSIONS);
-    let seed = format!("[Context]\nfilesystems=!{};\n", w.profile().display());
+    let seed = format!("[Context]\nfilesystems=!{};\n", w.granted().display());
     write(&w.overrides(), seed.as_bytes());
     let spy = Spy::on(&w);
     unusable(&w.launch(&w.plan(), &spy).unwrap_err(), "denied");
@@ -269,7 +395,7 @@ fn a_denied_profile_is_refused() {
 /// Steam's sandbox without `network` or `ipc` (or a `flatpak` that cannot say) refuses before
 /// anything is written: no grant, no record, no play-arm, no spawn.
 ///
-/// Mutation (watched red): `grant_profile_access` checking the permissions after the write.
+/// Mutation (watched red): `grant_sandbox_access` checking the permissions after the write.
 #[test]
 fn missing_permissions_refuse_before_anything_is_written() {
     for (shared, missing) in [
@@ -301,14 +427,17 @@ fn missing_permissions_refuse_before_anything_is_written() {
     assert_eq!(w.overrides_text(), None);
 }
 
-/// Only the profile `prepare_launch` resolved is granted: a plan whose `sandbox_grant` was changed
-/// is refused, and one read back (no gate) is spawned as it is, granting nothing.
+/// Only the folder `prepare_launch` resolved is granted: a plan whose `sandbox_grant` was changed
+/// (to the profile's root, or anything else) is refused, and one read back (no gate) is spawned as
+/// it is, granting nothing.
 #[test]
-fn only_the_prepared_profile_is_granted() {
+fn only_the_prepared_folder_is_granted() {
     let w = World::installed(PERMISSIONS);
-    let mut plan = w.plan();
-    plan.sandbox_grant = Some(w.profiles.path().to_path_buf());
-    unusable(&w.launch(&plan, &Spy::on(&w)).unwrap_err(), "path");
+    for other in [w.profile(), w.profiles.path().to_path_buf()] {
+        let mut plan = w.plan();
+        plan.sandbox_grant = Some(other);
+        unusable(&w.launch(&plan, &Spy::on(&w)).unwrap_err(), "path");
+    }
     assert_eq!(w.overrides_text(), None);
 
     let read_back: ProcessPlan =
@@ -320,24 +449,32 @@ fn only_the_prepared_profile_is_granted() {
     assert_eq!(w.record(), None);
 }
 
-/// The grant names a folder by its canonical spelling alone: a link anywhere on the way, a
-/// character a GKeyFile list would need escaped, a file, or the home folder are refused.
+/// The grant names a folder by its canonical spelling alone: a profile reached through a link, a
+/// `BepInEx` that is a link, a character a GKeyFile list would need escaped, a profile that is a
+/// file, `/` and the home folder are refused.
 ///
-/// Mutation (watched red): `checked_profile` without its canonical comparison.
+/// Mutation (watched red): `checked_folder` without its canonical comparison.
 #[test]
-fn a_linked_or_escaping_profile_is_refused() {
+fn a_linked_or_escaping_folder_is_refused() {
     let w = World::installed(PERMISSIONS);
-    let real = w.profiles.join("real");
-    fs::create_dir_all(&real).unwrap();
+    let profile_with = |name: &str| {
+        let p = w.profiles.join(name);
+        fs::create_dir_all(p.join(SANDBOX_FOLDER)).unwrap();
+        p
+    };
+    let real = profile_with("real");
     let link = w.profiles.join("link");
     std::os::unix::fs::symlink(&real, &link).unwrap();
-    let grant = |p: &Path| grant_profile_access(p, &w.overrides(), &w.flatpak());
+    let grant = |p: &Path| grant_sandbox_access(p, &w.overrides(), &w.flatpak());
     unusable(&grant(&link).unwrap_err(), "path");
     unusable(&grant(&link.join(".")).unwrap_err(), "path");
-    for name in ["a;b", "a=b", "a[b]", "a\\b", "a:b", "a\nb", "trailing "] {
-        let p = w.profiles.join(name);
-        fs::create_dir_all(&p).unwrap();
-        unusable(&grant(&p).unwrap_err(), "path");
+    // A `BepInEx` that is a link to a folder elsewhere.
+    let linked_folder = w.profiles.join("linked-folder");
+    fs::create_dir_all(&linked_folder).unwrap();
+    std::os::unix::fs::symlink(&real, linked_folder.join(SANDBOX_FOLDER)).unwrap();
+    unusable(&grant(&linked_folder).unwrap_err(), "path");
+    for name in ["a;b", "a=b", "a[b]", "a\\b", "a:b", "a\nb"] {
+        unusable(&grant(&profile_with(name)).unwrap_err(), "path");
     }
     let file = w.profiles.join("file");
     fs::write(&file, b"x").unwrap();
@@ -350,13 +487,14 @@ fn a_linked_or_escaping_profile_is_refused() {
         );
     }
     assert_eq!(w.overrides_text(), None, "nothing written");
-    // The plain folder next to them is granted.
+    // The plain profile next to them is granted its `BepInEx`, recorded beside it.
     grant(&real).unwrap();
     assert!(
         w.overrides_text()
             .unwrap()
-            .contains(&format!("{}:rw;", real.display()))
+            .contains(&format!("{}/{SANDBOX_FOLDER}:rw;", real.display()))
     );
+    assert!(real.join(FLATPAK_GRANT_FILE_NAME).is_file());
 }
 
 /// An uninstall whose revoke cannot write never fails: it says so in a warning, and the record
@@ -373,10 +511,46 @@ fn a_revoke_that_cannot_write_is_a_warning() {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         return;
     }
-    let r = uninstall(&w.profile(), &w.target());
+    let r = uninstall_with(&w.profile(), &w.target(), Some(&w.overrides()));
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
     let r = r.unwrap();
     assert_eq!(r.warnings, [FLATPAK_REVOKE_FAILED]);
     assert!(w.overrides_text().unwrap().contains(&w.entry()));
     assert!(w.record().is_some());
+}
+
+/// Revoke edits the caller's overrides file and no other: a record that names another file (an
+/// edited record, a decoy holding the same entry) edits nothing, and neither does an uninstall
+/// told of another file than the one granted into.
+///
+/// Mutation (watched red): `revoke_recorded` without comparing the record's file to the caller's.
+#[test]
+fn revoke_edits_only_the_callers_overrides_file() {
+    let w = World::installed(PERMISSIONS);
+    w.launch(&w.plan(), &Spy::on(&w)).unwrap();
+    let granted = w.overrides_text().unwrap();
+    // A decoy the record is edited to name, holding the same entry.
+    let decoy = w.data.join(&format!("decoy/overrides/{STEAM_FLATPAK_APP}"));
+    write(&decoy, granted.as_bytes());
+    let mut record = w.record().unwrap();
+    record.overrides = decoy.clone();
+    write(
+        &w.profile().join(FLATPAK_GRANT_FILE_NAME),
+        &serde_json::to_vec(&record).unwrap(),
+    );
+    let r = w.uninstall();
+    assert_eq!(r.warnings, [FLATPAK_REVOKE_FAILED]);
+    assert_eq!(
+        fs::read_to_string(&decoy).unwrap(),
+        granted,
+        "the decoy untouched"
+    );
+    assert_eq!(w.overrides_text().unwrap(), granted);
+    // Told of another file than the one granted into: nothing edited either.
+    let w = World::installed(PERMISSIONS);
+    w.launch(&w.plan(), &Spy::on(&w)).unwrap();
+    let granted = w.overrides_text().unwrap();
+    let r = uninstall_with(&w.profile(), &w.target(), Some(&decoy)).unwrap();
+    assert_eq!(r.warnings, [FLATPAK_REVOKE_FAILED]);
+    assert_eq!(w.overrides_text().unwrap(), granted);
 }

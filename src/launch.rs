@@ -81,9 +81,10 @@ pub struct ProcessPlan {
     /// pack's Doorstop settings was left out). Never a reason not to play.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
-    /// The profile folder (its canonical spelling) [`launch`] grants Steam's sandbox read/write
-    /// access to right before the spawn, when Steam is Flathub's Flatpak (`crate::flatpak`);
-    /// `None` for any other plan. Only a plan [`prepare_launch`] made is granted, and only this
+    /// The folder [`launch`] grants Steam's sandbox read/write access to right before the spawn,
+    /// when Steam is Flathub's Flatpak (`crate::flatpak`): `<profile>/BepInEx`, canonical, never
+    /// the profile itself; `None` for any other plan, and for one that hands the game nothing of
+    /// the profile. Only a plan [`prepare_launch`] made is granted, and only this
     /// folder: a plan read back, or one whose field was changed, is refused or spawned as it is
     /// ([`launch`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,6 +113,9 @@ struct Gate {
     /// The `flatpak` program, when Steam is Flathub's Flatpak: what [`launch`] asks for Steam's
     /// permissions before it grants the profile to Steam's sandbox.
     flatpak: Option<PathBuf>,
+    /// The folder [`launch`] grants Flathub's Steam (`<profile>/BepInEx`), as this plan's
+    /// [`ProcessPlan::sandbox_grant`] states it.
+    grant: Option<PathBuf>,
 }
 
 impl Gate {
@@ -280,9 +284,9 @@ impl Spawn for StdSpawn {
 /// (docs/ENGINE-DESCRIPTORS-DEBT.md row 56).
 ///
 /// **Flathub's Steam** ([`ProcessPlan::sandbox_grant`]): after those checks and right before the
-/// spawn (before the play-arm), Steam's permissions are read and the profile folder is granted to
-/// its sandbox in the user's Flatpak overrides ([`crate::flatpak`]'s rules,
-/// `steam-flatpak-unusable` for every refusal). A plan whose `sandbox_grant` is not the profile
+/// spawn (before the play-arm), Steam's permissions are read and the profile's `BepInEx` folder
+/// is granted to its sandbox in the user's Flatpak overrides ([`crate::flatpak`]'s rules,
+/// `steam-flatpak-unusable` for every refusal). A plan whose `sandbox_grant` is not the folder
 /// [`prepare_launch`] resolved is refused (`reason` = `path`); a plan read back (no gate) is
 /// spawned as it is, granting nothing. [`launch_with`] names the overrides file.
 pub fn launch(plan: &ProcessPlan, spawner: &dyn Spawn, engines: &EngineSet) -> Result<()> {
@@ -317,13 +321,13 @@ pub fn launch_with(
         let Some(flatpak) = &gate.flatpak else {
             return Err(refused("path"));
         };
-        if *stated != plain(&gate.profile) {
+        if gate.grant.as_ref() != Some(stated) {
             return Err(refused("path"));
         }
         let Some(overrides) = overrides else {
             return Err(refused("overrides"));
         };
-        crate::flatpak::grant_profile_access(stated, overrides, flatpak)?;
+        crate::flatpak::grant_sandbox_access(&gate.profile, overrides, flatpak)?;
     }
     let Some(appid) = gate.arm else {
         return spawner.spawn(plan);
@@ -553,7 +557,9 @@ fn write_play_arm(path: &Path, appid: u32) -> Result<()> {
 /// ([`SteamCommand`]; `steam-not-found` without one), otherwise the exe itself with its args and
 /// env. A Steam game's plan carries the play-arm [`launch`] writes; this writes none. With
 /// Flathub's Steam ([`SteamCommand::flatpak`]) the plan's [`ProcessPlan::sandbox_grant`] names
-/// the profile folder [`launch`] grants Steam's sandbox; this grants nothing.
+/// the folder [`launch`] grants Steam's sandbox, `<profile>/BepInEx`; this grants nothing, and
+/// refuses a plan that hands the game a profile path outside it (`steam-flatpak-unusable`,
+/// `reason` = `layout`, `path`) before anything is written.
 ///
 /// **With the player's own mods** (`[integration.mods]`, `mods-choice.json`; the `mods` module
 /// docs): the player's answer is read here. Not asked yet while mods are found that could be
@@ -870,6 +876,19 @@ pub fn prepare_launch_with(
         }
         _ => None,
     };
+    // Flathub's Steam is granted one folder of the profile, `BepInEx`, never the profile itself:
+    // everything this plan hands the game from the profile must be in it. Refused before
+    // `[[config_writes]]` and the Proton override write anything.
+    let sandbox_grant = match steam {
+        Some(s) if s.flatpak && game.steam_appid.is_some() => sandbox_layout(
+            &profile,
+            &x.profile,
+            &args,
+            &m,
+            chain_ini.as_ref().map(|(t, _)| t.as_path()),
+        )?,
+        _ => None,
+    };
 
     for c in &m.config_writes {
         let jp = parse_jailed(&c.file)?;
@@ -908,13 +927,14 @@ pub fn prepare_launch_with(
         })?;
     }
 
-    let gate = |arm: Option<u32>, flatpak: Option<PathBuf>| Gate {
+    let gate = |arm: Option<u32>, flatpak: Option<PathBuf>, grant: Option<PathBuf>| Gate {
         profile: profile.clone(),
         game: game.clone(),
         game_dir: game_dir.clone(),
         trusted,
         arm,
         flatpak,
+        grant,
     };
     let mut plan = match game.steam_appid {
         Some(appid) => {
@@ -928,13 +948,14 @@ pub fn prepare_launch_with(
                 env: Vec::new(),
                 cwd: None,
                 warnings: steam_warnings(game, appid),
-                // Flathub's Steam sees the profile only once `launch` has granted it.
-                sandbox_grant: steam.flatpak.then(|| plain(&profile)),
-                // Checked again, the profile granted to Flathub's Steam and the arm written, by
+                // Flathub's Steam sees `<profile>/BepInEx` only once `launch` has granted it.
+                sandbox_grant: sandbox_grant.clone(),
+                // Checked again, the folder granted to Flathub's Steam and the arm written, by
                 // `launch`, right before Steam is asked to start the game.
                 gate: Some(gate(
                     Some(appid),
                     steam.flatpak.then(|| steam.program.clone()),
+                    sandbox_grant,
                 )),
             }
         }
@@ -952,7 +973,7 @@ pub fn prepare_launch_with(
                 cwd: Some(plain(&game_root)),
                 warnings: Vec::new(),
                 sandbox_grant: None,
-                gate: Some(gate(None, None)),
+                gate: Some(gate(None, None, None)),
             }
         }
     };
@@ -974,6 +995,76 @@ pub fn prepare_launch_with(
         ledger::write(&profile, &ledger)?;
     }
     Ok(plan)
+}
+
+/// The folder Flathub's Steam is granted for this plan, `<profile>/BepInEx`
+/// ([`crate::flatpak::SANDBOX_FOLDER`]), once every profile path the plan hands the game is in
+/// it: each of `args` that names the profile (`profile_text`, as the game sees it), each
+/// `[[config_writes]]` file, and a Play with mods' `chain.ini` (`chain_ini`). `None` when the
+/// plan hands the game nothing of the profile. A path outside it is `steam-flatpak-unusable`
+/// (`reason` = `layout`, `path`): the grant is never widened to the profile, whose root holds
+/// the ledger and the backups.
+fn sandbox_layout(
+    profile: &Path,
+    profile_text: &str,
+    args: &[String],
+    m: &Manifest,
+    chain_ini: Option<&Path>,
+) -> Result<Option<PathBuf>> {
+    let folder = crate::flatpak::SANDBOX_FOLDER;
+    let outside = |path: &str| {
+        LauncherError::new(codes::STEAM_FLATPAK_UNUSABLE)
+            .with("reason", "layout")
+            .with("path", path)
+    };
+    let sep = |c: Option<char>| matches!(c, Some('/' | '\\'));
+    let mut named = false;
+    // As the game is handed it: a path argument gets backslashes on Windows and under Proton.
+    let back = profile_text.replace('/', "\\");
+    let spellings: &[&str] = if back == profile_text {
+        &[profile_text]
+    } else {
+        &[profile_text, &back]
+    };
+    for arg in args {
+        for (at, spelling) in spellings
+            .iter()
+            .flat_map(|sp| arg.match_indices(sp).map(move |(at, _)| (at, *sp)))
+        {
+            let rest = &arg[at + spelling.len()..];
+            let mut chars = rest.chars();
+            match chars.next() {
+                // Another folder whose name begins with the profile's.
+                Some(c) if !sep(Some(c)) => continue,
+                // The profile itself, or a path in it.
+                None => return Err(outside(arg)),
+                Some(_) => {}
+            }
+            let below = chars.as_str();
+            let inside = below
+                .strip_prefix(folder)
+                .is_some_and(|r| r.is_empty() || sep(r.chars().next()));
+            if !inside {
+                return Err(outside(arg));
+            }
+            named = true;
+        }
+    }
+    for c in &m.config_writes {
+        let jp = parse_jailed(&c.file)?;
+        if jp.rel.len() < 2 || jp.rel[0] != folder {
+            return Err(outside(&c.file));
+        }
+        named = true;
+    }
+    let granted = profile.join(folder);
+    if let Some(chain) = chain_ini {
+        if !chain.starts_with(&granted) || chain == granted {
+            return Err(outside(&chain.display().to_string()));
+        }
+        named = true;
+    }
+    Ok(named.then(|| plain(&granted)))
 }
 
 /// A Play with mods' Doorstop options and its `chain.ini`, for the proxy beside the game now: the
@@ -1082,7 +1173,8 @@ fn foreign_config(game_root: &Path, game_files: &[LedgerGameFile]) -> Result<boo
 }
 
 /// How to start Steam on this machine, if it can be found: [`find_steam`]'s native Steam first;
-/// otherwise, on Linux, Flathub's Steam when a `flatpak` program on `PATH` says it is installed
+/// otherwise, on Linux, Flathub's Steam when a `flatpak` program — `/usr/bin/flatpak` first, then
+/// the first on `PATH`; an executable file either way — says it is installed
 /// (`flatpak info com.valvesoftware.Steam` exits 0; [`SteamCommand::flatpak`]).
 pub fn find_steam_command() -> Option<SteamCommand> {
     #[cfg(windows)]
@@ -1091,27 +1183,45 @@ pub fn find_steam_command() -> Option<SteamCommand> {
     }
     #[cfg(not(windows))]
     {
-        find_steam_command_on(std::env::var_os("PATH").as_deref())
+        find_steam_command_on(
+            std::env::var_os("PATH").as_deref(),
+            &[Path::new("/usr/bin/flatpak")],
+        )
     }
 }
 
-/// [`find_steam_command`] on Unix, looking in the folders of the `PATH` value `path`.
+/// [`find_steam_command`] on Unix: a native `steam` in the folders of the `PATH` value `path`,
+/// else the first executable of `flatpaks` (the system's own `flatpak`), else a `flatpak` on
+/// `path`.
 #[cfg(not(windows))]
-fn find_steam_command_on(path: Option<&std::ffi::OsStr>) -> Option<SteamCommand> {
-    let path = path?;
-    if let Some(steam) = on_path(path, "steam") {
+fn find_steam_command_on(
+    path: Option<&std::ffi::OsStr>,
+    flatpaks: &[&Path],
+) -> Option<SteamCommand> {
+    if let Some(steam) = path.and_then(|p| on_path(p, "steam")) {
         return Some(SteamCommand::native(steam));
     }
-    let flatpak = on_path(path, "flatpak")?;
+    let flatpak = flatpaks
+        .iter()
+        .find(|p| is_executable(p))
+        .map(|p| p.to_path_buf())
+        .or_else(|| path.and_then(|p| on_path(p, "flatpak")))?;
     crate::flatpak::steam_flatpak_installed(&flatpak).then(|| SteamCommand::flatpak(flatpak))
 }
 
-/// The first file named `name` in the folders of the `PATH` value `path`.
+/// The first executable file named `name` in the folders of the `PATH` value `path`.
 #[cfg(not(windows))]
 fn on_path(path: &std::ffi::OsStr, name: &str) -> Option<PathBuf> {
     std::env::split_paths(path)
         .map(|d| d.join(name))
-        .find(|p| p.is_file())
+        .find(|p| is_executable(p))
+}
+
+/// Whether `p` is a file (a link to one counts) someone may execute.
+#[cfg(not(windows))]
+fn is_executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 /// Where Steam's launcher is on this machine, if it can be found: a native Steam only
@@ -1142,7 +1252,8 @@ mod tests {
     /// A native `steam` on `PATH` first; else Flathub's, when a `flatpak` on `PATH` says it is
     /// installed; else none.
     ///
-    /// Mutation (watched red): `find_steam_command_on` returning the Flatpak without asking.
+    /// Mutation (watched red): `find_steam_command_on` returning the Flatpak without asking;
+    /// ignoring the system's `flatpak`; `is_executable` without the mode bits.
     #[cfg(unix)]
     #[test]
     fn find_steam_command_prefers_native_then_an_installed_flatpak() {
@@ -1165,25 +1276,49 @@ mod tests {
         let native = root.join("native");
         fs::create_dir_all(&native).unwrap();
         fs::write(native.join("steam"), b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(native.join("steam"), fs::Permissions::from_mode(0o755)).unwrap();
         let path = |dirs: &[&Path]| std::env::join_paths(dirs).unwrap();
 
         assert_eq!(
-            find_steam_command_on(Some(&path(&[&root.join("empty"), &yes]))),
+            find_steam_command_on(Some(&path(&[&root.join("empty"), &yes])), &[]),
             Some(SteamCommand::flatpak(yes.join("flatpak")))
         );
         let flat = SteamCommand::flatpak(yes.join("flatpak"));
         assert_eq!(flat.prefix_args, ["run", "com.valvesoftware.Steam"]);
         assert!(flat.flatpak);
-        assert_eq!(find_steam_command_on(Some(&path(&[&no]))), None);
+        assert_eq!(find_steam_command_on(Some(&path(&[&no])), &[]), None);
         assert_eq!(
-            find_steam_command_on(Some(&path(&[&yes, &native]))),
+            find_steam_command_on(Some(&path(&[&yes, &native])), &[]),
             Some(SteamCommand::native(native.join("steam")))
         );
         assert_eq!(
-            find_steam_command_on(Some(&path(&[&root.join("empty")]))),
+            find_steam_command_on(Some(&path(&[&root.join("empty")])), &[]),
             None
         );
-        assert_eq!(find_steam_command_on(None), None);
+        assert_eq!(find_steam_command_on(None, &[]), None);
+        // The system's own `flatpak` is asked before one on PATH: one that says no wins over a
+        // PATH one that would say yes.
+        let no_flatpak = no.join("flatpak");
+        assert_eq!(
+            find_steam_command_on(Some(&path(&[&yes])), &[no_flatpak.as_path()]),
+            None
+        );
+        let yes_flatpak = yes.join("flatpak");
+        assert_eq!(
+            find_steam_command_on(
+                None,
+                &[root.join("absent").as_path(), yes_flatpak.as_path()]
+            ),
+            Some(SteamCommand::flatpak(yes.join("flatpak")))
+        );
+        // A file nobody may execute is no program, on PATH or not.
+        fs::set_permissions(&yes_flatpak, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            find_steam_command_on(Some(&path(&[&yes])), &[yes_flatpak.as_path()]),
+            None
+        );
+        fs::set_permissions(native.join("steam"), fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(find_steam_command_on(Some(&path(&[&native])), &[]), None);
         let _ = fs::remove_dir_all(&root);
     }
 

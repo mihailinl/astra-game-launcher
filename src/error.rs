@@ -75,8 +75,10 @@ pub mod codes {
     /// [`crate::STEAM_UPDATE_STATES`], comma-separated; `appid`). What Play checked is not what
     /// would start, and an update may add an anti-cheat: let Steam finish, then Play again.
     pub const GAME_UPDATE_PENDING: &str = "game-update-pending";
-    /// Play (`launch`, right before the spawn): Steam is Flathub's Flatpak and the profile cannot
-    /// be granted to its sandbox (`reason`): `permission` (Steam's sandbox lacks `missing`:
+    /// Play (`prepare_launch` for `layout`, `launch` right before the spawn for the rest): Steam
+    /// is Flathub's Flatpak and the profile's `BepInEx` folder cannot be granted to its sandbox
+    /// (`reason`): `layout` (the plan hands the game a profile path outside `BepInEx`, which is
+    /// never granted more; `path`), `permission` (Steam's sandbox lacks `missing`:
     /// `network`, `ipc` or `network,ipc`, which the game needs to reach the companion),
     /// `flatpak-info` (`flatpak info --show-permissions` failed or did not answer),
     /// `unparseable` (its output), `path` (the profile folder is not a plain folder spelled

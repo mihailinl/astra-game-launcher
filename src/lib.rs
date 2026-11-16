@@ -64,7 +64,9 @@ pub use error::{LauncherError, Result, codes};
 #[cfg(feature = "cli")]
 pub use fetch::UreqFetch;
 pub use fetch::{Fetch, MAX_DOWNLOAD_BYTES, fetch_verified};
-pub use flatpak::{FLATPAK_REVOKE_FAILED, FlatpakGrant, STEAM_FLATPAK_APP};
+pub use flatpak::{
+    Added, FLATPAK_REVOKE_FAILED, FlatpakGrant, GrantEdit, SANDBOX_FOLDER, STEAM_FLATPAK_APP,
+};
 pub use former::FormerKind;
 pub use game::{
     GameTarget, Platform, STEAM_DEFAULT_BRANCH, STEAM_UPDATE_STATES, proton_prefix_for,
@@ -72,8 +74,8 @@ pub use game::{
     steam_update_states,
 };
 pub use install::{
-    KEPT_FOLDER_GAINED_FILES, UninstallReport, install, install_in, installed, restore_game_files,
-    uninstall,
+    KEPT_FOLDER_GAINED_FILES, PROTON_RECORD_REFUSED, UninstallReport, install, install_in,
+    installed, restore_game_files, uninstall, uninstall_with,
 };
 pub use launch::{
     MODS_CHOICE_UNREADABLE, MODS_PACK_PATH_REFUSED, ProcessPlan, STEAM_LAUNCH_OPTIONS_DOORSTOP,
