@@ -116,6 +116,10 @@ struct Gate {
     /// The folder [`launch`] grants Flathub's Steam (`<profile>/BepInEx`), as this plan's
     /// [`ProcessPlan::sandbox_grant`] states it.
     grant: Option<PathBuf>,
+    /// What the plan's program and environment were built from (a Wine runner's checked
+    /// program, prefix and compat folder); [`launch`] resolves the runner again and refuses a
+    /// plan whose runner is no longer that.
+    wine: Option<crate::wine::Resolved>,
 }
 
 impl Gate {
@@ -127,7 +131,12 @@ impl Gate {
         refuse_update_pending(&self.game.dir, self.trusted)?;
         // The runner is the caller's and may have changed since: asked again right before the spawn.
         if let Platform::LinuxWine { runner } = &self.game.platform {
-            runner.check(&self.profile, &self.game_dir)?;
+            let now = runner.resolve(&self.profile, &self.game_dir)?;
+            if self.wine.as_ref() != Some(&now) {
+                return Err(LauncherError::new(codes::RUNNER_INVALID)
+                    .with("reason", "runner-changed")
+                    .with("path", runner.bin.display().to_string()));
+            }
         }
         Ok(())
     }
@@ -828,12 +837,12 @@ pub fn prepare_launch_with(
     // whatever appid the caller also knows it by: no Steam command, no play-arm, no grant.
     let wine = match &game.platform {
         Platform::LinuxWine { runner } => {
-            // The integration's env is third-party text: it never steers the runner.
+            // The integration's env is third-party text: only its loaders' own settings pass.
             if let Some(k) = m
                 .launch
                 .env
                 .keys()
-                .find(|k| crate::wine::is_runner_control(k))
+                .find(|k| !crate::wine::manifest_may_set(k))
             {
                 return Err(LauncherError::new(codes::RUNNER_INVALID)
                     .with("reason", "manifest-env-key")
@@ -975,6 +984,7 @@ pub fn prepare_launch_with(
         arm,
         flatpak,
         grant,
+        wine: wine.as_ref().map(|(_, at)| at.clone()),
     };
     let mut plan = match start_appid {
         Some(appid) => {
@@ -1007,7 +1017,7 @@ pub fn prepare_launch_with(
                 .map(|(k, v)| Ok((k.clone(), x.expand(v)?)))
                 .collect::<Result<Vec<_>>>()?;
             let exe = plain(&game_root.join(&exe_file));
-            let (program, args, env) = match wine {
+            let (program, args, env) = match &wine {
                 // The integration's Wine overrides ride `WINEDLLOVERRIDES`, with Doorstop's
                 // `winhttp` when it loads the game's proxy (a Steam launch carries that in the
                 // user's launch options, a Proton prefix in `user.reg`; neither is ours here).
@@ -1020,7 +1030,7 @@ pub fn prepare_launch_with(
                     {
                         overrides.push(("winhttp".to_owned(), "n,b".to_owned()));
                     }
-                    runner.command(&at, &exe, args, env, &overrides)
+                    runner.command(at, &exe, args, env, &overrides)
                 }
                 None => (exe, args, env),
             };

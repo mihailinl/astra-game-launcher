@@ -164,6 +164,18 @@ Round 2 (still 0.5.4), the runner is never trusted beyond its checked fields:
   `compat-data-in-profile`, `profile-in-compat-data`, `compat-data-mismatch`, `umu-protonpath`,
   `protonpath-in-game`, `protonpath-in-profile`, `manifest-env-key`.
 
+Round 3: under `Platform::LinuxWine` an integration's `[launch] env` is an ALLOWLIST: only keys
+starting `DOORSTOP_`, `BEPINEX_` or `ASTRA_`, and `WINEDLLOVERRIDES` (merged); any other key is
+`manifest-env-key` (a denylist of loader variables has no end, and a relative value resolves
+against the game folder, the working directory). `runner.env` keeps the denylist plus: a key
+ending `_PATH`, `_DIR`, `_PATHS` or `_MOUNTS` (plural forms `:`-separated) holds only absolute
+existing folders away from the game and the profile (`env-path`, `key`, `path`), and
+`PROTON_REMOTE_DEBUG_CMD` is refused (`env-key`); the six `WINE*` toggles (`WINEDEBUG`, `WINEESYNC`,
+`WINEFSYNC`, `WINE_LARGE_ADDRESS_AWARE`, `WINE_FULLSCREEN_FSR`, `WINE_FULLSCREEN_FSR_STRENGTH`) pass in `runner.env` only.
+The plan's program is the CANONICAL `bin` that was checked; `launch` resolves the runner again and
+refuses a plan whose program, prefix or compat folder differ (`runner-invalid`, `runner-changed`).
+Proton's prefix must be exactly `<compat_data>/pfx` (Wine and umu may use `compat_data` itself).
+
 | code | from | params | what the person can do |
 |---|---|---|---|
 | `runner-invalid` | `prepare_launch`, `WineRunner::check` | `reason`: `bin-not-absolute`, `bin-not-file` (missing, a folder, or a link that does not end at a file), `bin-not-executable`, `prefix-not-absolute`, `prefix-missing`, `prefix-in-profile` (each with `path`), `env-key` / `env-value` (with `key`; keys are `[A-Z_][A-Z0-9_]*`, values hold no NUL), `umu-gameid` (an `Umu` runner without `GAMEID`, with `path`) | The Wine/Proton the game is set to start with is not usable: pick another runner or fix the game's launcher settings. A link for `bin` or `prefix` is followed, so a distribution's `wine` link works. |

@@ -87,8 +87,37 @@ pub(crate) fn caller_may_carry(key: &str) -> bool {
         || key == "GAMEID"
 }
 
-/// What [`WineRunner::resolve`] checked: the canonical folders the process is told about.
+/// What an integration's `[launch] env` may set under a Wine runner: an ALLOWLIST, not a
+/// denylist, because the list of variables that make a process load code from a path
+/// (`VK_LAYER_PATH`, `VK_ICD_FILENAMES`, `GST_PLUGIN_PATH`, `LIBGL_DRIVERS_PATH`,
+/// `__EGL_VENDOR_LIBRARY_*`, `GCONV_PATH`, `BASH_ENV`, `ENV`, …) has no end, and a relative value
+/// resolves against the working directory, which is the game's folder. Only the loaders' own
+/// settings (`DOORSTOP_*`, `BEPINEX_*`, `ASTRA_*`) and `WINEDLLOVERRIDES` (merged) pass.
+/// [`is_runner_control`] is the CALLER side's rule, for the runner's own `env`.
+pub(crate) fn manifest_may_set(key: &str) -> bool {
+    key == OVERRIDES_VAR
+        || ["DOORSTOP_", "BEPINEX_", "ASTRA_"]
+            .iter()
+            .any(|p| key.starts_with(p))
+}
+
+/// Whether `key` names a place (`…_PATH`, `…_PATHS`, `…_DIR`, `…_MOUNTS`); `Some(true)` when its
+/// value is a `:`-separated list.
+fn path_variable(key: &str) -> Option<bool> {
+    if key.ends_with("_PATHS") || key.ends_with("_MOUNTS") {
+        Some(true)
+    } else if key.ends_with("_PATH") || key.ends_with("_DIR") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// What [`WineRunner::resolve`] checked: the canonical program and folders the process is built
+/// from. The launch gate resolves again and refuses when any of them differs.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Resolved {
+    bin: PathBuf,
     prefix: PathBuf,
     compat: Option<PathBuf>,
 }
@@ -114,6 +143,9 @@ impl WineRunner {
     /// - `compat_data` (REQUIRED for [`RunnerKind::Proton`], `compat-data-required`) is
     ///   absolute, an existing folder, outside the profile in both directions, and the prefix is
     ///   it (`compat_data` itself) or `compat_data/pfx` (`compat-data-mismatch` otherwise);
+    /// - `env` keys that name a place (`*_PATH`, `*_DIR`, `*_PATHS`, `*_MOUNTS` — the plural forms
+    ///   `:`-separated) hold only absolute existing folders away from the game and the profile
+    ///   (`env-path`); `PROTON_REMOTE_DEBUG_CMD` is refused;
     /// - `env` keys are `[A-Z_][A-Z0-9_]*`, none is a name the fields own or one that steers the
     ///   runner (`env-key`, see [`caller_may_carry`]), and no value holds a NUL (`env-value`);
     /// - [`RunnerKind::Umu`] carries a non-empty `GAMEID` and a `PROTONPATH` that is an absolute
@@ -182,7 +214,11 @@ impl WineRunner {
                     return Err(invalid("profile-in-compat-data", c));
                 }
                 let pfx = std::fs::canonicalize(cc.join("pfx")).ok();
-                if prefix != cc && pfx.as_ref() != Some(&prefix) {
+                // Proton keeps its prefix in `<compat>/pfx` and nowhere else; Wine and umu may
+                // be given the folder itself.
+                let ok = pfx.as_ref() == Some(&prefix)
+                    || (self.kind != RunnerKind::Proton && prefix == cc);
+                if !ok {
                     return Err(invalid("compat-data-mismatch", c));
                 }
                 Some(cc)
@@ -199,6 +235,36 @@ impl WineRunner {
                 return Err(LauncherError::new(codes::RUNNER_INVALID)
                     .with("reason", "env-value")
                     .with("key", k.clone()));
+            }
+            // A caller's variable that names where the runner reads or writes is held to the
+            // rule `PROTONPATH` is: an existing absolute folder away from the game and profile.
+            if k == "PROTON_REMOTE_DEBUG_CMD" {
+                return Err(LauncherError::new(codes::RUNNER_INVALID)
+                    .with("reason", "env-key")
+                    .with("key", k.clone()));
+            }
+            if let Some(plural) = path_variable(k) {
+                let paths: Vec<&str> = if plural {
+                    v.split(':').collect()
+                } else {
+                    vec![v.as_str()]
+                };
+                for p in paths.into_iter().filter(|p| !p.is_empty()) {
+                    let p = Path::new(p);
+                    let bad = || {
+                        LauncherError::new(codes::RUNNER_INVALID)
+                            .with("reason", "env-path")
+                            .with("key", k.clone())
+                            .with("path", p.display().to_string())
+                    };
+                    if !p.is_absolute() || !std::fs::metadata(p).is_ok_and(|m| m.is_dir()) {
+                        return Err(bad());
+                    }
+                    let pc = canon(p, "env-path")?;
+                    if nested(&pc, &game) || nested(&pc, &profile) {
+                        return Err(bad());
+                    }
+                }
             }
         }
         if self.kind == RunnerKind::Umu {
@@ -223,7 +289,11 @@ impl WineRunner {
                 return Err(invalid("protonpath-in-profile", &pp));
             }
         }
-        Ok(Resolved { prefix, compat })
+        Ok(Resolved {
+            bin,
+            prefix,
+            compat,
+        })
     }
 
     /// The program, its arguments and its environment for starting `exe` with `args`.
@@ -284,7 +354,7 @@ impl WineRunner {
         }
         argv.push(exe.display().to_string());
         argv.extend(args);
-        (self.bin.clone(), argv, env)
+        (at.bin.clone(), argv, env)
     }
 }
 

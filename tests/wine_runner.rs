@@ -156,14 +156,13 @@ fn a_proton_plan_says_run_and_names_its_checked_compat_data() {
     assert_eq!(env_of(&p, "STEAM_COMPAT_CLIENT_INSTALL_PATH"), Some(""));
     assert_eq!(env_of(&p, "WINEDLLOVERRIDES"), Some("winhttp=n,b"));
 
-    // The prefix may be the compat folder itself.
+    // Proton's prefix is `<compat>/pfx` and nothing else; Wine and umu may be given the folder.
     let mut r2 = w.runner(RunnerKind::Proton, &[]);
     r2.compat_data = Some(w.prefix.path().to_path_buf());
-    let p = w.play(&w.game(r2)).unwrap();
-    assert_eq!(
-        env_of(&p, "STEAM_COMPAT_DATA_PATH"),
-        Some(w.prefix.path().to_str().unwrap())
-    );
+    refused(&w, r2, "compat-data-mismatch");
+    let mut r3 = w.runner(RunnerKind::Wine, &[]);
+    r3.compat_data = Some(w.prefix.path().to_path_buf());
+    w.play(&w.game(r3)).unwrap();
 }
 
 #[test]
@@ -357,7 +356,7 @@ fn the_fields_are_the_only_source_of_the_prefix_and_what_steers_the_runner_is_re
 }
 
 #[test]
-fn the_manifest_env_cannot_steer_the_runner_but_may_merge_overrides() {
+fn the_manifest_env_is_an_allowlist_and_its_overrides_merge() {
     let w = World::new();
     let with = |env: &str| {
         let m = runner_manifest("").replace(
@@ -376,6 +375,18 @@ fn the_manifest_env_cannot_steer_the_runner_but_may_merge_overrides() {
         "GAMEID",
         "UMU_X",
         "HOME",
+        "VK_LAYER_PATH",
+        "VK_ADD_LAYER_PATH",
+        "VK_ICD_FILENAMES",
+        "VK_DRIVER_FILES",
+        "GST_PLUGIN_PATH",
+        "LIBGL_DRIVERS_PATH",
+        "__EGL_VENDOR_LIBRARY_FILENAMES",
+        "GCONV_PATH",
+        "BASH_ENV",
+        "ENV",
+        "DXVK_HUD",
+        "WINEDEBUG",
     ] {
         let pkg = with(&format!("{k} = \"x\""));
         let dir = Tmp::new("prof");
@@ -392,12 +403,16 @@ fn the_manifest_env_cannot_steer_the_runner_but_may_merge_overrides() {
         assert_eq!(snapshot(w.prefix.path()), before);
     }
     // An ordinary variable and WINEDLLOVERRIDES are fine, and the overrides merge.
-    let pkg = with("DXVK_HUD = \"1\", WINEDLLOVERRIDES = \"mscoree=d\"");
+    let pkg = with(
+        "ASTRA_FLAG = \"1\", BEPINEX_X = \"2\", DOORSTOP_Y = \"3\", WINEDLLOVERRIDES = \"mscoree=d\"",
+    );
     let dir = Tmp::new("prof2");
     let profile = dir.join("p");
     plan_and_install(&pkg, &game, &profile);
     let p = prepare_launch(&profile, &game, &vars(), None, &no_markers()).unwrap();
-    assert_eq!(env_of(&p, "DXVK_HUD"), Some("1"));
+    assert_eq!(env_of(&p, "ASTRA_FLAG"), Some("1"));
+    assert_eq!(env_of(&p, "BEPINEX_X"), Some("2"));
+    assert_eq!(env_of(&p, "DOORSTOP_Y"), Some("3"));
     assert_eq!(
         env_of(&p, "WINEDLLOVERRIDES"),
         Some("mscoree=d;winhttp=n,b")
@@ -582,4 +597,91 @@ fn a_listed_wine_toggle_is_the_callers_alone() {
         Some("manifest-env-key")
     );
     assert_eq!(e.params.get("key").map(String::as_str), Some("WINEDEBUG"));
+}
+
+#[test]
+fn a_callers_path_variable_must_be_a_folder_away_from_the_game_and_the_profile() {
+    let w = World::new();
+    w.installed(&w.game(w.runner(RunnerKind::Wine, &[])));
+    let ok = w.proton_dir.path().to_str().unwrap().to_owned();
+    let path_refused = |k: &str, v: &str| {
+        refused_with(
+            &w,
+            w.runner(RunnerKind::Wine, &[(k, v)]),
+            "env-path",
+            Some(k),
+        );
+    };
+    let in_game = w.game.join("d");
+    fs::create_dir(&in_game).unwrap();
+    let in_profile = w.profile().join("d");
+    fs::create_dir(&in_profile).unwrap();
+    let file = w.bins.join("a-file");
+    fs::write(&file, b"x").unwrap();
+    let gone = w.proton_dir.join("gone");
+    for k in [
+        "STEAM_COMPAT_SHADER_PATH",
+        "PROTON_LOG_DIR",
+        "PROTON_CRASH_REPORT_DIR",
+    ] {
+        path_refused(k, "rel/dir");
+        path_refused(k, gone.to_str().unwrap());
+        path_refused(k, file.to_str().unwrap());
+        path_refused(k, in_game.to_str().unwrap());
+        path_refused(k, in_profile.to_str().unwrap());
+        // The folder that holds the game is no better.
+        path_refused(k, w.game.path().parent().unwrap().to_str().unwrap());
+    }
+    for k in ["STEAM_COMPAT_MOUNTS", "STEAM_COMPAT_LIBRARY_PATHS"] {
+        path_refused(k, &format!("{ok}:{}", in_game.display()));
+        path_refused(k, &format!("{ok}:rel"));
+    }
+    refused_with(
+        &w,
+        w.runner(RunnerKind::Wine, &[("PROTON_REMOTE_DEBUG_CMD", "/bin/sh")]),
+        "env-key",
+        Some("PROTON_REMOTE_DEBUG_CMD"),
+    );
+    // Good ones pass, plural lists too.
+    let two = format!("{ok}:{}", w.bins.path().display());
+    let game = w.game(w.runner(
+        RunnerKind::Wine,
+        &[
+            ("PROTON_LOG_DIR", &ok),
+            ("STEAM_COMPAT_MOUNTS", &two),
+            ("STEAM_COMPAT_LIBRARY_PATHS", &ok),
+        ],
+    ));
+    let p = w.play(&game).unwrap();
+    assert_eq!(env_of(&p, "STEAM_COMPAT_MOUNTS"), Some(two.as_str()));
+}
+
+#[test]
+fn the_program_spawned_is_the_canonical_one_and_a_changed_runner_is_refused_at_launch() {
+    let w = World::new();
+    let a = w.bin("wine-a");
+    let b = w.bin("wine-b");
+    let link = w.bins.join("wine");
+    std::os::unix::fs::symlink(&a, &link).unwrap();
+    let mut r = w.runner(RunnerKind::Wine, &[]);
+    r.bin = link.clone();
+    let game = w.game(r);
+    w.installed(&game);
+    let p = w.play(&game).unwrap();
+    assert_eq!(
+        p.program,
+        fs::canonicalize(&a).unwrap(),
+        "the checked file, not the link"
+    );
+    // The link is re-pointed after the plan was made.
+    fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&b, &link).unwrap();
+    let rec = Record(RefCell::new(Vec::new()));
+    let e = launch_with(&p, &rec, &no_markers(), None).unwrap_err();
+    assert_eq!(e.code, codes::RUNNER_INVALID);
+    assert_eq!(
+        e.params.get("reason").map(String::as_str),
+        Some("runner-changed")
+    );
+    assert!(rec.0.borrow().is_empty());
 }
