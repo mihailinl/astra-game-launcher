@@ -382,17 +382,14 @@ pub(crate) fn remove_play_files(profile: &Path, ledger: &Ledger) {
     let Some(ini) = dir.pop() else {
         return;
     };
+    // Through the folder held open, never by path (`safe_dir`): it may be inside the `BepInEx`
+    // Flathub's Steam writes into.
     for name in [ini, LAST_RUN_FILE.to_owned()] {
         let mut rel = dir.clone();
         rel.push(name);
-        if let Ok(Some(p)) = existing_target(profile, &rel)
-            && std::fs::symlink_metadata(&p).is_ok_and(|m| !m.is_dir())
-        {
-            let _ = std::fs::remove_file(&p);
-        }
+        let _ = crate::safe_dir::remove_in(profile, &rel);
     }
-    let folder = dir.iter().fold(profile.to_path_buf(), |p, c| p.join(c));
-    crate::paths::prune_empty_dirs(folder, profile);
+    crate::safe_dir::prune_empty_in(profile, &dir);
 }
 
 /// The chain loader's report of its last start, beside it.

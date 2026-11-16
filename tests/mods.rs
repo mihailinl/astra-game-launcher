@@ -1056,7 +1056,7 @@ fn a_folder_added_before_any_answer_is_looked_in_and_play_still_asks() {
         &w.profile(),
         &w.target(),
         &vars(),
-        Some(Path::new("/opt/fake/steam")),
+        fake_steam(),
         &no_markers(),
         &w.env(),
     )
@@ -1491,7 +1491,7 @@ fn a_folder_past_one_evaluations_bounds_is_shown_and_says_so() {
         &w.profile(),
         &w.target(),
         &vars(),
-        Some(Path::new("/opt/fake/steam")),
+        fake_steam(),
         &no_markers(),
         &w.env(),
     )

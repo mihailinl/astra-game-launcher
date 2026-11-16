@@ -412,14 +412,7 @@ fn what_our_own_loaders_write_never_keeps_our_proxy() {
         let profile = profiles.join("p");
         plan_and_install(&reshade_runner(), &target, &profile);
         // Play once: the overrides go into the prefix, and ReShade writes its files.
-        prepare_launch(
-            &profile,
-            &target,
-            &vars(),
-            Some(std::path::Path::new("/opt/fake/steam")),
-            &no_markers(),
-        )
-        .unwrap();
+        prepare_launch(&profile, &target, &vars(), fake_steam(), &no_markers()).unwrap();
         let ledger = installed(&profile).unwrap().unwrap();
         assert_eq!(ledger.proton.len(), 2, "{:?}", ledger.proton);
         assert_ne!(

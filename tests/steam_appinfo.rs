@@ -1204,7 +1204,7 @@ fn an_unchecked_plan_needs_its_own_accept_and_play_checks_vac_again() {
         &profiles.join("u"),
         &at(ABSENT),
         &vars(),
-        Some(Path::new("/opt/fake/steam")),
+        fake_steam(),
         &no_markers(),
     )
     .unwrap();
@@ -1221,7 +1221,7 @@ fn an_unchecked_plan_needs_its_own_accept_and_play_checks_vac_again() {
         &Ctx::silent(),
     )
     .unwrap();
-    let steam = Some(Path::new("/opt/fake/steam"));
+    let steam = fake_steam();
     prepare_launch(
         &profiles.join("c"),
         &at(CLEAR),
@@ -1333,7 +1333,7 @@ fn an_accepted_unread_flag_never_covers_a_vac_flag_at_play() {
     let profiles = Tmp::new("profiles");
     let mut at = target(game.path(), "Some Game.exe", Some(CLEAR), Platform::Windows);
     at.steam_appinfo = Some(path.clone());
-    let steam = Some(Path::new("/opt/fake/steam"));
+    let steam = fake_steam();
     let play = || prepare_launch(&profiles.join("p"), &at, &vars(), steam, &no_markers());
 
     // Nothing to read at install: accepted, recorded, and it plays.
@@ -1542,7 +1542,7 @@ fn an_anti_cheat_steams_launch_entry_names_is_refused_before_its_files_land() {
         Platform::Windows,
     );
     at.steam_appinfo = Some(path.clone());
-    let steam = Some(Path::new("/opt/fake/steam"));
+    let steam = fake_steam();
     let launches = |entries: Vec<(&'static str, V)>| {
         std::fs::write(
             &path,
@@ -1698,7 +1698,7 @@ fn a_betas_bootstrapper_refuses_only_a_person_on_that_beta() {
     let mut at = target(&dir, "Some Game.exe", Some(LAUNCHES), Platform::Windows);
     at.steam_appinfo = Some(path.clone());
     plan_and_install(&runner(), &at, &profiles.join("p"));
-    let steam = Some(Path::new("/opt/fake/steam"));
+    let steam = fake_steam();
     let none = EngineSet::empty();
     let play = |at: &astra_game_launcher::GameTarget| {
         prepare_launch(&profiles.join("p"), at, &vars(), steam, &none)

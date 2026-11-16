@@ -29,7 +29,6 @@
 mod common;
 
 use std::fs;
-use std::path::Path;
 
 use astra_game_launcher::{
     EngineSet, GameAction, GameTarget, GiPackage, InstallPlan, KEPT_FOLDER_GAINED_FILES,
@@ -695,14 +694,7 @@ fn under_proton_a_proxy_kept_for_its_folder_keeps_its_override() {
         &astra_game_launcher::Ctx::silent(),
     )
     .unwrap();
-    prepare_launch(
-        &w.profile(),
-        &game,
-        &vars(),
-        Some(Path::new("/opt/fake/steam")),
-        &no_markers(),
-    )
-    .unwrap();
+    prepare_launch(&w.profile(), &game, &vars(), fake_steam(), &no_markers()).unwrap();
     w.put("Mods/theirs.lua", b"-- theirs");
     let r = uninstall(&w.profile(), &game).unwrap();
     assert_eq!(r.kept, ["dinput8.dll"]);
@@ -734,7 +726,7 @@ fn play_relinks_only_the_doorstop_sharing_names() {
         &w.profile(),
         &w.at("Game.exe"),
         &vars(),
-        Some(Path::new("/opt/fake/steam")),
+        fake_steam(),
         &no_markers(),
     )
     .unwrap_err();

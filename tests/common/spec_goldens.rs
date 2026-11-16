@@ -509,8 +509,8 @@ pub const SPEC_DEFECTS_AT_PIN: &[SpecDefect] = &[
     },
     SpecDefect {
         golden: "spec/games/reserved.yaml",
-        seen: Seen::ProfileNamesLack(&["mods-choice.json"]),
-        why: "profile_file_names lacks mods-choice.json, the launcher's mods choice (0.4.x), which no manifest may place",
+        seen: Seen::ProfileNamesLack(&["flatpak-grant.json", "mods-choice.json"]),
+        why: "profile_file_names lacks mods-choice.json, the launcher's mods choice (0.4.x), and flatpak-grant.json, what Play granted Flathub's Steam (0.5.3), which no manifest may place",
     },
     SpecDefect {
         golden: "spec/games/reserved.yaml#engine_codes",

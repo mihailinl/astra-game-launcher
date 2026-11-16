@@ -21,14 +21,14 @@ use crate::former;
 use crate::game::GameTarget;
 use crate::ledger::{
     self, Ledger, LedgerBackup, LedgerFile, LedgerGame, LedgerGameFile, LedgerSource, LedgerState,
-    ProfileLock,
+    ProfileLock, ProtonRecord,
 };
 use crate::manifest::IntegrationInfo;
 use crate::pack_inbox::{self, PackInboxPlan, PackInboxReport};
 use crate::package::GiPackage;
 use crate::paths::{
     BACKUP_DIR, FileState, LOCK_FILE, canonical_dir, checked_rel, existing_target, file_state,
-    plain, prepare_target, prune_empty_dirs, write_atomic,
+    plain, prepare_target, write_atomic,
 };
 use crate::plan::{
     Accept, FormerFile, GameAction, GameFileAction, InstallPlan, Planning, kept_for_their_loader,
@@ -36,6 +36,7 @@ use crate::plan::{
 };
 use crate::proton;
 use crate::running::refuse_if_running;
+use crate::safe_dir::{self, SafeDir};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UninstallReport {
@@ -79,6 +80,8 @@ pub struct UninstallReport {
     /// replaced that is gone (its backup goes back only over our file). The person is told to
     /// verify the game's files in Steam (marketplace plan A§4.4, M2). A backup that is an older
     /// Astra's own file (`not_restored`) is not one. Absent when empty, and before 0.5.0.
+    /// [`crate::FLATPAK_REVOKE_FAILED`] (an uninstall only, 0.5.3) when the access Play granted
+    /// Flathub's Steam to the profile could not be taken back.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     /// What was done in the desktop companion's inbox for the packs the install handed it
@@ -92,6 +95,13 @@ pub struct UninstallReport {
 /// [`UninstallReport::kept_reasons`]: the folder of a file we added gained, since, a name that
 /// can carry another loader.
 pub const KEPT_FOLDER_GAINED_FILES: &str = "folder-gained-files";
+
+/// [`UninstallReport::warnings`] (0.5.3): a Proton record of the ledger was not acted on — its
+/// prefix is not the game's own (the one the caller's [`GameTarget`] names, or Steam's
+/// `compatdata/<appid>/pfx` for its folder), or a field holds a line break, a control character
+/// or a quote that would put a line of its own into `user.reg`. That override is left in the
+/// prefix as it is; Steam's "Verify integrity" does not reset it, deleting the game's prefix does.
+pub const PROTON_RECORD_REFUSED: &str = "proton-record-refused";
 
 fn stale(detail: &str) -> LauncherError {
     LauncherError::new(codes::PLAN_STALE).with("detail", detail)
@@ -189,7 +199,14 @@ pub fn install_in(
         };
         // A pack this plan hands the companion again is no tombstone (the engine replaces it by
         // its version, and a tombstone would take it off whoever wears it).
-        uninstall_ledger(&profile, old_root, old, readd, plan.pack_inbox.as_ref())?;
+        uninstall_ledger(
+            &profile,
+            game,
+            old_root,
+            old,
+            readd,
+            plan.pack_inbox.as_ref(),
+        )?;
         if old.pack_inbox.is_some() && plan.pack_inbox.is_some() {
             handed_over = Some(old);
         }
@@ -228,7 +245,7 @@ pub fn install_in(
             Ok(ledger)
         }
         Err(e) => {
-            let _ = uninstall_ledger(&profile, &game_root, &ledger, &[], None);
+            let _ = uninstall_ledger(&profile, game, &game_root, &ledger, &[], None);
             Err(e)
         }
     }
@@ -304,8 +321,13 @@ fn place(
     for (i, f) in pkg.profile_files.iter().enumerate() {
         ctx.check()?;
         let bytes = pkg.read(&mut ar, f)?;
-        let target = prepare_target(profile, &f.rel)?;
-        write_atomic(&target, &bytes)?;
+        // Through its folder held open (`SafeDir`): an update writes into a `BepInEx` Flathub's
+        // Steam may be writing into too.
+        let (parents, name) = safe_dir::split(&f.rel)?;
+        let dir = SafeDir::open(profile, parents, true)?
+            .ok_or_else(|| LauncherError::new(codes::PATH_ESCAPES))?;
+        dir.check_regular_or_absent(name)?;
+        dir.write_atomic(name, &bytes, false)?;
         ctx.report("profile-files", i as u64 + 1, total);
     }
 
@@ -387,32 +409,21 @@ fn place(
 /// keeps it, as the uninstall it stands in for would.
 pub(crate) fn uninstall_ledger(
     profile: &Path,
+    game: &GameTarget,
     game_root: &Path,
     ledger: &Ledger,
     readd: &[GameFileAction],
     again: Option<&PackInboxPlan>,
 ) -> Result<UninstallReport> {
-    let mut report = undo_game(profile, game_root, ledger, readd)?;
+    let mut report = undo_game(profile, game, game_root, ledger, readd)?;
 
+    // Through each file's folder held open (`safe_dir::remove_in`), never by path: Flathub's
+    // Steam may write into `BepInEx`, and a folder it swapped for a link is never deleted
+    // through.
     for f in &ledger.files {
         let comps = checked_rel(&f.rel)?;
-        let found = match existing_target(profile, &comps) {
-            Ok(p) => p,
-            // Never delete through a link.
-            Err(e) if e.code == codes::PATH_ESCAPES => None,
-            Err(e) => return Err(e),
-        };
-        if let Some(p) = found {
-            match fs::symlink_metadata(&p) {
-                Ok(m) if m.is_file() || m.file_type().is_symlink() => {
-                    fs::remove_file(&p).map_err(|e| LauncherError::io_at(&e, &p))?;
-                    report.profile_files_removed += 1;
-                }
-                _ => {}
-            }
-            if let Some(parent) = p.parent() {
-                prune_empty_dirs(parent.to_path_buf(), profile);
-            }
+        if safe_dir::remove_in(profile, &comps)? {
+            report.profile_files_removed += 1;
         }
     }
 
@@ -438,13 +449,23 @@ pub(crate) fn uninstall_ledger(
 /// ([`proxy_folder_gained`], reported in `kept_reasons`).
 fn undo_game(
     profile: &Path,
+    game: &GameTarget,
     game_root: &Path,
     ledger: &Ledger,
     readd: &[GameFileAction],
 ) -> Result<UninstallReport> {
+    // A ledger is a file on disk: a Proton record is acted on only for this game's own prefix and
+    // when nothing in it could put a line of its own into `user.reg`. Any other is never written,
+    // and said (`proton-record-refused`).
+    let prefixes = proton::prefixes_of(game);
+    let (proton_records, refused): (Vec<ProtonRecord>, Vec<ProtonRecord>) = ledger
+        .proton
+        .iter()
+        .cloned()
+        .partition(|r| proton::admissible(r, &prefixes));
     // Before anything is removed: a Wine still running in a prefix we wrote to would write its
     // registry back over the restore, and the uninstall must not stop half done.
-    for rec in &ledger.proton {
+    for rec in &proton_records {
         proton::refuse_if_wineserver(&rec.prefix)?;
     }
     let mut report = UninstallReport {
@@ -576,10 +597,8 @@ fn undo_game(
     }
 
     // An override that loads a kept proxy stays: under Proton their loader needs it as ours did.
-    let (left, restore): (Vec<_>, Vec<_>) = ledger
-        .proton
-        .iter()
-        .cloned()
+    let (left, restore): (Vec<_>, Vec<_>) = proton_records
+        .into_iter()
         .partition(|r| kept_dlls.iter().any(|d| d.eq_ignore_ascii_case(&r.dll)));
     report.proton_restored = proton::restore_prefix(&restore)?;
     for r in left {
@@ -591,6 +610,9 @@ fn undo_game(
     // Every file left in place is not as it was before Astra, whatever kept it.
     if !report.kept.is_empty() || replaced_gone {
         report.warnings.push(codes::RESTORE_PARTIAL.to_owned());
+    }
+    if !refused.is_empty() {
+        report.warnings.push(PROTON_RECORD_REFUSED.to_owned());
     }
     Ok(report)
 }
@@ -724,8 +746,27 @@ pub(crate) fn placed_in(game: &GameTarget, ledger: &Ledger, game_root: &Path) ->
 
 /// Removes an installed integration: restores the game files, the Proton override and the
 /// profile to what they were. Over a [`LedgerState::Restored`] ledger (whose game files went back
-/// already) it removes the profile's files and the ledger.
+/// already) it removes the profile's files and the ledger. The access [`crate::launch()`] granted
+/// Flathub's Steam to the profile (`flatpak-grant.json`) is taken back, the user's own Flatpak
+/// overrides left as they are; what could not be is the warning
+/// [`crate::FLATPAK_REVOKE_FAILED`], never a refusal.
 pub fn uninstall(profile_dir: &Path, game: &GameTarget) -> Result<UninstallReport> {
+    uninstall_with(
+        profile_dir,
+        game,
+        crate::flatpak::user_overrides_file().as_deref(),
+    )
+}
+
+/// [`uninstall`], taking the access Play granted Flathub's Steam out of the Flatpak overrides
+/// file `overrides` (the user's is [`crate::flatpak::user_overrides_file`]). The profile's
+/// `flatpak-grant.json` must name exactly this file, or nothing is edited
+/// ([`crate::FLATPAK_REVOKE_FAILED`]).
+pub fn uninstall_with(
+    profile_dir: &Path,
+    game: &GameTarget,
+    overrides: Option<&Path>,
+) -> Result<UninstallReport> {
     let profile = match canonical_dir(profile_dir) {
         Ok(p) => p,
         Err(_) => return Err(LauncherError::new(codes::NOT_INSTALLED)),
@@ -737,7 +778,7 @@ pub fn uninstall(profile_dir: &Path, game: &GameTarget) -> Result<UninstallRepor
         };
         refuse_if_running(&game.exe_file_name()?)?;
         let game_root = placed_root(game, &ledger)?;
-        let mut report = uninstall_ledger(&profile, &game_root, &ledger, &[], None)?;
+        let mut report = uninstall_ledger(&profile, game, &game_root, &ledger, &[], None)?;
         report.former_removed = sweep_former(&game_root, &ledger);
         // The player's answer to "play with your mods?" goes with the install, so a reinstall asks
         // again. An update keeps it (it never comes through here). Best effort: the integration is
@@ -745,6 +786,11 @@ pub fn uninstall(profile_dir: &Path, game: &GameTarget) -> Result<UninstallRepor
         let _ = crate::mods::remove_choice(&profile);
         // And what Play with mods left in the profile: chain.ini, the chain's last-run.txt.
         crate::mods::play::remove_play_files(&profile, &ledger);
+        // What Play granted Flathub's Steam in the user's Flatpak overrides goes too: exactly the
+        // entry the launcher added, never the user's own. Never a reason to fail (a warning).
+        if let Some(w) = crate::flatpak::revoke_recorded(&profile, overrides) {
+            report.warnings.push(w.to_owned());
+        }
         report
     };
     let _ = fs::remove_file(profile.join(LOCK_FILE));
@@ -780,7 +826,7 @@ pub fn restore_game_files(profile_dir: &Path, game: &GameTarget) -> Result<Unins
     };
     refuse_if_running(&game.exe_file_name()?)?;
     let game_root = placed_root(game, &ledger)?;
-    let mut report = undo_game(&profile, &game_root, &ledger, &[])?;
+    let mut report = undo_game(&profile, game, &game_root, &ledger, &[])?;
     report.former_removed = sweep_former(&game_root, &ledger);
     // A file we replaced whose original is not back (and is no older Astra's file): its backup
     // stays, recorded, while it still holds what was backed up.

@@ -9,7 +9,7 @@ mod common;
 
 use std::cell::RefCell;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use astra_game_launcher::{
     GameTarget, LauncherError, Platform, ProcessPlan, Spawn, codes, installed, launch,
@@ -64,8 +64,8 @@ impl World {
     }
 }
 
-fn steam() -> Option<&'static Path> {
-    Some(Path::new("/opt/fake/steam"))
+fn steam() -> Option<&'static astra_game_launcher::SteamCommand> {
+    fake_steam()
 }
 
 #[test]
@@ -445,9 +445,10 @@ fn several_overrides_are_all_applied_and_all_restored_byte_exactly() {
 #[test]
 fn a_config_write_carrying_a_token_is_mode_0600_and_one_carrying_only_paths_keeps_its_mode() {
     use std::os::unix::fs::PermissionsExt;
-    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
-    let set_mode =
-        |p: &Path, m: u32| fs::set_permissions(p, fs::Permissions::from_mode(m)).unwrap();
+    let mode = |p: &std::path::Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let set_mode = |p: &std::path::Path, m: u32| {
+        fs::set_permissions(p, fs::Permissions::from_mode(m)).unwrap()
+    };
     let w = World::new();
     let m = runner_manifest(
         "\n[[config_writes]]\nfile = \"${profile}/BepInEx/config/paths.cfg\"\nsection = \"Paths\"\nset = { Root = \"${profile}/data\" }\n",

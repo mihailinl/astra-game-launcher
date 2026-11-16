@@ -27,6 +27,10 @@ pub(crate) const MODS_CHOICE_FILE: &str = "mods-choice.json";
 /// Astra Link's discovery file (marketplace plan A§3.1). Reserved now, before its writer ships
 /// (it waits for `link-v1` to freeze), so no integration installed meanwhile can hold the name.
 pub(crate) const LINK_FILE: &str = "astra-link.json";
+/// What [`crate::launch()`] granted Flathub's Steam in the user's Flatpak overrides
+/// (`crate::flatpak`), so that [`crate::uninstall`] takes exactly that away again. Never one of
+/// the ledger's files.
+pub(crate) const FLATPAK_GRANT_FILE: &str = "flatpak-grant.json";
 const TEMP_MARK: &str = ".astra-tmp-";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,6 +337,13 @@ pub(crate) fn file_state(p: &Path) -> Result<FileState> {
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// The name of a temporary file written beside `name` and renamed over it: never one a manifest
+/// can name, and unique in this process.
+pub(crate) fn temp_name(name: &str) -> String {
+    let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!(".{name}{TEMP_MARK}{}-{n}", std::process::id())
+}
+
 /// Writes `bytes` to `target` through a temporary file in the same folder and a rename, so a
 /// reader sees the old file or the new one, never half of one. A link at `target` is replaced,
 /// never followed. Keeps the old file's permissions when there was one.
@@ -352,27 +363,11 @@ pub(crate) fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
 /// The decision: the launcher cannot tell which caller variable is a secret, and every one today
 /// is a bridge credential (`${bridge_token}`, and `${bridge_port}` beside it), so every write that
 /// carries one is private. The game runs as the same user, so nothing that read the file loses
-/// access. [`is_private`] says whether a file left unchanged still needs tightening.
+/// access. On Unix, Play writes such a file through `crate::safe_dir::SafeDir::write_atomic`,
+/// which does the same relative to a folder held open; this is what it does elsewhere.
+#[cfg(not(unix))]
 pub(crate) fn write_atomic_private(target: &Path, bytes: &[u8]) -> Result<()> {
     write_atomic_as(target, bytes, true)
-}
-
-/// Whether the file at `target` is readable by its owner alone (mode `0600` or stricter on Unix),
-/// or there is none to tighten; always `true` elsewhere.
-pub(crate) fn is_private(target: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        match fs::symlink_metadata(target) {
-            Ok(m) => m.permissions().mode() & 0o077 == 0,
-            Err(_) => true,
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = target;
-        true
-    }
 }
 
 fn write_atomic_as(target: &Path, bytes: &[u8], private: bool) -> Result<()> {
@@ -383,8 +378,7 @@ fn write_atomic_as(target: &Path, bytes: &[u8], private: bool) -> Result<()> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = parent.join(format!(".{name}{TEMP_MARK}{}-{n}", std::process::id()));
+    let tmp = parent.join(temp_name(&name));
     let result = (|| -> std::io::Result<()> {
         let mut open = OpenOptions::new();
         open.write(true).create_new(true);
@@ -396,22 +390,23 @@ fn write_atomic_as(target: &Path, bytes: &[u8], private: bool) -> Result<()> {
         }
         let mut f = open.open(&tmp)?;
         f.write_all(bytes)?;
-        f.sync_all()?;
-        drop(f);
-        // A private file never takes over a looser mode on Unix; elsewhere `private` changes
-        // nothing.
+        // Set on the open file, never through the temporary file's path (which someone may have
+        // swapped meanwhile). A private file never takes over a looser mode on Unix; elsewhere
+        // `private` changes nothing.
         if (!private || cfg!(not(unix)))
             && let Ok(m) = fs::symlink_metadata(target)
             && m.is_file()
         {
-            let _ = fs::set_permissions(&tmp, m.permissions());
+            let _ = f.set_permissions(m.permissions());
         }
         #[cfg(unix)]
         if private {
             use std::os::unix::fs::PermissionsExt;
             // Exactly 0600, whatever the umask took away at creation.
-            fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
+            f.set_permissions(fs::Permissions::from_mode(0o600))?;
         }
+        f.sync_all()?;
+        drop(f);
         fs::rename(&tmp, target)
     })();
     if let Err(e) = result {
@@ -589,21 +584,32 @@ pub(crate) fn find_any_case(base: &Path, rel: &[&str]) -> Option<PathBuf> {
     fs::metadata(&cur).is_ok().then_some(cur)
 }
 
-/// Removes empty folders from `dir` up to (not including) `stop`.
-pub(crate) fn prune_empty_dirs(mut dir: PathBuf, stop: &Path) {
-    while dir.starts_with(stop) && dir != stop {
-        if fs::remove_dir(&dir).is_err() {
-            break;
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A write keeps the replaced file's mode, set on the open temporary file (never through its
+    /// path, which someone may have swapped meanwhile).
+    ///
+    /// Mutation (watched red): `write_atomic_as` without `f.set_permissions(m.permissions())`.
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_keeps_the_replaced_files_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("agl-paths-mode-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("f");
+        fs::write(&f, b"old").unwrap();
+        fs::set_permissions(&f, fs::Permissions::from_mode(0o640)).unwrap();
+        write_atomic(&f, b"new").unwrap();
+        assert_eq!(fs::read(&f).unwrap(), b"new");
+        assert_eq!(
+            fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn jail_accepts_the_two_roots_only() {

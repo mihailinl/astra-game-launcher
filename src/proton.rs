@@ -8,10 +8,11 @@
 //! uninstall can put it back.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{LauncherError, Result, codes};
+use crate::game::{GameTarget, Platform};
 use crate::ledger::ProtonRecord;
 use crate::paths::{check_regular_or_absent, write_atomic};
 
@@ -311,6 +312,38 @@ pub(crate) fn same_prefix(a: &Path, b: &Path) -> bool {
         (Ok(x), Ok(y)) => x == y,
         _ => a == b,
     }
+}
+
+/// The prefixes a Proton record of `game`'s ledger may name: the one the caller's target names
+/// (`Platform::LinuxProton`'s `prefix`), and Steam's `compatdata/<appid>/pfx` for the game's
+/// folder. Never one the ledger names on its own say.
+pub(crate) fn prefixes_of(game: &GameTarget) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Platform::LinuxProton { prefix: Some(p) } = &game.platform {
+        out.push(p.clone());
+    }
+    if let Some(p) = game
+        .steam_appid
+        .and_then(|appid| crate::game::proton_prefix_for(&game.dir, appid))
+    {
+        out.push(p);
+    }
+    out
+}
+
+/// Whether a ledger's Proton record may be restored: its prefix is one of `prefixes`
+/// ([`prefixes_of`]), and no field holds what would let [`restore_line`]'s `"<dll>"=<previous>`
+/// become more than one line of `user.reg` — a line break or any control character in any field,
+/// and in the DLL's name a `"` or a `\` (written inside quotes, unescaped) or nothing at all.
+pub(crate) fn admissible(rec: &ProtonRecord, prefixes: &[PathBuf]) -> bool {
+    let clean = |s: &str| !s.chars().any(char::is_control);
+    prefixes.iter().any(|p| same_prefix(p, &rec.prefix))
+        && clean(&rec.section)
+        && clean(&rec.value)
+        && rec.previous.as_deref().is_none_or(clean)
+        && clean(&rec.dll)
+        && !rec.dll.is_empty()
+        && !rec.dll.contains(['"', '\\'])
 }
 
 /// Whether a wineserver serves `prefix` right now: a process named `wineserver*` whose working
@@ -783,11 +816,23 @@ mod tests {
             .find(|p| p.is_file())
             .expect("sleep on PATH");
         fs::copy(&sleep, bin).unwrap();
-        std::process::Command::new(bin)
-            .arg("30")
-            .current_dir(dir)
-            .spawn()
-            .unwrap()
+        // A binary copied a moment ago is busy (ETXTBSY) while another test thread's fork still
+        // holds it open for writing: try again a few times.
+        let mut tries = 0;
+        loop {
+            match std::process::Command::new(bin)
+                .arg("30")
+                .current_dir(dir)
+                .spawn()
+            {
+                Ok(child) => return child,
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 20 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
     }
 
     #[cfg(unix)]

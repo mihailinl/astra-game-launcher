@@ -184,7 +184,7 @@ impl World {
             &self.profile(),
             &self.target(),
             &vars(),
-            Some(Path::new("/opt/fake/steam")),
+            fake_steam(),
             &no_markers(),
             &self.env(),
         )
@@ -680,7 +680,7 @@ fn steam_launch_options_with_doorstop_options_are_a_warning() {
             &w.profile(),
             &game,
             &vars(),
-            Some(Path::new("/opt/fake/steam")),
+            fake_steam(),
             &no_markers(),
             &w.env(),
         )
@@ -1004,7 +1004,7 @@ fn a_fifo_in_place_of_their_doorstop_config_never_blocks_a_play() {
                 &profile,
                 &target,
                 &vars(),
-                Some(Path::new("/opt/fake/steam")),
+                fake_steam(),
                 &no_markers(),
                 &env,
             )

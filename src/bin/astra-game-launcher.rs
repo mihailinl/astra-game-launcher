@@ -534,7 +534,11 @@ fn run(argv: &[String]) -> Result<Output, LauncherError> {
             let a = Args::parse(argv, &opts, &["--json", "--vars-stdin", "--dry-run"])?;
             let game = game_target(&a)?;
             let vars = read_vars(&a)?;
-            let steam = a.one("--steam").map(PathBuf::from).or_else(gl::find_steam);
+            // `--steam` names a native Steam; otherwise a native one on PATH, else Flathub's.
+            let steam = a
+                .one("--steam")
+                .map(gl::SteamCommand::native)
+                .or_else(gl::find_steam_command);
             // The command line holds no catalogue: no markers, as `plan` and `install` here.
             // The folder signatures, kernel drivers and VAC are checked all the same.
             let markers = gl::EngineSet::empty();
@@ -542,7 +546,7 @@ fn run(argv: &[String]) -> Result<Output, LauncherError> {
                 Path::new(a.need("--profile")?),
                 &game,
                 &vars,
-                steam.as_deref(),
+                steam.as_ref(),
                 &markers,
             )?;
             let dry = a.flag("--dry-run");
