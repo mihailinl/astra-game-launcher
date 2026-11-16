@@ -28,7 +28,7 @@ use crate::pack_inbox::{self, PackInboxPlan, PackInboxReport};
 use crate::package::GiPackage;
 use crate::paths::{
     BACKUP_DIR, FileState, LOCK_FILE, canonical_dir, checked_rel, existing_target, file_state,
-    plain, prepare_target, prune_empty_dirs, write_atomic,
+    plain, prepare_target, write_atomic,
 };
 use crate::plan::{
     Accept, FormerFile, GameAction, GameFileAction, InstallPlan, Planning, kept_for_their_loader,
@@ -36,6 +36,7 @@ use crate::plan::{
 };
 use crate::proton;
 use crate::running::refuse_if_running;
+use crate::safe_dir::{self, SafeDir};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UninstallReport {
@@ -320,8 +321,13 @@ fn place(
     for (i, f) in pkg.profile_files.iter().enumerate() {
         ctx.check()?;
         let bytes = pkg.read(&mut ar, f)?;
-        let target = prepare_target(profile, &f.rel)?;
-        write_atomic(&target, &bytes)?;
+        // Through its folder held open (`SafeDir`): an update writes into a `BepInEx` Flathub's
+        // Steam may be writing into too.
+        let (parents, name) = safe_dir::split(&f.rel)?;
+        let dir = SafeDir::open(profile, parents, true)?
+            .ok_or_else(|| LauncherError::new(codes::PATH_ESCAPES))?;
+        dir.check_regular_or_absent(name)?;
+        dir.write_atomic(name, &bytes, false)?;
         ctx.report("profile-files", i as u64 + 1, total);
     }
 
@@ -411,25 +417,13 @@ pub(crate) fn uninstall_ledger(
 ) -> Result<UninstallReport> {
     let mut report = undo_game(profile, game, game_root, ledger, readd)?;
 
+    // Through each file's folder held open (`safe_dir::remove_in`), never by path: Flathub's
+    // Steam may write into `BepInEx`, and a folder it swapped for a link is never deleted
+    // through.
     for f in &ledger.files {
         let comps = checked_rel(&f.rel)?;
-        let found = match existing_target(profile, &comps) {
-            Ok(p) => p,
-            // Never delete through a link.
-            Err(e) if e.code == codes::PATH_ESCAPES => None,
-            Err(e) => return Err(e),
-        };
-        if let Some(p) = found {
-            match fs::symlink_metadata(&p) {
-                Ok(m) if m.is_file() || m.file_type().is_symlink() => {
-                    fs::remove_file(&p).map_err(|e| LauncherError::io_at(&e, &p))?;
-                    report.profile_files_removed += 1;
-                }
-                _ => {}
-            }
-            if let Some(parent) = p.parent() {
-                prune_empty_dirs(parent.to_path_buf(), profile);
-            }
+        if safe_dir::remove_in(profile, &comps)? {
+            report.profile_files_removed += 1;
         }
     }
 

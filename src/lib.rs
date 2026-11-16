@@ -44,6 +44,7 @@ mod plan;
 mod proton;
 pub mod reserved;
 mod running;
+mod safe_dir;
 pub mod steam_appinfo;
 mod steam_userconfig;
 mod zip_consistency;

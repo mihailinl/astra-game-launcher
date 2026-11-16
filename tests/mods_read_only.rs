@@ -50,7 +50,9 @@ const WRITES: &[&str] = &[
     "symlink_dir(",
     "write_atomic(",
     "write_atomic_private(",
-    "prune_empty_dirs(",
+    "prune_empty_in(",
+    "remove_in(",
+    "remove_empty_dir(",
     "ledger::write(",
     "ledger::remove(",
     "ProfileLock::acquire(",
@@ -138,8 +140,8 @@ const ALLOWED: &[(&str, &str, &str)] = &[
     // Uninstall takes the choice away with the integration.
     ("src/mods/choice.rs", "remove", "remove_file("),
     // Uninstall takes away `chain.ini` and the chain's `last-run.txt`, then their folder.
-    ("src/mods/play.rs", "remove_play_files", "remove_file("),
-    ("src/mods/play.rs", "remove_play_files", "prune_empty_dirs("),
+    ("src/mods/play.rs", "remove_play_files", "remove_in("),
+    ("src/mods/play.rs", "remove_play_files", "prune_empty_in("),
 ];
 
 /// Whether `token` at `at` in `src` stands alone: not the tail of a longer name.

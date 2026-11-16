@@ -25,7 +25,7 @@ use crate::error::{LauncherError, Result};
 use crate::ledger;
 use crate::manifest::Manifest;
 use crate::mods::play::LAST_RUN_FILE;
-use crate::paths::{canonical_dir, check_regular_or_absent, checked_rel, existing_target};
+use crate::paths::{canonical_dir, check_regular_or_absent, checked_rel};
 
 /// The Unreal loader's status file's name inside a profile.
 pub const LOADER_STATUS_FILE_NAME: &str = "astra-loader-status.json";
@@ -227,8 +227,14 @@ pub fn mods_last_run(profile_dir: &Path) -> Result<Option<LastRun>> {
     let mut rel = decl.chain_rel();
     rel.pop();
     rel.push(LAST_RUN_FILE.to_owned());
-    let Some(path) = existing_target(&profile, &checked_rel(&rel.join("/"))?)? else {
+    // Through its folder held open, never by path (`SafeDir`): it is beside the chain, which
+    // may be inside the `BepInEx` Flathub's Steam writes into.
+    let rel = checked_rel(&rel.join("/"))?;
+    let (parents, name) = crate::safe_dir::split(&rel)?;
+    let Some(dir) = crate::safe_dir::SafeDir::open(&profile, parents, false)? else {
         return Ok(None);
     };
-    Ok(read_small(&path)?.and_then(|t| LastRun::parse(&t)))
+    Ok(dir
+        .read(name, MAX_STATUS_BYTES)?
+        .and_then(|r| LastRun::parse(&String::from_utf8_lossy(&r.bytes))))
 }

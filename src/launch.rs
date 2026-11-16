@@ -60,12 +60,12 @@ use crate::mods::ModsEnv;
 use crate::mods::play::{GamePath, without_doorstop_options};
 use crate::paths::{
     FileState, PLAY_ARM_FILE, canonical_dir, check_regular_or_absent, checked_rel, existing_target,
-    file_state, is_private, parse_jailed, plain, prepare_target, real_case, write_atomic,
-    write_atomic_private,
+    file_state, parse_jailed, plain, real_case, write_atomic,
 };
 use crate::plan::{GameAction, LoaderPolicy, is_loader_proxy, refuse_anti_cheat};
 use crate::proton;
 use crate::running::refuse_if_running;
+use crate::safe_dir::SafeDir;
 
 /// A command, as an argv array: never a shell string.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +160,9 @@ fn refuse_update_pending(game_dir: &Path, appid: Option<u32>) -> Result<()> {
         .with("appid", appid.to_string())
         .with("state", states.join(",")))
 }
+
+/// The most of a `[[config_writes]]` file Play reads before it rewrites it.
+const MAX_CONFIG_BYTES: u64 = 16 * 1024 * 1024;
 
 /// [`ProcessPlan::warnings`]: a Steam user's own launch options for the game carry `--doorstop-…`
 /// (read from `localconfig.vdf`, [`crate::steam_user_launch_options`]). Steam adds them to every
@@ -866,13 +869,18 @@ pub fn prepare_launch_with(
     for pin in doorstop::session_options(pins_for, &exe_file, foreign_config) {
         args.push(x.expand(&pin)?);
     }
-    // Where `chain.ini` goes, resolved and checked now (a link or a folder in its place is
-    // refused here): a refusal there comes before `[[config_writes]]` and the Proton override
-    // have written anything. Its parent is the chain's own folder, already there.
+    // Where `chain.ini` goes, resolved and checked now (a link or a folder in its place, or on
+    // the way, is refused here): a refusal there comes before `[[config_writes]]` and the Proton
+    // override have written anything. Its parent is the chain's own folder, already there, held
+    // open from here to the write (`SafeDir`: a folder Flathub's Steam may write into).
     let chain_ini = match (&mods, &with_mods) {
         (Some(w), Some((_, text))) => {
             let jp = parse_jailed(&w.decl.chain_config)?;
-            Some((prepare_target(&profile, &jp.rel)?, text.clone()))
+            let (parents, name) = crate::safe_dir::split(&jp.rel)?;
+            let dir = SafeDir::open(&profile, parents, true)?
+                .ok_or_else(|| LauncherError::new(codes::PATH_ESCAPES))?;
+            dir.check_regular_or_absent(name)?;
+            Some((dir, name.to_owned(), text.clone()))
         }
         _ => None,
     };
@@ -885,20 +893,31 @@ pub fn prepare_launch_with(
             &x.profile,
             &args,
             &m,
-            chain_ini.as_ref().map(|(t, _)| t.as_path()),
+            chain_ini
+                .as_ref()
+                .map(|(dir, name, _)| dir.join(name))
+                .as_deref(),
         )?,
         _ => None,
     };
 
     for c in &m.config_writes {
         let jp = parse_jailed(&c.file)?;
-        let target = prepare_target(&profile, &jp.rel)?;
-        let old = match fs::read(&target) {
-            Ok(b) => String::from_utf8(b).map_err(|_| {
-                LauncherError::io("not UTF-8").with("path", target.display().to_string())
-            })?,
-            Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(LauncherError::io_at(&e, &target)),
+        // Read and written through its folder held open (`SafeDir`), never by path: a program in
+        // Flathub's Steam's sandbox may swap the file or a folder above it for a link at any
+        // moment, and neither is ever followed.
+        let (parents, name) = crate::safe_dir::split(&jp.rel)?;
+        let dir = SafeDir::open(&profile, parents, true)?
+            .ok_or_else(|| LauncherError::new(codes::PATH_ESCAPES))?;
+        let target = dir.join(name);
+        let (old, was_private) = match dir.read(name, MAX_CONFIG_BYTES)? {
+            Some(r) => (
+                String::from_utf8(r.bytes).map_err(|_| {
+                    LauncherError::io("not UTF-8").with("path", target.display().to_string())
+                })?,
+                r.private,
+            ),
+            None => (String::new(), true),
         };
         let keys = c
             .set
@@ -907,14 +926,10 @@ pub fn prepare_launch_with(
             .collect::<Result<Vec<_>>>()?;
         let new = ini::set_keys(&old, &c.section, &keys);
         // A value that carries a caller's variable (a bridge credential) is the user's alone: mode
-        // 0600 on Unix, and a file left unchanged is tightened too (`paths::write_atomic_private`).
+        // 0600 on Unix, and a file left unchanged is tightened too (`SafeDir::write_atomic`).
         let private = c.set.values().any(|v| !vars_in(v).is_empty());
-        if private {
-            if new != old || !is_private(&target) {
-                write_atomic_private(&target, new.as_bytes())?;
-            }
-        } else if new != old {
-            write_atomic(&target, new.as_bytes())?;
+        if (private && (new != old || !was_private)) || (!private && new != old) {
+            dir.write_atomic(name, new.as_bytes(), private)?;
         }
     }
 
@@ -987,8 +1002,8 @@ pub fn prepare_launch_with(
 
     // Last, once nothing can refuse this Play any more: the chain's `chain.ini` (the one file a
     // Play with mods adds, in the profile), then what was rewritten is theirs now.
-    if let Some((target, text)) = &chain_ini {
-        write_atomic(target, text.as_bytes())?;
+    if let Some((dir, name, text)) = &chain_ini {
+        dir.write_atomic(name, text.as_bytes(), false)?;
     }
     if game_files != ledger.game_files {
         ledger.game_files = game_files;

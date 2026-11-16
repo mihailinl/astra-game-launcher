@@ -816,11 +816,23 @@ mod tests {
             .find(|p| p.is_file())
             .expect("sleep on PATH");
         fs::copy(&sleep, bin).unwrap();
-        std::process::Command::new(bin)
-            .arg("30")
-            .current_dir(dir)
-            .spawn()
-            .unwrap()
+        // A binary copied a moment ago is busy (ETXTBSY) while another test thread's fork still
+        // holds it open for writing: try again a few times.
+        let mut tries = 0;
+        loop {
+            match std::process::Command::new(bin)
+                .arg("30")
+                .current_dir(dir)
+                .spawn()
+            {
+                Ok(child) => return child,
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 20 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
     }
 
     #[cfg(unix)]

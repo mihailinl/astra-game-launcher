@@ -113,7 +113,12 @@ every other byte of that file kept. What it added — the item, the `;` that clo
 line, the group, the file — is recorded in the profile (`flatpak-grant.json`, a reserved profile
 name, outside the grant), and `uninstall` takes exactly that out again, so the file comes back
 byte for byte; a folder the user had listed already is left to them. `launch_with` and
-`uninstall_with` name the overrides file. The `flatpak` module has the rules.
+`uninstall_with` name the overrides file. The `flatpak` module has the rules. Since a program in
+Steam's sandbox can then write into `BepInEx`, every read, write and delete the launcher makes
+below the profile at Play, install and uninstall (`[[config_writes]]`, `chain.ini`, the profile's
+files, the chain's `last-run.txt`) goes through the folder held open by an `openat` walk with
+`O_NOFOLLOW` at every step: a file or a folder swapped for a link is refused or removed as a
+link, never followed (Unix; Windows keeps its path checks).
 
 | code | from | params | what the person can do |
 |---|---|---|---|
