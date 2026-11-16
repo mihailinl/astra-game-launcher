@@ -99,7 +99,7 @@ fn launch(w: &World) -> Vec<String> {
         &w.profile(),
         &w.target(),
         &vars(),
-        Some(std::path::Path::new("/opt/fake/steam")),
+        fake_steam(),
         &no_markers(),
     )
     .unwrap()
@@ -629,7 +629,7 @@ fn under_proton_the_override_that_loads_a_kept_proxy_stays_too() {
     let game = w.on(Platform::LinuxProton {
         prefix: Some(pfx.path().to_path_buf()),
     });
-    let steam = Some(std::path::Path::new("/opt/fake/steam"));
+    let steam = fake_steam();
     let section = format!("[Software\\\\Wine\\\\AppDefaults\\\\{GAME}.exe\\\\DllOverrides]");
 
     // Nothing of theirs: everything back, byte for byte.
@@ -757,15 +757,9 @@ fn a_path_with_spaces_is_one_argument_and_carries_no_quotes() {
     );
     let game = w.target();
     plan_and_install(&doorstop_runner(&ours()), &game, &profile);
-    let args = prepare_launch(
-        &profile,
-        &game,
-        &vars(),
-        Some(std::path::Path::new("/opt/fake/steam")),
-        &no_markers(),
-    )
-    .unwrap()
-    .args;
+    let args = prepare_launch(&profile, &game, &vars(), fake_steam(), &no_markers())
+        .unwrap()
+        .args;
     let at = |opt: &str| args[args.iter().position(|a| a == opt).unwrap() + 1].clone();
     let target = at("--doorstop-target-assembly");
     assert!(

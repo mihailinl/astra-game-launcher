@@ -79,6 +79,8 @@ pub struct UninstallReport {
     /// replaced that is gone (its backup goes back only over our file). The person is told to
     /// verify the game's files in Steam (marketplace plan A§4.4, M2). A backup that is an older
     /// Astra's own file (`not_restored`) is not one. Absent when empty, and before 0.5.0.
+    /// [`crate::FLATPAK_REVOKE_FAILED`] (an uninstall only, 0.5.3) when the access Play granted
+    /// Flathub's Steam to the profile could not be taken back.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     /// What was done in the desktop companion's inbox for the packs the install handed it
@@ -724,7 +726,10 @@ pub(crate) fn placed_in(game: &GameTarget, ledger: &Ledger, game_root: &Path) ->
 
 /// Removes an installed integration: restores the game files, the Proton override and the
 /// profile to what they were. Over a [`LedgerState::Restored`] ledger (whose game files went back
-/// already) it removes the profile's files and the ledger.
+/// already) it removes the profile's files and the ledger. The access [`crate::launch()`] granted
+/// Flathub's Steam to the profile (`flatpak-grant.json`) is taken back, the user's own Flatpak
+/// overrides left as they are; what could not be is the warning
+/// [`crate::FLATPAK_REVOKE_FAILED`], never a refusal.
 pub fn uninstall(profile_dir: &Path, game: &GameTarget) -> Result<UninstallReport> {
     let profile = match canonical_dir(profile_dir) {
         Ok(p) => p,
@@ -745,6 +750,11 @@ pub fn uninstall(profile_dir: &Path, game: &GameTarget) -> Result<UninstallRepor
         let _ = crate::mods::remove_choice(&profile);
         // And what Play with mods left in the profile: chain.ini, the chain's last-run.txt.
         crate::mods::play::remove_play_files(&profile, &ledger);
+        // What Play granted Flathub's Steam in the user's Flatpak overrides goes too: exactly the
+        // entry the launcher added, never the user's own. Never a reason to fail (a warning).
+        if let Some(w) = crate::flatpak::revoke_recorded(&profile) {
+            report.warnings.push(w.to_owned());
+        }
         report
     };
     let _ = fs::remove_file(profile.join(LOCK_FILE));

@@ -91,6 +91,30 @@ and `UninstallReport::proton_overrides_kept` the Wine overrides left for it. `Le
 `loader_baseline` (absent from older ledgers, ignored by older launchers; the schema number does
 not change).
 
+Added in 0.5.3: **Steam as Flathub's Flatpak** (`com.valvesoftware.Steam`, no native `steam` on
+`PATH`). `prepare_launch` / `prepare_launch_with` take an `Option<&SteamCommand>` instead of a
+path: `SteamCommand::native(path)` as before, or `SteamCommand::flatpak(flatpak)`, whose plan is
+`flatpak run com.valvesoftware.Steam -applaunch <appid> …`. `find_steam_command()` finds a native
+Steam first, then Flathub's (`flatpak info com.valvesoftware.Steam` exits 0); `find_steam()` still
+finds a native one only. The command line's `launch` uses `find_steam_command()` when `--steam`
+is not given. Flathub's Steam cannot see the user's data folder, so a plan for it carries
+`ProcessPlan::sandbox_grant` (the profile folder, canonical), and `launch` — after its own
+checks, right before the spawn — reads Steam's permissions (`flatpak info --show-permissions`:
+`network` and `ipc` are both needed, the game reaches the companion over a localhost WebSocket
+and a shared-memory ring) and adds `<profile>:rw` to `[Context] filesystems` in the user's
+Flatpak overrides (`$FLATPAK_USER_DIR`, `$XDG_DATA_HOME/flatpak` or `~/.local/share/flatpak`,
+`overrides/com.valvesoftware.Steam`), every other byte of that file kept. What it added is
+recorded in the profile (`flatpak-grant.json`, a reserved profile name), and `uninstall` takes
+exactly that entry out again; a folder the user had listed already is left to them.
+`launch_with` names the overrides file. The `flatpak` module has the rules.
+
+| code | from | params | what the person can do |
+|---|---|---|---|
+| `steam-flatpak-unusable` | `launch` | `reason`: `permission` (with `missing`: `network`, `ipc` or `network,ipc`), `flatpak-info`, `unparseable`, `path` (with `path`), `denied` (with `path`), `overrides` (with `path`) | Steam is the Flatpak and the integration's folder cannot be shared with it. `permission`: give Steam back network and ipc access (Flatseal, or `flatpak override --user --share=network --share=ipc com.valvesoftware.Steam`). `denied`: the user's own overrides deny that folder; remove that entry. `path`: the profile folder is a link or has a character Flatpak's overrides cannot hold; move Astra's data folder. `overrides`: the overrides file cannot be read or written. |
+
+`UninstallReport::warnings` can now carry `flatpak-revoke-failed` (`FLATPAK_REVOKE_FAILED`): the
+entry added for Flathub's Steam could not be taken out of the overrides file again.
+
 ## Playing together with the player's own mods (0.4.0)
 
 An integration that declares `[integration.mods]` (astra-bepinex's manifest doc, §7) can run
@@ -573,7 +597,7 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
 
 ```json
 {"schema": "astra.gi-probe/1",
- "tool": {"version": "0.5.2", "source_tree_sha256": "<hex>"},
+ "tool": {"version": "0.5.3", "source_tree_sha256": "<hex>"},
  "subcommand": "compat", "verdict": "pass",
  "input": {}, "source": {}, "against": {"astra": {}, "launcher": {}},
  "steps": [{"step": 1, "check": "…", "status": "pass"}],
@@ -864,7 +888,7 @@ algorithm) and bakes it in:
 
 ```
 astra-game-launcher --version
-# astra-game-launcher 0.5.2 (source tree sha256 <hex>)
+# astra-game-launcher 0.5.3 (source tree sha256 <hex>)
 ```
 
 Astra's own release notes / About screen show the same hash for the commit it pinned. A GitHub
@@ -874,7 +898,7 @@ a hash you compute yourself. Recompute it from a clone of a tag with one line (r
 and `sha256sum`; `scripts/tree-hash.sh` is this same command, runnable against any directory):
 
 ```bash
-V=0.5.2 REPO=https://github.com/mihailinl/astra-game-launcher
+V=0.5.3 REPO=https://github.com/mihailinl/astra-game-launcher
 rm -rf /tmp/astra-gl-verify && mkdir -p /tmp/astra-gl-verify && \
 git clone --quiet --depth 1 --branch "v$V" "$REPO" /tmp/astra-gl-verify/src && \
 cd /tmp/astra-gl-verify/src && git archive "v$V" | tar -x -C /tmp/astra-gl-verify && \

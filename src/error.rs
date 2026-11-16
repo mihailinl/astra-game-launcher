@@ -75,6 +75,15 @@ pub mod codes {
     /// [`crate::STEAM_UPDATE_STATES`], comma-separated; `appid`). What Play checked is not what
     /// would start, and an update may add an anti-cheat: let Steam finish, then Play again.
     pub const GAME_UPDATE_PENDING: &str = "game-update-pending";
+    /// Play (`launch`, right before the spawn): Steam is Flathub's Flatpak and the profile cannot
+    /// be granted to its sandbox (`reason`): `permission` (Steam's sandbox lacks `missing`:
+    /// `network`, `ipc` or `network,ipc`, which the game needs to reach the companion),
+    /// `flatpak-info` (`flatpak info --show-permissions` failed or did not answer),
+    /// `unparseable` (its output), `path` (the profile folder is not a plain folder spelled
+    /// canonically, holds a character Flatpak's overrides would need escaped, or is the home
+    /// folder; `path`), `denied` (the user's own Flatpak overrides deny the folder; `path`),
+    /// `overrides` (the overrides file cannot be found, read or written; `path`).
+    pub const STEAM_FLATPAK_UNUSABLE: &str = "steam-flatpak-unusable";
     // Play with the player's own mods.
     /// Play: the integration can play together with the player's own mods, some are offered
     /// (`sources`, how many) and the player was never asked — or their answer cannot be read
@@ -290,6 +299,7 @@ pub mod codes {
         PROTON_PREFIX_MISSING,
         STEAM_NOT_FOUND,
         GAME_UPDATE_PENDING,
+        STEAM_FLATPAK_UNUSABLE,
         MODS_CHOICE_NEEDED,
         MODS_SOURCE_MISSING,
         MODS_LOADER_UNSUPPORTED,
@@ -443,6 +453,9 @@ impl LauncherError {
             codes::STEAM_NOT_FOUND => "Steam was not found",
             codes::GAME_UPDATE_PENDING => {
                 "Steam has an update for the game it has not finished; let Steam finish updating the game, then play"
+            }
+            codes::STEAM_FLATPAK_UNUSABLE => {
+                "Steam is the Flatpak, and the integration's folder cannot be shared with it, or Steam's sandbox lacks network or ipc access"
             }
             codes::MODS_CHOICE_NEEDED => {
                 "the game can be played together with your own mods; choose with or without them first"

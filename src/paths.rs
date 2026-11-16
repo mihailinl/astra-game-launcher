@@ -27,6 +27,10 @@ pub(crate) const MODS_CHOICE_FILE: &str = "mods-choice.json";
 /// Astra Link's discovery file (marketplace plan A§3.1). Reserved now, before its writer ships
 /// (it waits for `link-v1` to freeze), so no integration installed meanwhile can hold the name.
 pub(crate) const LINK_FILE: &str = "astra-link.json";
+/// What [`crate::launch()`] granted Flathub's Steam in the user's Flatpak overrides
+/// (`crate::flatpak`), so that [`crate::uninstall`] takes exactly that away again. Never one of
+/// the ledger's files.
+pub(crate) const FLATPAK_GRANT_FILE: &str = "flatpak-grant.json";
 const TEMP_MARK: &str = ".astra-tmp-";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -88,7 +88,7 @@ fn launch(w: &World) -> Result<Vec<String>, astra_game_launcher::LauncherError> 
         &w.profile(),
         &w.target(),
         &vars(),
-        Some(std::path::Path::new("/opt/fake/steam")),
+        fake_steam(),
         &no_markers(),
     )
     .map(|p| p.args)

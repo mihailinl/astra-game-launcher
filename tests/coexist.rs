@@ -14,7 +14,7 @@ mod common;
 
 use std::cell::RefCell;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use astra_game_launcher::{
@@ -136,8 +136,8 @@ fn actions(files: &[astra_game_launcher::GameFileAction]) -> Vec<(&str, GameActi
         .collect()
 }
 
-fn steam() -> Option<&'static Path> {
-    Some(Path::new("/opt/fake/steam"))
+fn steam() -> Option<&'static astra_game_launcher::SteamCommand> {
+    fake_steam()
 }
 
 /// Prepares a Play (no spawn): the arguments it would start the game with.

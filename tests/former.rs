@@ -12,7 +12,7 @@
 mod common;
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use astra_game_launcher::{
     ChoiceKind, GameAction, GameTarget, ModsEnv, Platform, codes, plan_install,
@@ -142,7 +142,7 @@ fn a_lost_profile_is_installed_again_and_asks_again() {
             &w.profile(),
             &w.target(),
             &vars(),
-            Some(Path::new("/opt/fake/steam")),
+            fake_steam(),
             &no_markers(),
             &env,
         )

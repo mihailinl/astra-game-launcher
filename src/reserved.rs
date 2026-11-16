@@ -43,6 +43,7 @@ pub const PROFILE_FILE_NAMES: &[&str] = &[
     paths::PLAY_ARM_FILE,
     paths::MODS_CHOICE_FILE,
     paths::LINK_FILE,
+    paths::FLATPAK_GRANT_FILE,
 ];
 
 /// `[integration] id` prefixes only the first-party publisher may use, matched ignoring ASCII

@@ -14,7 +14,7 @@ mod common;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use astra_game_launcher::{
     AntiCheatMarker, AntiCheatMarkerKind, EngineSet, LauncherError, PLAY_ARM_FILE_NAME, Platform,
@@ -79,13 +79,7 @@ impl Lib {
     }
 
     fn prepare(&self, set: &EngineSet) -> Result<ProcessPlan, LauncherError> {
-        prepare_launch(
-            &self.profile(),
-            &self.target(),
-            &vars(),
-            Some(Path::new("/opt/fake/steam")),
-            set,
-        )
+        prepare_launch(&self.profile(), &self.target(), &vars(), fake_steam(), set)
     }
 
     fn play(&self) -> Option<(String, Option<String>)> {
@@ -297,15 +291,7 @@ fn a_linked_library_folder_is_checked_through_its_link() {
     let profile = profiles.join("p");
     let game = target(&link, "Game.exe", Some(APPID), Platform::Windows);
     plan_and_install(&runner(), &game, &profile);
-    let prepare = || {
-        prepare_launch(
-            &profile,
-            &game,
-            &vars(),
-            Some(Path::new("/opt/fake/steam")),
-            &EngineSet::empty(),
-        )
-    };
+    let prepare = || prepare_launch(&profile, &game, &vars(), fake_steam(), &EngineSet::empty());
     let play = || {
         prepare()
             .err()

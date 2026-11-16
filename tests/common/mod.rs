@@ -274,6 +274,13 @@ pub fn plan_and_install(pkg: &GiPackage, game: &GameTarget, profile: &Path) -> I
     plan
 }
 
+/// The Steam every test that plays a Steam game names: a native one no machine has.
+pub fn fake_steam() -> Option<&'static astra_game_launcher::SteamCommand> {
+    static STEAM: std::sync::LazyLock<astra_game_launcher::SteamCommand> =
+        std::sync::LazyLock::new(|| astra_game_launcher::SteamCommand::native("/opt/fake/steam"));
+    Some(&STEAM)
+}
+
 pub fn vars() -> BTreeMap<String, String> {
     BTreeMap::from([
         ("bridge_port".to_owned(), "5555".to_owned()),

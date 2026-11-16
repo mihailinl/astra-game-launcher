@@ -11,7 +11,7 @@
 //! [`plan_install_with_user_pack_root`] when the integration hands the desktop companion its own
 //! animation packs);
 //! [`install`] does that and writes a ledger; [`prepare_launch`] builds the command and
-//! [`launch`] starts it; [`uninstall`] puts everything back, and [`restore_game_files`] puts the
+//! [`launch`] starts it (granting Flathub's Steam the profile folder first: [`flatpak`]); [`uninstall`] puts everything back, and [`restore_game_files`] puts the
 //! game's files back and keeps the profile (a withdrawn integration).
 //!
 //! Every refusal is a [`LauncherError`]: a stable code plus params. The library never elevates,
@@ -28,6 +28,7 @@ mod doorstop;
 pub mod engines;
 mod error;
 mod fetch;
+pub mod flatpak;
 mod former;
 mod game;
 mod ini;
@@ -63,6 +64,7 @@ pub use error::{LauncherError, Result, codes};
 #[cfg(feature = "cli")]
 pub use fetch::UreqFetch;
 pub use fetch::{Fetch, MAX_DOWNLOAD_BYTES, fetch_verified};
+pub use flatpak::{FLATPAK_REVOKE_FAILED, FlatpakGrant, STEAM_FLATPAK_APP};
 pub use former::FormerKind;
 pub use game::{
     GameTarget, Platform, STEAM_DEFAULT_BRANCH, STEAM_UPDATE_STATES, proton_prefix_for,
@@ -75,8 +77,8 @@ pub use install::{
 };
 pub use launch::{
     MODS_CHOICE_UNREADABLE, MODS_PACK_PATH_REFUSED, ProcessPlan, STEAM_LAUNCH_OPTIONS_DOORSTOP,
-    Spawn, StdSpawn, find_steam, launch, prepare_launch, prepare_launch_with,
-    remove_play_arm_if_older,
+    Spawn, StdSpawn, SteamCommand, find_steam, find_steam_command, launch, launch_with,
+    prepare_launch, prepare_launch_with, remove_play_arm_if_older,
 };
 pub use ledger::{
     LEDGER_SCHEMA, Ledger, LedgerBackup, LedgerFile, LedgerGame, LedgerGameFile, LedgerSource,
@@ -122,6 +124,10 @@ pub const PLAY_ARM_FILE_NAME: &str = paths::PLAY_ARM_FILE;
 
 /// The mods choice's file name inside a profile (see [`set_mods_choice`]).
 pub const MODS_CHOICE_FILE_NAME: &str = paths::MODS_CHOICE_FILE;
+
+/// What [`launch`] granted Flathub's Steam, inside a profile ([`FlatpakGrant`]; the `flatpak`
+/// module docs). [`uninstall`] takes the grant away and removes it.
+pub const FLATPAK_GRANT_FILE_NAME: &str = paths::FLATPAK_GRANT_FILE;
 
 /// `path-escapes` (`reason` = `unc`, `verbatim-unc`, `device`, `verbatim`, `not-absolute`) unless
 /// `path` is an absolute drive-letter path on Windows (a mapped network drive or `subst` behind the
