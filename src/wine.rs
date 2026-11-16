@@ -52,10 +52,25 @@ pub(crate) fn is_runner_control(key: &str) -> bool {
     key != OVERRIDES_VAR && (PREFIXES.iter().any(|p| key.starts_with(p)) || NAMES.contains(&key))
 }
 
+/// `WINE*` names the caller's `runner.env` (never an integration's `[launch] env`) may carry:
+/// Heroic sets them as ordinary performance and debug toggles of the game's own settings, and
+/// none of them chooses a program, a library or a folder.
+const CALLER_WINE_TOGGLES: &[&str] = &[
+    "WINEDEBUG",
+    "WINEESYNC",
+    "WINEFSYNC",
+    "WINE_LARGE_ADDRESS_AWARE",
+    "WINE_FULLSCREEN_FSR",
+    "WINE_FULLSCREEN_FSR_STRENGTH",
+];
+
 /// Whether the CALLER's `runner.env` may carry `key`: Heroic's own `PROTON_*`, `UMU_*`,
 /// `STEAM_COMPAT_*` and `GAMEID` (the runner's settings), but never what steers the process
 /// ([`is_runner_control`]) nor the four names the fields own.
 pub(crate) fn caller_may_carry(key: &str) -> bool {
+    if CALLER_WINE_TOGGLES.contains(&key) {
+        return true;
+    }
     const OWNED: &[&str] = &[
         "WINEPREFIX",
         "STEAM_COMPAT_DATA_PATH",
@@ -365,7 +380,7 @@ mod tests {
             "PYTHONHOME",
             "WINEPREFIX",
             "WINESERVER",
-            "WINEESYNC",
+            "WINEFOO",
             "STEAM_COMPAT_DATA_PATH",
         ] {
             assert!(!caller_may_carry(k), "{k}");

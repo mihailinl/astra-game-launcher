@@ -344,7 +344,8 @@ fn the_fields_are_the_only_source_of_the_prefix_and_what_steers_the_runner_is_re
         ("HOME", "/x"),
         ("XDG_DATA_HOME", "/x"),
         ("PYTHONPATH", "/x"),
-        ("WINEDEBUG", "-all"),
+        ("WINEFOO", "1"),
+        ("WINE_FOO", "1"),
     ] {
         refused_with(
             &w,
@@ -539,4 +540,46 @@ fn doorstops_winhttp_is_set_even_when_the_manifest_names_no_override() {
         env_of(&p, "WINEDLLOVERRIDES"),
         Some("mscoree=d;winhttp=n,b")
     );
+}
+
+#[test]
+fn a_listed_wine_toggle_is_the_callers_alone() {
+    let w = World::new();
+    let toggles = [
+        "WINEDEBUG",
+        "WINEESYNC",
+        "WINEFSYNC",
+        "WINE_LARGE_ADDRESS_AWARE",
+        "WINE_FULLSCREEN_FSR",
+        "WINE_FULLSCREEN_FSR_STRENGTH",
+    ];
+    // In `runner.env`: carried to the process.
+    let env: Vec<(&str, &str)> = toggles.iter().map(|k| (*k, "1")).collect();
+    let game = w.game(w.runner(RunnerKind::Wine, &env));
+    w.installed(&game);
+    let p = w.play(&game).unwrap();
+    for k in toggles {
+        assert_eq!(env_of(&p, k), Some("1"), "{k}");
+    }
+    // An unlisted one is still refused there.
+    refused_with(
+        &w,
+        w.runner(RunnerKind::Wine, &[("WINEFOO", "1")]),
+        "env-key",
+        Some("WINEFOO"),
+    );
+    // In an integration's env, a listed one is refused.
+    let m = runner_manifest("").replace(
+        "proton_dll_overrides =",
+        "env = { WINEDEBUG = \"-all\" }\nproton_dll_overrides =",
+    );
+    let dir = Tmp::new("prof3");
+    let profile = dir.join("p");
+    plan_and_install(&open(&runner_zip(&m)).unwrap(), &game, &profile);
+    let e = prepare_launch(&profile, &game, &vars(), None, &no_markers()).unwrap_err();
+    assert_eq!(
+        e.params.get("reason").map(String::as_str),
+        Some("manifest-env-key")
+    );
+    assert_eq!(e.params.get("key").map(String::as_str), Some("WINEDEBUG"));
 }
