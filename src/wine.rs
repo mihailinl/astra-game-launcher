@@ -31,16 +31,86 @@ fn is_env_key(k: &str) -> bool {
         && c.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
+/// The variables that decide WHICH program the Linux runner starts, with which libraries, in
+/// which prefix and from where it downloads. A game integration's `[launch] env` is
+/// third-party text and the runner env is the caller's: neither may steer the runner, or an
+/// integration could make Wine load its own `LD_PRELOAD`, run its own `PATH` programs, or
+/// move the prefix the launcher checked. The only source of the prefix and the compat folder is
+/// [`WineRunner`]'s fields; `WINEDLLOVERRIDES` is the one `WINE*` name that is merged instead.
+/// This is the ONE place the set lives.
+pub(crate) fn is_runner_control(key: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "LD_",
+        "XDG_",
+        "PYTHON",
+        "WINE",
+        "PROTON",
+        "STEAM_COMPAT_",
+        "UMU_",
+    ];
+    const NAMES: &[&str] = &["PATH", "HOME", "GAMEID"];
+    key != OVERRIDES_VAR && (PREFIXES.iter().any(|p| key.starts_with(p)) || NAMES.contains(&key))
+}
+
+/// Whether the CALLER's `runner.env` may carry `key`: Heroic's own `PROTON_*`, `UMU_*`,
+/// `STEAM_COMPAT_*` and `GAMEID` (the runner's settings), but never what steers the process
+/// ([`is_runner_control`]) nor the four names the fields own.
+pub(crate) fn caller_may_carry(key: &str) -> bool {
+    const OWNED: &[&str] = &[
+        "WINEPREFIX",
+        "STEAM_COMPAT_DATA_PATH",
+        "WINELOADER",
+        "WINESERVER",
+    ];
+    if OWNED.contains(&key) {
+        return false;
+    }
+    !is_runner_control(key)
+        || ["PROTON", "STEAM_COMPAT_", "UMU_"]
+            .iter()
+            .any(|p| key.starts_with(p))
+        || key == "GAMEID"
+}
+
+/// What [`WineRunner::resolve`] checked: the canonical folders the process is told about.
+pub(crate) struct Resolved {
+    prefix: PathBuf,
+    compat: Option<PathBuf>,
+}
+
+fn canon(p: &Path, reason: &str) -> Result<PathBuf> {
+    std::fs::canonicalize(p).map_err(|_| invalid(reason, p))
+}
+
+fn nested(a: &Path, b: &Path) -> bool {
+    a.starts_with(b) || b.starts_with(a)
+}
+
 impl WineRunner {
-    /// Everything about the runner that can be known without starting it, checked before anything
-    /// is spawned or written (`runner-invalid`, `reason` and `path` or `key`):
+    /// Everything about the runner that can be known without starting it, checked before
+    /// anything is spawned or written and again right before the spawn (`runner-invalid`,
+    /// `reason` and `path` or `key`). `profile` is the launcher's folder, `game_dir` the game's.
     /// - `bin` is absolute and resolves (a link is followed: distributions install `wine` as a
-    ///   link) to a regular file with an execute bit;
-    /// - `prefix` is absolute and an existing folder (a link to one is fine), and not inside
-    ///   `profile` (the launcher's own folder, which it may rewrite);
-    /// - every `env` key is `[A-Z_][A-Z0-9_]*` and no value holds a NUL;
-    /// - [`RunnerKind::Umu`] carries a non-empty `GAMEID`.
-    pub fn check(&self, profile: &Path) -> Result<()> {
+    ///   link) to a regular file with an execute bit that is not under the game folder or the
+    ///   profile (`bin-in-game`, `bin-in-profile`: a program the game or an integration can
+    ///   rewrite is never the runner);
+    /// - `prefix` is absolute, an existing folder, and neither inside the profile nor holding
+    ///   it (`prefix-in-profile`, `profile-in-prefix`); it is what `WINEPREFIX` says, canonical;
+    /// - `compat_data` (REQUIRED for [`RunnerKind::Proton`], `compat-data-required`) is
+    ///   absolute, an existing folder, outside the profile in both directions, and the prefix is
+    ///   it (`compat_data` itself) or `compat_data/pfx` (`compat-data-mismatch` otherwise);
+    /// - `env` keys are `[A-Z_][A-Z0-9_]*`, none is a name the fields own or one that steers the
+    ///   runner (`env-key`, see [`caller_may_carry`]), and no value holds a NUL (`env-value`);
+    /// - [`RunnerKind::Umu`] carries a non-empty `GAMEID` and a `PROTONPATH` that is an absolute
+    ///   existing folder outside the game and the profile (`umu-gameid`, `umu-protonpath`,
+    ///   `protonpath-in-game`, `protonpath-in-profile`): without it umu downloads a Proton.
+    pub fn check(&self, profile: &Path, game_dir: &Path) -> Result<()> {
+        self.resolve(profile, game_dir).map(|_| ())
+    }
+
+    pub(crate) fn resolve(&self, profile: &Path, game_dir: &Path) -> Result<Resolved> {
+        let profile = canon(profile, "profile-missing")?;
+        let game = std::fs::canonicalize(game_dir).unwrap_or_else(|_| game_dir.to_path_buf());
         if !self.bin.is_absolute() {
             return Err(invalid("bin-not-absolute", &self.bin));
         }
@@ -55,24 +125,57 @@ impl WineRunner {
                 return Err(invalid("bin-not-executable", &self.bin));
             }
         }
+        let bin = canon(&self.bin, "bin-not-file")?;
+        if bin.starts_with(&game) {
+            return Err(invalid("bin-in-game", &self.bin));
+        }
+        if bin.starts_with(&profile) {
+            return Err(invalid("bin-in-profile", &self.bin));
+        }
+
         if !self.prefix.is_absolute() {
             return Err(invalid("prefix-not-absolute", &self.prefix));
         }
         if !std::fs::metadata(&self.prefix).is_ok_and(|m| m.is_dir()) {
             return Err(invalid("prefix-missing", &self.prefix));
         }
-        let inside = match (
-            std::fs::canonicalize(&self.prefix),
-            std::fs::canonicalize(profile),
-        ) {
-            (Ok(p), Ok(prof)) => p.starts_with(prof),
-            _ => self.prefix.starts_with(profile),
-        };
-        if inside {
+        let prefix = canon(&self.prefix, "prefix-missing")?;
+        if prefix.starts_with(&profile) {
             return Err(invalid("prefix-in-profile", &self.prefix));
         }
+        if profile.starts_with(&prefix) {
+            return Err(invalid("profile-in-prefix", &self.prefix));
+        }
+
+        let compat = match &self.compat_data {
+            None if self.kind == RunnerKind::Proton => {
+                return Err(invalid("compat-data-required", &self.prefix));
+            }
+            None => None,
+            Some(c) => {
+                if !c.is_absolute() {
+                    return Err(invalid("compat-data-not-absolute", c));
+                }
+                if !std::fs::metadata(c).is_ok_and(|m| m.is_dir()) {
+                    return Err(invalid("compat-data-missing", c));
+                }
+                let cc = canon(c, "compat-data-missing")?;
+                if cc.starts_with(&profile) {
+                    return Err(invalid("compat-data-in-profile", c));
+                }
+                if profile.starts_with(&cc) {
+                    return Err(invalid("profile-in-compat-data", c));
+                }
+                let pfx = std::fs::canonicalize(cc.join("pfx")).ok();
+                if prefix != cc && pfx.as_ref() != Some(&prefix) {
+                    return Err(invalid("compat-data-mismatch", c));
+                }
+                Some(cc)
+            }
+        };
+
         for (k, v) in &self.env {
-            if !is_env_key(k) {
+            if !is_env_key(k) || !caller_may_carry(k) {
                 return Err(LauncherError::new(codes::RUNNER_INVALID)
                     .with("reason", "env-key")
                     .with("key", k.clone()));
@@ -83,24 +186,41 @@ impl WineRunner {
                     .with("key", k.clone()));
             }
         }
-        if self.kind == RunnerKind::Umu
-            && !self.env.iter().any(|(k, v)| k == "GAMEID" && !v.is_empty())
-        {
-            return Err(invalid("umu-gameid", &self.bin));
+        if self.kind == RunnerKind::Umu {
+            let get = |k: &str| {
+                self.env
+                    .iter()
+                    .find(|(ek, v)| ek == k && !v.is_empty())
+                    .map(|(_, v)| v.as_str())
+            };
+            if get("GAMEID").is_none() {
+                return Err(invalid("umu-gameid", &self.bin));
+            }
+            let pp = PathBuf::from(get("PROTONPATH").unwrap_or_default());
+            if !pp.is_absolute() || !std::fs::metadata(&pp).is_ok_and(|m| m.is_dir()) {
+                return Err(invalid("umu-protonpath", &pp));
+            }
+            let ppc = canon(&pp, "umu-protonpath")?;
+            if ppc.starts_with(&game) || game.starts_with(&ppc) {
+                return Err(invalid("protonpath-in-game", &pp));
+            }
+            if nested(&ppc, &profile) {
+                return Err(invalid("protonpath-in-profile", &pp));
+            }
         }
-        Ok(())
+        Ok(Resolved { prefix, compat })
     }
 
     /// The program, its arguments and its environment for starting `exe` with `args`.
-    /// `base_env` is the integration's own (`[launch] env`, expanded); the runner's `env` is
-    /// applied over it, as given, except `WINEDLLOVERRIDES`, which is merged
-    /// ([`merge_dll_overrides`]) with `overrides` (`(dll, value)` pairs, the integration's). Adds
-    /// `WINEPREFIX` unless set. For Proton also `STEAM_COMPAT_DATA_PATH` (the folder holding
-    /// `pfx`: the prefix's parent when it is named `pfx`, else the prefix itself, which Proton
-    /// then fills with its own `pfx`) and an empty `STEAM_COMPAT_CLIENT_INSTALL_PATH` when unset
-    /// (Proton's script reads the variable; Heroic sets it to the Steam folder when it has one).
+    /// `base_env` is the integration's own (`[launch] env`, expanded, already refused if it names
+    /// a control variable); the runner's `env` is applied over it, as given, except
+    /// `WINEDLLOVERRIDES`, which is merged ([`merge_dll_overrides`]) with `overrides`
+    /// (`(dll, value)` pairs, the integration's). `WINEPREFIX` is always the CHECKED, canonical
+    /// prefix; for Proton `STEAM_COMPAT_DATA_PATH` is the checked `compat_data`, and an empty
+    /// `STEAM_COMPAT_CLIENT_INSTALL_PATH` is added when unset (the `proton` script reads it).
     pub(crate) fn command(
         &self,
+        at: &Resolved,
         exe: &Path,
         args: Vec<String>,
         base_env: Vec<(String, String)>,
@@ -115,24 +235,17 @@ impl WineRunner {
                 set(&mut env, k, v);
             }
         }
-        if !env.iter().any(|(k, _)| k == "WINEPREFIX") {
-            set(
-                &mut env,
-                "WINEPREFIX".into(),
-                self.prefix.display().to_string(),
-            );
-        }
+        set(
+            &mut env,
+            "WINEPREFIX".into(),
+            at.prefix.display().to_string(),
+        );
         if self.kind == RunnerKind::Proton {
-            if !env.iter().any(|(k, _)| k == "STEAM_COMPAT_DATA_PATH") {
-                let data = if self.prefix.file_name().is_some_and(|n| n == "pfx") {
-                    self.prefix.parent().unwrap_or(&self.prefix)
-                } else {
-                    &self.prefix
-                };
+            if let Some(c) = &at.compat {
                 set(
                     &mut env,
                     "STEAM_COMPAT_DATA_PATH".into(),
-                    data.display().to_string(),
+                    c.display().to_string(),
                 );
             }
             if !env
@@ -215,6 +328,48 @@ mod tests {
     #[test]
     fn nothing_to_merge_is_empty() {
         assert_eq!(merge_dll_overrides(&[], &[]), "");
+    }
+
+    #[test]
+    fn what_steers_the_runner_is_refused_and_heroics_own_is_not() {
+        for k in [
+            "LD_PRELOAD",
+            "PATH",
+            "HOME",
+            "XDG_DATA_HOME",
+            "PYTHONPATH",
+            "WINEPREFIX",
+            "WINELOADER",
+            "PROTON_LOG",
+            "STEAM_COMPAT_X",
+            "UMU_X",
+            "GAMEID",
+        ] {
+            assert!(is_runner_control(k), "{k}");
+        }
+        assert!(!is_runner_control("WINEDLLOVERRIDES") && !is_runner_control("DXVK_HUD"));
+        for k in [
+            "PROTON_LOG",
+            "UMU_LOG",
+            "GAMEID",
+            "STEAM_COMPAT_CLIENT_INSTALL_PATH",
+            "DXVK_HUD",
+        ] {
+            assert!(caller_may_carry(k), "{k}");
+        }
+        for k in [
+            "LD_PRELOAD",
+            "PATH",
+            "HOME",
+            "XDG_X",
+            "PYTHONHOME",
+            "WINEPREFIX",
+            "WINESERVER",
+            "WINEESYNC",
+            "STEAM_COMPAT_DATA_PATH",
+        ] {
+            assert!(!caller_may_carry(k), "{k}");
+        }
     }
 
     #[test]

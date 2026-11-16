@@ -49,6 +49,10 @@ pub struct WineRunner {
     pub bin: PathBuf,
     /// Absolute path of the existing Wine prefix (`WINEPREFIX`). Never written to.
     pub prefix: PathBuf,
+    /// Proton's `STEAM_COMPAT_DATA_PATH`: absolute, the folder that is the prefix or holds it
+    /// as `pfx`. Required for [`RunnerKind::Proton`]; the only source of that variable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat_data: Option<PathBuf>,
     /// The environment the runner needs, carried to the process as given (the caller filters
     /// it). Keys are `[A-Z_][A-Z0-9_]*`; a `WINEDLLOVERRIDES` here is merged with the
     /// integration's, not replaced.

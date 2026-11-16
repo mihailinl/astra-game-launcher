@@ -141,9 +141,28 @@ The runner's `env` is carried as given (the caller filters it) over the integrat
 `[launch] env`, plus `WINEPREFIX=<prefix>` unless it sets one. For `Proton`, also
 `STEAM_COMPAT_DATA_PATH` unless set: the prefix's parent when the prefix is named `pfx`, else the
 prefix itself (Proton makes its own `pfx` inside), and an empty `STEAM_COMPAT_CLIENT_INSTALL_PATH`
-when unset (the `proton` script reads the variable). `WineRunner::check(profile)` — run by
+when unset (the `proton` script reads the variable). `WineRunner::check(profile, game_dir)` — run by
 `prepare_launch` before anything is written, and public for callers that want to ask earlier —
 refuses with `runner-invalid`. The play-arm stays Steam-only: a game started by a runner has none.
+
+Round 2 (still 0.5.4), the runner is never trusted beyond its checked fields:
+- `WineRunner` gains `compat_data: Option<PathBuf>` (serde default). `WINEPREFIX` is always the
+  CHECKED, canonical `prefix`; `STEAM_COMPAT_DATA_PATH` is `compat_data` (required for `Proton`:
+  absolute, existing, outside the profile both ways, and the prefix is it or `compat_data/pfx`).
+  `runner.env` and the integration's `[launch] env` can set neither, nor `WINELOADER` /
+  `WINESERVER`, even to an equal value (`env-key`).
+- An integration's `[launch] env` naming a runner-control variable (`LD_*`, `PATH`, `HOME`,
+  `XDG_*`, `PYTHON*`, `WINE*` except `WINEDLLOVERRIDES`, `PROTON*`, `STEAM_COMPAT_*`, `UMU_*`,
+  `GAMEID`) is refused (`manifest-env-key`, `key`) before anything is written. `runner.env` may
+  carry `PROTON*`, `STEAM_COMPAT_*` (not `_DATA_PATH`), `UMU_*` and `GAMEID` but none of the rest.
+- `WineRunner::check(profile, game_dir)` also runs right before the spawn (`launch`).
+  The prefix and the profile may not hold each other, and `bin` may not lie under the game or the
+  profile. `Umu` needs `GAMEID` and a `PROTONPATH` that is an absolute existing folder outside
+  the game and the profile (else umu would download a Proton).
+- More `runner-invalid` reasons: `bin-in-game`, `bin-in-profile`, `profile-in-prefix`,
+  `compat-data-required`, `compat-data-not-absolute`, `compat-data-missing`,
+  `compat-data-in-profile`, `profile-in-compat-data`, `compat-data-mismatch`, `umu-protonpath`,
+  `protonpath-in-game`, `protonpath-in-profile`, `manifest-env-key`.
 
 | code | from | params | what the person can do |
 |---|---|---|---|

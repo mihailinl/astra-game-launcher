@@ -26,6 +26,7 @@ struct World {
     profiles: Tmp,
     prefix: Tmp,
     bins: Tmp,
+    proton_dir: Tmp,
 }
 
 impl World {
@@ -40,6 +41,7 @@ impl World {
             profiles: Tmp::new("profiles"),
             prefix,
             bins: Tmp::new("bins"),
+            proton_dir: Tmp::new("proton-dir"),
         }
     }
 
@@ -59,6 +61,7 @@ impl World {
             kind,
             bin: self.bin("runner"),
             prefix: self.prefix.path().to_path_buf(),
+            compat_data: None,
             env: env
                 .iter()
                 .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
@@ -99,6 +102,7 @@ fn a_wine_plan_runs_the_exe_with_the_prefix_and_the_merged_overrides() {
         &[
             ("WINEDLLOVERRIDES", "mscoree=d;winhttp=b"),
             ("DXVK_HUD", "0"),
+            ("PROTON_LOG", "1"),
         ],
     );
     let game = w.game(r.clone());
@@ -130,14 +134,14 @@ fn a_wine_plan_runs_the_exe_with_the_prefix_and_the_merged_overrides() {
 }
 
 #[test]
-fn a_proton_plan_says_run_and_names_its_compat_data() {
+fn a_proton_plan_says_run_and_names_its_checked_compat_data() {
     let w = World::new();
-    // A prefix named `pfx`: Proton's data folder is its parent.
     let data = Tmp::new("compat");
     let pfx = data.join("pfx");
     fs::create_dir(&pfx).unwrap();
     let mut r = w.runner(RunnerKind::Proton, &[]);
     r.prefix = pfx.clone();
+    r.compat_data = Some(data.path().to_path_buf());
     let game = w.game(r.clone());
     w.installed(&game);
     let p = w.play(&game).unwrap();
@@ -148,34 +152,43 @@ fn a_proton_plan_says_run_and_names_its_compat_data() {
         env_of(&p, "STEAM_COMPAT_DATA_PATH"),
         Some(data.path().to_str().unwrap())
     );
+    assert_eq!(env_of(&p, "WINEPREFIX"), Some(pfx.to_str().unwrap()));
     assert_eq!(env_of(&p, "STEAM_COMPAT_CLIENT_INSTALL_PATH"), Some(""));
     assert_eq!(env_of(&p, "WINEDLLOVERRIDES"), Some("winhttp=n,b"));
 
-    // Any other prefix is the data folder itself (Proton makes its own `pfx` in it), and the
-    // caller's own value always wins.
-    let w2 = World::new();
-    let mut r = w2.runner(RunnerKind::Proton, &[]);
-    let g = w2.game(r.clone());
-    w2.installed(&g);
-    let p = w2.play(&g).unwrap();
+    // The prefix may be the compat folder itself.
+    let mut r2 = w.runner(RunnerKind::Proton, &[]);
+    r2.compat_data = Some(w.prefix.path().to_path_buf());
+    let p = w.play(&w.game(r2)).unwrap();
     assert_eq!(
         env_of(&p, "STEAM_COMPAT_DATA_PATH"),
-        Some(w2.prefix.path().to_str().unwrap())
-    );
-    r.env = vec![("STEAM_COMPAT_DATA_PATH".into(), "/elsewhere".into())];
-    let g = w2.game(r);
-    assert_eq!(
-        env_of(&w2.play(&g).unwrap(), "STEAM_COMPAT_DATA_PATH"),
-        Some("/elsewhere")
+        Some(w.prefix.path().to_str().unwrap())
     );
 }
 
 #[test]
-fn an_umu_plan_has_no_run_word_and_keeps_the_callers_prefix_variable() {
+fn the_prefix_in_the_environment_is_the_canonical_checked_one() {
     let w = World::new();
+    let link = w.bins.join("pfx-link");
+    std::os::unix::fs::symlink(w.prefix.path(), &link).unwrap();
+    let mut r = w.runner(RunnerKind::Wine, &[]);
+    r.prefix = link;
+    let g = w.game(r);
+    w.installed(&g);
+    let p = w.play(&g).unwrap();
+    assert_eq!(
+        env_of(&p, "WINEPREFIX"),
+        Some(w.prefix.path().to_str().unwrap())
+    );
+}
+
+#[test]
+fn an_umu_plan_has_no_run_word_and_the_callers_proton() {
+    let w = World::new();
+    let pp = w.proton_dir.path().to_str().unwrap().to_owned();
     let r = w.runner(
         RunnerKind::Umu,
-        &[("GAMEID", "umu-12345"), ("WINEPREFIX", "/their/pfx")],
+        &[("GAMEID", "umu-12345"), ("PROTONPATH", &pp)],
     );
     let game = w.game(r.clone());
     w.installed(&game);
@@ -183,7 +196,11 @@ fn an_umu_plan_has_no_run_word_and_keeps_the_callers_prefix_variable() {
     assert_eq!(p.program, r.bin);
     assert!(p.args[0].ends_with(&format!("{GAME}.exe")));
     assert_eq!(env_of(&p, "GAMEID"), Some("umu-12345"));
-    assert_eq!(env_of(&p, "WINEPREFIX"), Some("/their/pfx"));
+    assert_eq!(env_of(&p, "PROTONPATH"), Some(pp.as_str()));
+    assert_eq!(
+        env_of(&p, "WINEPREFIX"),
+        Some(w.prefix.path().to_str().unwrap())
+    );
 }
 
 #[test]
@@ -230,17 +247,24 @@ fn nothing_is_written_into_the_prefix_nor_recorded_as_proton() {
     );
 }
 
-fn refused(w: &World, r: WineRunner, reason: &str) {
+fn refused_with(w: &World, r: WineRunner, reason: &str, key: Option<&str>) {
     let game = w.game(r);
     let before = snapshot(w.prefix.path());
     let e = w.play(&game).unwrap_err();
-    assert_eq!(e.code, codes::RUNNER_INVALID, "{e:?}");
+    assert_eq!(e.code, codes::RUNNER_INVALID, "{reason}: {e:?}");
     assert_eq!(
         e.params.get("reason").map(String::as_str),
         Some(reason),
         "{e:?}"
     );
+    if let Some(k) = key {
+        assert_eq!(e.params.get("key").map(String::as_str), Some(k), "{e:?}");
+    }
     assert_eq!(snapshot(w.prefix.path()), before);
+}
+
+fn refused(w: &World, r: WineRunner, reason: &str) {
+    refused_with(w, r, reason, None);
 }
 
 #[test]
@@ -262,6 +286,18 @@ fn a_runner_that_cannot_start_a_game_is_refused_before_anything_is_spawned() {
     r.bin = w.bins.path().to_path_buf();
     refused(&w, r, "bin-not-file");
 
+    // A program the game or the profile holds is never the runner.
+    let mut r = w.runner(RunnerKind::Wine, &[]);
+    let inside = w.game.join("wine");
+    fs::copy(&r.bin, &inside).unwrap();
+    r.bin = inside;
+    refused(&w, r, "bin-in-game");
+    let mut r = w.runner(RunnerKind::Wine, &[]);
+    let inside = w.profile().join("wine");
+    fs::copy(&r.bin, &inside).unwrap();
+    r.bin = inside;
+    refused(&w, r, "bin-in-profile");
+
     let mut r = w.runner(RunnerKind::Wine, &[]);
     r.prefix = PathBuf::from("rel/pfx");
     refused(&w, r, "prefix-not-absolute");
@@ -273,20 +309,184 @@ fn a_runner_that_cannot_start_a_game_is_refused_before_anything_is_spawned() {
     let mut r = w.runner(RunnerKind::Wine, &[]);
     r.prefix = w.profile();
     refused(&w, r, "prefix-in-profile");
+    // The profile inside the prefix, the other direction.
+    let mut r = w.runner(RunnerKind::Wine, &[]);
+    r.prefix = w.profiles.path().to_path_buf();
+    refused(&w, r, "profile-in-prefix");
 
-    let r = w.runner(RunnerKind::Wine, &[("wine_debug", "1")]);
-    refused(&w, r, "env-key");
-    let r = w.runner(RunnerKind::Wine, &[("A-B", "1")]);
-    refused(&w, r, "env-key");
-    let r = w.runner(RunnerKind::Wine, &[("WINEDEBUG", "a\0b")]);
-    refused(&w, r, "env-value");
-
-    refused(&w, w.runner(RunnerKind::Umu, &[]), "umu-gameid");
     refused(
         &w,
-        w.runner(RunnerKind::Umu, &[("GAMEID", "")]),
-        "umu-gameid",
+        w.runner(RunnerKind::Wine, &[("wine_debug", "1")]),
+        "env-key",
     );
+    refused(&w, w.runner(RunnerKind::Wine, &[("A-B", "1")]), "env-key");
+    refused(
+        &w,
+        w.runner(RunnerKind::Wine, &[("DXVK_HUD", "a\0b")]),
+        "env-value",
+    );
+}
+
+#[test]
+fn the_fields_are_the_only_source_of_the_prefix_and_what_steers_the_runner_is_refused() {
+    let w = World::new();
+    w.installed(&w.game(w.runner(RunnerKind::Wine, &[])));
+    let pfx = w.prefix.path().to_str().unwrap().to_owned();
+    // Even a value equal to the checked prefix.
+    for (k, v) in [
+        ("WINEPREFIX", pfx.as_str()),
+        ("STEAM_COMPAT_DATA_PATH", pfx.as_str()),
+        ("WINELOADER", "/bin/sh"),
+        ("WINESERVER", "/bin/sh"),
+        ("LD_PRELOAD", "/x.so"),
+        ("LD_LIBRARY_PATH", "/x"),
+        ("PATH", "/x"),
+        ("HOME", "/x"),
+        ("XDG_DATA_HOME", "/x"),
+        ("PYTHONPATH", "/x"),
+        ("WINEDEBUG", "-all"),
+    ] {
+        refused_with(
+            &w,
+            w.runner(RunnerKind::Wine, &[(k, v)]),
+            "env-key",
+            Some(k),
+        );
+    }
+}
+
+#[test]
+fn the_manifest_env_cannot_steer_the_runner_but_may_merge_overrides() {
+    let w = World::new();
+    let with = |env: &str| {
+        let m = runner_manifest("").replace(
+            "proton_dll_overrides =",
+            &format!("env = {{ {env} }}\nproton_dll_overrides ="),
+        );
+        open(&runner_zip(&m)).unwrap()
+    };
+    let game = w.game(w.runner(RunnerKind::Wine, &[]));
+    for k in [
+        "LD_PRELOAD",
+        "PATH",
+        "WINEPREFIX",
+        "PROTON_X",
+        "STEAM_COMPAT_DATA_PATH",
+        "GAMEID",
+        "UMU_X",
+        "HOME",
+    ] {
+        let pkg = with(&format!("{k} = \"x\""));
+        let dir = Tmp::new("prof");
+        let profile = dir.join("p");
+        plan_and_install(&pkg, &game, &profile);
+        let before = snapshot(w.prefix.path());
+        let e = prepare_launch(&profile, &game, &vars(), None, &no_markers()).unwrap_err();
+        assert_eq!(e.code, codes::RUNNER_INVALID, "{k}: {e:?}");
+        assert_eq!(
+            e.params.get("reason").map(String::as_str),
+            Some("manifest-env-key")
+        );
+        assert_eq!(e.params.get("key").map(String::as_str), Some(k));
+        assert_eq!(snapshot(w.prefix.path()), before);
+    }
+    // An ordinary variable and WINEDLLOVERRIDES are fine, and the overrides merge.
+    let pkg = with("DXVK_HUD = \"1\", WINEDLLOVERRIDES = \"mscoree=d\"");
+    let dir = Tmp::new("prof2");
+    let profile = dir.join("p");
+    plan_and_install(&pkg, &game, &profile);
+    let p = prepare_launch(&profile, &game, &vars(), None, &no_markers()).unwrap();
+    assert_eq!(env_of(&p, "DXVK_HUD"), Some("1"));
+    assert_eq!(
+        env_of(&p, "WINEDLLOVERRIDES"),
+        Some("mscoree=d;winhttp=n,b")
+    );
+}
+
+#[test]
+fn proton_needs_a_checked_compat_data_and_umu_a_checked_protonpath() {
+    let w = World::new();
+    w.installed(&w.game(w.runner(RunnerKind::Wine, &[])));
+    let proton = |c: Option<PathBuf>| {
+        let mut r = w.runner(RunnerKind::Proton, &[]);
+        r.compat_data = c;
+        r
+    };
+    refused(&w, proton(None), "compat-data-required");
+    refused(
+        &w,
+        proton(Some(PathBuf::from("rel"))),
+        "compat-data-not-absolute",
+    );
+    refused(
+        &w,
+        proton(Some(w.prefix.join("gone"))),
+        "compat-data-missing",
+    );
+    refused(&w, proton(Some(w.profile())), "compat-data-in-profile");
+    refused(
+        &w,
+        proton(Some(w.profiles.path().to_path_buf())),
+        "profile-in-compat-data",
+    );
+    // A folder that neither is the prefix nor holds it as `pfx`.
+    refused(
+        &w,
+        proton(Some(w.bins.path().to_path_buf())),
+        "compat-data-mismatch",
+    );
+
+    let umu = |env: &[(&str, &str)]| w.runner(RunnerKind::Umu, env);
+    let pp = w.proton_dir.path().to_str().unwrap();
+    refused(&w, umu(&[("PROTONPATH", pp)]), "umu-gameid");
+    refused(&w, umu(&[("GAMEID", "g")]), "umu-protonpath");
+    refused(
+        &w,
+        umu(&[("GAMEID", "g"), ("PROTONPATH", "GE-Proton9")]),
+        "umu-protonpath",
+    );
+    let gone = w.proton_dir.join("gone");
+    refused(
+        &w,
+        umu(&[("GAMEID", "g"), ("PROTONPATH", gone.to_str().unwrap())]),
+        "umu-protonpath",
+    );
+    let in_game = w.game.join("proton");
+    fs::create_dir(&in_game).unwrap();
+    refused(
+        &w,
+        umu(&[("GAMEID", "g"), ("PROTONPATH", in_game.to_str().unwrap())]),
+        "protonpath-in-game",
+    );
+    let in_profile = w.profile().join("proton");
+    fs::create_dir(&in_profile).unwrap();
+    refused(
+        &w,
+        umu(&[
+            ("GAMEID", "g"),
+            ("PROTONPATH", in_profile.to_str().unwrap()),
+        ]),
+        "protonpath-in-profile",
+    );
+}
+
+#[test]
+fn the_runner_is_checked_again_right_before_the_spawn() {
+    let w = World::new();
+    let r = w.runner(RunnerKind::Wine, &[]);
+    let game = w.game(r.clone());
+    w.installed(&game);
+    let p = w.play(&game).unwrap();
+    // Between prepare and launch the runner stops being a program.
+    fs::set_permissions(&r.bin, fs::Permissions::from_mode(0o644)).unwrap();
+    let rec = Record(RefCell::new(Vec::new()));
+    let e = launch_with(&p, &rec, &no_markers(), None).unwrap_err();
+    assert_eq!(e.code, codes::RUNNER_INVALID);
+    assert_eq!(
+        e.params.get("reason").map(String::as_str),
+        Some("bin-not-executable")
+    );
+    assert!(rec.0.borrow().is_empty());
 }
 
 #[test]
@@ -308,7 +508,7 @@ fn an_older_platform_or_target_still_reads_and_the_new_one_round_trips() {
         panic!("{w:?}")
     };
     assert_eq!(runner.kind, RunnerKind::Umu);
-    assert!(runner.env.is_empty());
+    assert!(runner.env.is_empty() && runner.compat_data.is_none());
     assert_eq!(
         serde_json::from_str::<Platform>(&serde_json::to_string(&w).unwrap()).unwrap(),
         w

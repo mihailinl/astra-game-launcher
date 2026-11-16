@@ -124,7 +124,12 @@ impl Gate {
     /// update Steam has not finished ([`refuse_update_pending`]).
     fn refuse(&self, engines: &EngineSet) -> Result<()> {
         refuse_anti_cheat(&self.game, &self.game_dir, self.trusted, engines)?;
-        refuse_update_pending(&self.game.dir, self.trusted)
+        refuse_update_pending(&self.game.dir, self.trusted)?;
+        // The runner is the caller's and may have changed since: asked again right before the spawn.
+        if let Platform::LinuxWine { runner } = &self.game.platform {
+            runner.check(&self.profile, &self.game_dir)?;
+        }
+        Ok(())
     }
 }
 
@@ -823,8 +828,18 @@ pub fn prepare_launch_with(
     // whatever appid the caller also knows it by: no Steam command, no play-arm, no grant.
     let wine = match &game.platform {
         Platform::LinuxWine { runner } => {
-            runner.check(&profile)?;
-            Some(runner)
+            // The integration's env is third-party text: it never steers the runner.
+            if let Some(k) = m
+                .launch
+                .env
+                .keys()
+                .find(|k| crate::wine::is_runner_control(k))
+            {
+                return Err(LauncherError::new(codes::RUNNER_INVALID)
+                    .with("reason", "manifest-env-key")
+                    .with("key", k.clone()));
+            }
+            Some((runner, runner.resolve(&profile, &game_dir)?))
         }
         _ => None,
     };
@@ -996,7 +1011,7 @@ pub fn prepare_launch_with(
                 // The integration's Wine overrides ride `WINEDLLOVERRIDES`, with Doorstop's
                 // `winhttp` when it loads the game's proxy (a Steam launch carries that in the
                 // user's launch options, a Proton prefix in `user.reg`; neither is ours here).
-                Some(runner) => {
+                Some((runner, at)) => {
                     let mut overrides = m.proton_overrides();
                     if (through_doorstop || with_mods.is_some())
                         && !overrides
@@ -1005,7 +1020,7 @@ pub fn prepare_launch_with(
                     {
                         overrides.push(("winhttp".to_owned(), "n,b".to_owned()));
                     }
-                    runner.command(&exe, args, env, &overrides)
+                    runner.command(&at, &exe, args, env, &overrides)
                 }
                 None => (exe, args, env),
             };
