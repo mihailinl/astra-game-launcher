@@ -120,6 +120,66 @@ files, the chain's `last-run.txt`) goes through the folder held open by an `open
 `O_NOFOLLOW` at every step: a file or a folder swapped for a link is refused or removed as a
 link, never followed (Unix; Windows keeps its path checks).
 
+Added in 0.5.4: **a Windows game under a Wine or Proton the caller chose** (Heroic Games
+Launcher's games on Linux, which Steam does not know). `Platform::LinuxWine { runner: WineRunner }`
+(`WineRunner { kind: RunnerKind, bin, prefix, env }`; `RunnerKind` = `Wine`, `Proton`, `Umu`),
+serde `kind = "linux-wine"`, `env` optional; a plan or ledger without it reads as before. Its
+manifest platform is the same as Proton's (`linux-proton`). Planning, install, uninstall, the
+anti-cheat gate, the mods chain and the `prepare_launch` → `launch` gate are those of any Windows
+target; it needs no Steam and no appid (an appid beside a runner is ignored for the start: no
+Steam command, no `play-arm.json`, no Flatpak grant, whatever `steam` is passed). Doorstop is
+armed by command-line options in the Proton flavour (`Z:\…`, backslashes), as for Steam. The
+plan's program is `bin` and its arguments are `<exe> <args…>`; for `Proton` `run <exe> <args…>`
+(`bin` is the `proton` script); `Umu` is `umu-run <exe> <args…>`.
+**Nothing is written into the runner's prefix, and the ledger's Proton records stay Steam-only**:
+the integration's Proton overrides are not put into `user.reg`; they ride the spawned process's
+`WINEDLLOVERRIDES` (`name=n,b`, `;`-separated), merged with Doorstop's `winhttp=n,b` (added when
+the plan loads a Doorstop proxy and the manifest names no `winhttp`) and with any
+`WINEDLLOVERRIDES` already in the integration's `[launch] env` or `runner.env`; a DLL both name
+takes the integration's value, the rest is kept. `InstallPlan::proton_overrides` is empty for it.
+The runner's `env` is carried as given (the caller filters it) over the integration's own
+`[launch] env`, plus `WINEPREFIX=<prefix>` unless it sets one. For `Proton`, also
+`STEAM_COMPAT_DATA_PATH` unless set: the prefix's parent when the prefix is named `pfx`, else the
+prefix itself (Proton makes its own `pfx` inside), and an empty `STEAM_COMPAT_CLIENT_INSTALL_PATH`
+when unset (the `proton` script reads the variable). `WineRunner::check(profile, game_dir)` — run by
+`prepare_launch` before anything is written, and public for callers that want to ask earlier —
+refuses with `runner-invalid`. The play-arm stays Steam-only: a game started by a runner has none.
+
+Round 2 (still 0.5.4), the runner is never trusted beyond its checked fields:
+- `WineRunner` gains `compat_data: Option<PathBuf>` (serde default). `WINEPREFIX` is always the
+  CHECKED, canonical `prefix`; `STEAM_COMPAT_DATA_PATH` is `compat_data` (required for `Proton`:
+  absolute, existing, outside the profile both ways, and the prefix is it or `compat_data/pfx`).
+  `runner.env` and the integration's `[launch] env` can set neither, nor `WINELOADER` /
+  `WINESERVER`, even to an equal value (`env-key`).
+- An integration's `[launch] env` naming a runner-control variable (`LD_*`, `PATH`, `HOME`,
+  `XDG_*`, `PYTHON*`, `WINE*` except `WINEDLLOVERRIDES`, `PROTON*`, `STEAM_COMPAT_*`, `UMU_*`,
+  `GAMEID`) is refused (`manifest-env-key`, `key`) before anything is written. `runner.env` may
+  carry `PROTON*`, `STEAM_COMPAT_*` (not `_DATA_PATH`), `UMU_*` and `GAMEID` but none of the rest.
+- `WineRunner::check(profile, game_dir)` also runs right before the spawn (`launch`).
+  The prefix and the profile may not hold each other, and `bin` may not lie under the game or the
+  profile. `Umu` needs `GAMEID` and a `PROTONPATH` that is an absolute existing folder outside
+  the game and the profile (else umu would download a Proton).
+- More `runner-invalid` reasons: `bin-in-game`, `bin-in-profile`, `profile-in-prefix`,
+  `compat-data-required`, `compat-data-not-absolute`, `compat-data-missing`,
+  `compat-data-in-profile`, `profile-in-compat-data`, `compat-data-mismatch`, `umu-protonpath`,
+  `protonpath-in-game`, `protonpath-in-profile`, `manifest-env-key`.
+
+Round 3: under `Platform::LinuxWine` an integration's `[launch] env` is an ALLOWLIST: only keys
+starting `DOORSTOP_`, `BEPINEX_` or `ASTRA_`, and `WINEDLLOVERRIDES` (merged); any other key is
+`manifest-env-key` (a denylist of loader variables has no end, and a relative value resolves
+against the game folder, the working directory). `runner.env` keeps the denylist plus: a key
+ending `_PATH`, `_DIR`, `_PATHS` or `_MOUNTS` (plural forms `:`-separated) holds only absolute
+existing folders away from the game and the profile (`env-path`, `key`, `path`), and
+`PROTON_REMOTE_DEBUG_CMD` is refused (`env-key`); the six `WINE*` toggles (`WINEDEBUG`, `WINEESYNC`,
+`WINEFSYNC`, `WINE_LARGE_ADDRESS_AWARE`, `WINE_FULLSCREEN_FSR`, `WINE_FULLSCREEN_FSR_STRENGTH`) pass in `runner.env` only.
+The plan's program is the CANONICAL `bin` that was checked; `launch` resolves the runner again and
+refuses a plan whose program, prefix or compat folder differ (`runner-invalid`, `runner-changed`).
+Proton's prefix must be exactly `<compat_data>/pfx` (Wine and umu may use `compat_data` itself).
+
+| code | from | params | what the person can do |
+|---|---|---|---|
+| `runner-invalid` | `prepare_launch`, `WineRunner::check` | `reason`: `bin-not-absolute`, `bin-not-file` (missing, a folder, or a link that does not end at a file), `bin-not-executable`, `prefix-not-absolute`, `prefix-missing`, `prefix-in-profile` (each with `path`), `env-key` / `env-value` (with `key`; keys are `[A-Z_][A-Z0-9_]*`, values hold no NUL), `umu-gameid` (an `Umu` runner without `GAMEID`, with `path`) | The Wine/Proton the game is set to start with is not usable: pick another runner or fix the game's launcher settings. A link for `bin` or `prefix` is followed, so a distribution's `wine` link works. |
+
 | code | from | params | what the person can do |
 |---|---|---|---|
 | `steam-flatpak-unusable` | `prepare_launch` (`layout`), `launch` | `reason`: `layout` (with `path`), `permission` (with `missing`: `network`, `ipc` or `network,ipc`), `flatpak-info`, `unparseable`, `path` (with `path`), `denied` (with `path`), `overrides` (with `path`) | Steam is the Flatpak and the integration's folder cannot be shared with it. `permission`: give Steam back network and ipc access (Flatseal, or `flatpak override --user --share=network --share=ipc com.valvesoftware.Steam`). `denied`: the user's own overrides deny that folder; remove that entry. `path`: the profile folder is a link or has a character Flatpak's overrides cannot hold; move Astra's data folder. `overrides`: the overrides file cannot be read or written. `layout`: this integration needs more of its folder than Flathub's Steam is given; play it with a native Steam. |
@@ -612,7 +672,7 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
 
 ```json
 {"schema": "astra.gi-probe/1",
- "tool": {"version": "0.5.3", "source_tree_sha256": "<hex>"},
+ "tool": {"version": "0.5.4", "source_tree_sha256": "<hex>"},
  "subcommand": "compat", "verdict": "pass",
  "input": {}, "source": {}, "against": {"astra": {}, "launcher": {}},
  "steps": [{"step": 1, "check": "…", "status": "pass"}],
@@ -903,7 +963,7 @@ algorithm) and bakes it in:
 
 ```
 astra-game-launcher --version
-# astra-game-launcher 0.5.3 (source tree sha256 <hex>)
+# astra-game-launcher 0.5.4 (source tree sha256 <hex>)
 ```
 
 Astra's own release notes / About screen show the same hash for the commit it pinned. A GitHub
@@ -913,7 +973,7 @@ a hash you compute yourself. Recompute it from a clone of a tag with one line (r
 and `sha256sum`; `scripts/tree-hash.sh` is this same command, runnable against any directory):
 
 ```bash
-V=0.5.3 REPO=https://github.com/mihailinl/astra-game-launcher
+V=0.5.4 REPO=https://github.com/mihailinl/astra-game-launcher
 rm -rf /tmp/astra-gl-verify && mkdir -p /tmp/astra-gl-verify && \
 git clone --quiet --depth 1 --branch "v$V" "$REPO" /tmp/astra-gl-verify/src && \
 cd /tmp/astra-gl-verify/src && git archive "v$V" | tar -x -C /tmp/astra-gl-verify && \

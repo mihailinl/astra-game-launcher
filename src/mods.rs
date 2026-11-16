@@ -605,7 +605,7 @@ pub(crate) fn capability(
     };
     if !matches!(
         game.platform,
-        Platform::Windows | Platform::LinuxProton { .. }
+        Platform::Windows | Platform::LinuxProton { .. } | Platform::LinuxWine { .. }
     ) {
         return Err(not("platform"));
     }

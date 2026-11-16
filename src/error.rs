@@ -68,6 +68,12 @@ pub mod codes {
     pub const RESTORE_PARTIAL: &str = "restore-partial";
     // Proton.
     pub const PROTON_PREFIX_MISSING: &str = "proton-prefix-missing";
+    /// Play: the Wine/Proton runner the caller handed over ([`crate::WineRunner`]) cannot start a
+    /// game, found before anything is written or spawned. `reason`: `bin-not-absolute`,
+    /// `bin-not-file`, `bin-not-executable`, `prefix-not-absolute`, `prefix-missing`,
+    /// `prefix-in-profile`, `env-key` (`key`), `env-value` (`key`), `umu-gameid`. `path` names
+    /// the program or prefix at fault.
+    pub const RUNNER_INVALID: &str = "runner-invalid";
     // Launch.
     pub const STEAM_NOT_FOUND: &str = "steam-not-found";
     /// Play: Steam will change the game's files before it starts it — an update it knows of and
@@ -299,6 +305,7 @@ pub mod codes {
         NEEDS_REINSTALL,
         RESTORE_PARTIAL,
         PROTON_PREFIX_MISSING,
+        RUNNER_INVALID,
         STEAM_NOT_FOUND,
         GAME_UPDATE_PENDING,
         STEAM_FLATPAK_UNUSABLE,
@@ -451,6 +458,9 @@ impl LauncherError {
             }
             codes::PROTON_PREFIX_MISSING => {
                 "the game's Proton prefix does not exist yet; start the game once from Steam"
+            }
+            codes::RUNNER_INVALID => {
+                "the Wine or Proton the game is to start with cannot be used (its program or prefix is missing or not usable)"
             }
             codes::STEAM_NOT_FOUND => "Steam was not found",
             codes::GAME_UPDATE_PENDING => {
