@@ -146,8 +146,6 @@ fn uninstall_never_deletes_through_a_folder_swapped_for_a_link() {
 
 /// A Play over a profile whose `BepInEx` holds no link still writes its config, mode `0600` for
 /// the one carrying the bridge credential: the walk refuses only what it must.
-///
-/// Mutation (watched red): `SafeDir::write_atomic` not setting the mode on the open file.
 #[test]
 fn a_plain_profile_still_plays() {
     use std::os::unix::fs::PermissionsExt;

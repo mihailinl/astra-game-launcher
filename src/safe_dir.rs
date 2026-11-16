@@ -512,6 +512,8 @@ mod tests {
         }
 
         /// A write keeps the mode of the file it replaces, set on the open file.
+        ///
+        /// Mutation (watched red): `SafeDir::write_atomic` not setting the mode on the open file.
         #[test]
         fn a_write_keeps_the_replaced_files_mode() {
             let root = tmp("mode");
