@@ -110,7 +110,7 @@ pub use plan::{
     Provenance, VALVE_ANTI_CHEAT, is_hijack_name, plan_install, plan_install_in,
     plan_install_with_user_pack_root, vac_verdict,
 };
-pub use running::is_running;
+pub use running::{is_running, running_pids};
 pub use steam_appinfo::{
     ONLINE_CATEGORIES, VAC_CATEGORY, launch_executable, launch_executables, launch_programs,
     online_codes, online_game, steam_roots, store_categories, store_categories_of,
