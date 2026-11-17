@@ -40,15 +40,17 @@
 //! profile folder is the caller's). It is not a file of the ledger's, and no manifest file may be
 //! named `play-arm.json`.
 //!
-//! **`<profile>/astra-link.json`** (Astra Link v1's discovery file, AstraPlugins
-//! `spec/games/link-v1.md` §2). Astra's daemon mints a token for every Play of an integration it
-//! grants a Link and hands it to [`launch_with_link`] as a [`LinkFile`], which writes the file by
-//! the play-arm's rule: under the profile lock, right before the spawn, after every check, and
-//! taken away again when the spawn fails, so a refused or failed Play leaves no fresh token. It is
-//! written atomically and is mode `0600` on Unix. A Play without a link removes the one an
-//! earlier Play left. A game the launcher starts itself also finds its path in
-//! [`LINK_FILE_ENV`] (`Z:\…` under Wine or Proton). Like the arm, it is no file of the ledger's,
-//! and no manifest may place it.
+//! **`<profile>/link/astra-link.json`** (Astra Link v1's discovery file, AstraPlugins
+//! `spec/games/link-v1.md` §2; in the profile's own folder `link/` since 0.6.1, which Flathub's
+//! Steam is granted read-only, `crate::flatpak`). Astra's daemon mints a token for every Play of
+//! an integration it grants a Link and hands it to [`launch_with_link`] as a [`LinkFile`], which
+//! writes the file by the play-arm's rule: under the profile lock, right before the spawn, after
+//! every check, and taken away again when the spawn fails, so a refused or failed Play leaves no
+//! fresh token. It is written atomically and is mode `0600` on Unix. A Play without a link removes
+//! the one an earlier Play left, and every Play removes the `<profile>/astra-link.json` 0.6.0
+//! wrote. A game the launcher starts itself also finds its path in [`LINK_FILE_ENV`] (`Z:\…`
+//! under Wine or Proton). Like the arm, it is no file of the ledger's, and no manifest may place
+//! it or its folder.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -69,8 +71,8 @@ use crate::manifest::{Manifest, OWN_PLACEHOLDERS, Piece, pieces};
 use crate::mods::ModsEnv;
 use crate::mods::play::{GamePath, without_doorstop_options};
 use crate::paths::{
-    FileState, LINK_FILE, PLAY_ARM_FILE, canonical_dir, check_regular_or_absent, checked_rel,
-    existing_target, file_state, parse_jailed, plain, real_case, write_atomic,
+    FileState, LINK_DIR, LINK_FILE, PLAY_ARM_FILE, canonical_dir, check_regular_or_absent,
+    checked_rel, existing_target, file_state, parse_jailed, plain, real_case, write_atomic,
 };
 use crate::plan::{GameAction, LoaderPolicy, is_loader_proxy, refuse_anti_cheat};
 use crate::proton;
@@ -161,15 +163,15 @@ impl ProcessPlan {
     }
 
     /// Where [`launch_with_link`] writes Astra Link's `astra-link.json` for this plan (and
-    /// removes a stale one when given none): `<profile>/astra-link.json`, the profile as
+    /// removes a stale one when given none): `<profile>/link/astra-link.json`, the profile as
     /// [`prepare_launch`] resolved it. `None` for a plan not made by [`prepare_launch`], which
     /// can carry no link file.
     pub fn link_file(&self) -> Option<PathBuf> {
-        Some(self.gate.as_ref()?.profile.join(LINK_FILE))
+        Some(self.gate.as_ref()?.profile.join(LINK_DIR).join(LINK_FILE))
     }
 }
 
-/// Astra Link v1's discovery file, `<profile>/astra-link.json` (AstraPlugins
+/// Astra Link v1's discovery file, `<profile>/link/astra-link.json` (AstraPlugins
 /// `spec/games/link-v1.md` §2): where a Link-capable game integration finds the daemon's socket
 /// and this Play's token. Astra's daemon mints it for every Play of an integration it grants a
 /// Link; [`launch_with_link`] writes it. Its JSON is exactly
@@ -424,14 +426,19 @@ pub fn launch_linked(
 /// [`launch_with`], and Astra Link's discovery file (`link-v1.md` §2) with it.
 ///
 /// Under the profile lock, after every check [`launch`] makes again and right before the spawn
-/// (beside `play-arm.json`, by the same rule), `<profile>/astra-link.json`
+/// (with `play-arm.json`, by the same rule), `<profile>/link/astra-link.json`
 /// ([`ProcessPlan::link_file`]) is written with `link` ([`LinkFile::to_json`]): atomically (a
-/// temporary file beside it, renamed over it), mode `0600` on Unix (on Windows the profile
-/// folder's ACL). With `None` a stale one left by an earlier Play is removed instead (a link in
-/// its place is removed as a link), so a Play without a Link never hands the game an old token.
-/// A link or a folder at the name refuses a Play with a link file (`path-escapes`) before
-/// anything is written. **A refused or failed Play leaves no fresh link file**: a refusal comes
-/// before the write, and a play-arm write or a spawn that fails removes the file just written.
+/// temporary file beside it in `link/`, renamed over it), mode `0600` on Unix (on Windows the
+/// profile folder's ACL). With `None` a stale one left by an earlier Play is removed instead (a
+/// link in its place is removed as a link), so a Play without a Link never hands the game an old
+/// token. Either way the `<profile>/astra-link.json` 0.6.0 wrote is removed (a link as a link).
+///
+/// The folder `<profile>/link` is the launcher's: created, a real folder, on every Play under the
+/// lock when it is missing, and left in place (Flathub's Steam is granted it read-only and sees
+/// every rename inside it, `crate::flatpak`). A link or a file at `link`, or a link or a folder at
+/// the file's name, refuses the Play (`path-escapes`) before anything is written. **A refused or
+/// failed Play leaves no fresh link file**: a refusal comes before the write, and a play-arm
+/// write or a spawn that fails removes the file just written.
 ///
 /// When the launcher starts the game itself (no Steam: a native game, or a Windows game under the
 /// caller's Wine or Proton), the plan it spawns carries [`LINK_FILE_ENV`] = the file's path, its
@@ -456,6 +463,11 @@ pub fn launch_with_link(
     };
     let _lock = ProfileLock::acquire(&gate.profile)?;
     gate.refuse(engines)?;
+    // The link file's folder, held open (`SafeDir`): created when missing, a link or a file there
+    // refused, and the file written and removed relative to it, never through a link. Made before
+    // the Flatpak grant, which names it.
+    let link_dir = SafeDir::open(&gate.profile, &[LINK_DIR.to_owned()], true)?
+        .ok_or_else(|| LauncherError::new(codes::PATH_ESCAPES))?;
     if let Some(stated) = &plan.sandbox_grant {
         let refused = |reason: &str| {
             LauncherError::new(codes::STEAM_FLATPAK_UNUSABLE)
@@ -473,15 +485,14 @@ pub fn launch_with_link(
         };
         crate::flatpak::grant_sandbox_access(&gate.profile, overrides, flatpak)?;
     }
-    // The profile, held open: the link file is written and removed relative to it, never through
-    // a link (`SafeDir`).
+    // The profile, held open: 0.6.0's link file at its top is removed relative to it.
     let profile = SafeDir::open(&gate.profile, &[], false)?
         .ok_or_else(|| LauncherError::new(codes::PATH_ESCAPES))?;
     if link.is_some() {
         // A link or a folder there is no link file of ours: never written through, never replaced.
-        profile.check_regular_or_absent(LINK_FILE)?;
+        link_dir.check_regular_or_absent(LINK_FILE)?;
     }
-    let link_path = gate.profile.join(LINK_FILE);
+    let link_path = gate.profile.join(LINK_DIR).join(LINK_FILE);
     // What is spawned: for a game started directly, with the link file's path in its environment.
     let linked;
     let plan = if gate.arm.is_none() {
@@ -511,17 +522,19 @@ pub fn launch_with_link(
             Some((appid, path, previous))
         }
     };
-    // Every check is behind: the link file, then the arm, then the spawn.
+    // Every check is behind: the link file, then the arm, then the spawn. The file 0.6.0 wrote at
+    // the profile's top goes first, whatever this Play hands the game.
+    profile.remove_file(LINK_FILE)?;
     match link {
-        Some(l) => profile.write_atomic(LINK_FILE, &l.to_json(), true)?,
+        Some(l) => link_dir.write_atomic(LINK_FILE, &l.to_json(), true)?,
         None => {
-            profile.remove_file(LINK_FILE)?;
+            link_dir.remove_file(LINK_FILE)?;
         }
     }
     // A Play that does not happen leaves no fresh link file.
     let unlink = || {
         if link.is_some() {
-            let _ = profile.remove_file(LINK_FILE);
+            let _ = link_dir.remove_file(LINK_FILE);
         }
     };
     let Some((appid, path, previous)) = arm else {

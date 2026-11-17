@@ -537,8 +537,8 @@ pub const SPEC_DEFECTS_AT_PIN: &[SpecDefect] = &[
     },
     SpecDefect {
         golden: "spec/games/reserved.yaml",
-        seen: Seen::ProfileNamesLack(&["flatpak-grant.json", "mods-choice.json"]),
-        why: "profile_file_names lacks mods-choice.json, the launcher's mods choice (0.4.x), and flatpak-grant.json, what Play granted Flathub's Steam (0.5.3), which no manifest may place",
+        seen: Seen::ProfileNamesLack(&["flatpak-grant.json", "link", "mods-choice.json"]),
+        why: "profile_file_names lacks mods-choice.json, the launcher's mods choice (0.4.x), flatpak-grant.json, what Play granted Flathub's Steam (0.5.3), and link, the folder Astra Link's file moved into (0.6.1), which no manifest may place",
     },
     SpecDefect {
         golden: "spec/games/reserved.yaml#engine_codes",
