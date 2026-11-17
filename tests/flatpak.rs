@@ -439,9 +439,10 @@ fn an_already_listed_folder_is_the_users() {
     assert!(w.uninstall().warnings.is_empty());
     assert_eq!(w.overrides_text().as_deref(), Some(seed.as_str()));
 
-    // Only `link` listed: `BepInEx` is added, and only it comes out again.
+    // Only `link` listed, spelled exactly as a grant would: `BepInEx` is added, and only it
+    // comes out again.
     let w = World::installed(PERMISSIONS);
-    let seed = format!("[Context]\nfilesystems={};\n", w.link_folder().display());
+    let seed = format!("[Context]\nfilesystems={};\n", w.link_entry());
     write(&w.overrides(), seed.as_bytes());
     w.launch(&w.plan(), &Spy::on(&w)).unwrap();
     let record = w.record().unwrap();
