@@ -33,9 +33,9 @@ use crate::manifest::IntegrationInfo;
 use crate::paths;
 
 /// The names no manifest may place at the top of a profile, matched ignoring ASCII case: the
-/// ledger, its lock, the backups folder, the play-arm file, the mods choice, and `astra-link.json`
-/// (Astra Link's discovery file, A§3.1), reserved before its writer ships so no integration
-/// installed meanwhile can hold the name.
+/// ledger, its lock, the backups folder, the play-arm file, the mods choice, `astra-link.json`
+/// (Astra Link's discovery file, `link-v1.md` §2, which [`crate::launch_with_link`] writes) and
+/// what Play granted Flathub's Steam.
 pub const PROFILE_FILE_NAMES: &[&str] = &[
     paths::LEDGER_FILE,
     paths::LOCK_FILE,

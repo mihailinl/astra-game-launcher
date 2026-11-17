@@ -39,6 +39,16 @@
 //! guard: under the lock, only an arm older than its decision); uninstall leaves it (removing the
 //! profile folder is the caller's). It is not a file of the ledger's, and no manifest file may be
 //! named `play-arm.json`.
+//!
+//! **`<profile>/astra-link.json`** (Astra Link v1's discovery file, AstraPlugins
+//! `spec/games/link-v1.md` §2). Astra's daemon mints a token for every Play of an integration it
+//! grants a Link and hands it to [`launch_with_link`] as a [`LinkFile`], which writes the file by
+//! the play-arm's rule: under the profile lock, right before the spawn, after every check, and
+//! taken away again when the spawn fails, so a refused or failed Play leaves no fresh token. It is
+//! written atomically and is mode `0600` on Unix. A Play without a link removes the one an
+//! earlier Play left. A game the launcher starts itself also finds its path in
+//! [`LINK_FILE_ENV`] (`Z:\…` under Wine or Proton). Like the arm, it is no file of the ledger's,
+//! and no manifest may place it.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -59,8 +69,8 @@ use crate::manifest::{Manifest, OWN_PLACEHOLDERS, Piece, pieces};
 use crate::mods::ModsEnv;
 use crate::mods::play::{GamePath, without_doorstop_options};
 use crate::paths::{
-    FileState, PLAY_ARM_FILE, canonical_dir, check_regular_or_absent, checked_rel, existing_target,
-    file_state, parse_jailed, plain, real_case, write_atomic,
+    FileState, LINK_FILE, PLAY_ARM_FILE, canonical_dir, check_regular_or_absent, checked_rel,
+    existing_target, file_state, parse_jailed, plain, real_case, write_atomic,
 };
 use crate::plan::{GameAction, LoaderPolicy, is_loader_proxy, refuse_anti_cheat};
 use crate::proton;
@@ -148,6 +158,71 @@ impl ProcessPlan {
     pub fn play_arm(&self) -> Option<(PathBuf, u32)> {
         let g = self.gate.as_ref()?;
         g.arm.map(|appid| (g.profile.join(PLAY_ARM_FILE), appid))
+    }
+
+    /// Where [`launch_with_link`] writes Astra Link's `astra-link.json` for this plan (and
+    /// removes a stale one when given none): `<profile>/astra-link.json`, the profile as
+    /// [`prepare_launch`] resolved it. `None` for a plan not made by [`prepare_launch`], which
+    /// can carry no link file.
+    pub fn link_file(&self) -> Option<PathBuf> {
+        Some(self.gate.as_ref()?.profile.join(LINK_FILE))
+    }
+}
+
+/// Astra Link v1's discovery file, `<profile>/astra-link.json` (AstraPlugins
+/// `spec/games/link-v1.md` §2): where a Link-capable game integration finds the daemon's socket
+/// and this Play's token. Astra's daemon mints it for every Play of an integration it grants a
+/// Link; [`launch_with_link`] writes it. Its JSON is exactly
+/// `{"schema":1,"url":…,"token":…,"integration":…,"game":…,"issued_unix_ms":…,"expires_unix_ms":…}`
+/// ([`LinkFile::to_json`]); the launcher writes the caller's values as they are and reads none of
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkFile {
+    /// `ws://127.0.0.1:<port>/link`.
+    pub url: String,
+    /// The 256-bit link token, as the daemon spells it.
+    pub token: String,
+    /// The integration's `[integration] id`.
+    pub integration: String,
+    /// The daemon's key for the game: a Steam appid in decimal digits, `local-<16 hex>`,
+    /// `epic-<AppName>`.
+    pub game: String,
+    pub issued_unix_ms: u64,
+    pub expires_unix_ms: u64,
+}
+
+/// The `schema` of [`LinkFile::to_json`].
+pub const LINK_FILE_SCHEMA: u32 = 1;
+
+/// The environment variable a game the launcher starts itself (not through Steam) finds
+/// `astra-link.json`'s path in: its `Z:\…` form under Wine or Proton (`link-v1.md` §2). The
+/// launcher's alone: [`launch_with_link`] sets it with a link file and removes it without one,
+/// whatever an integration's `[launch] env` or a runner's environment said.
+pub const LINK_FILE_ENV: &str = "ASTRA_LINK_FILE";
+
+impl LinkFile {
+    /// The file's bytes: `link-v1.md` §2's object, in its order, `schema` first.
+    pub fn to_json(&self) -> Vec<u8> {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            schema: u32,
+            url: &'a str,
+            token: &'a str,
+            integration: &'a str,
+            game: &'a str,
+            issued_unix_ms: u64,
+            expires_unix_ms: u64,
+        }
+        serde_json::to_vec(&Wire {
+            schema: LINK_FILE_SCHEMA,
+            url: &self.url,
+            token: &self.token,
+            integration: &self.integration,
+            game: &self.game,
+            issued_unix_ms: self.issued_unix_ms,
+            expires_unix_ms: self.expires_unix_ms,
+        })
+        .expect("strings and integers serialise")
     }
 }
 
@@ -324,7 +399,59 @@ pub fn launch_with(
     engines: &EngineSet,
     overrides: Option<&Path>,
 ) -> Result<()> {
+    launch_with_link(plan, spawner, engines, overrides, None)
+}
+
+/// [`launch`] for a Play that hands the game Astra Link's `astra-link.json` (`link` is the
+/// daemon's [`LinkFile`] for this Play), or none (`None`), granting Flathub's Steam in the user's
+/// Flatpak overrides file ([`crate::flatpak::user_overrides_file`]). [`launch_with_link`] with
+/// those overrides.
+pub fn launch_linked(
+    plan: &ProcessPlan,
+    spawner: &dyn Spawn,
+    engines: &EngineSet,
+    link: Option<&LinkFile>,
+) -> Result<()> {
+    launch_with_link(
+        plan,
+        spawner,
+        engines,
+        crate::flatpak::user_overrides_file().as_deref(),
+        link,
+    )
+}
+
+/// [`launch_with`], and Astra Link's discovery file (`link-v1.md` §2) with it.
+///
+/// Under the profile lock, after every check [`launch`] makes again and right before the spawn
+/// (beside `play-arm.json`, by the same rule), `<profile>/astra-link.json`
+/// ([`ProcessPlan::link_file`]) is written with `link` ([`LinkFile::to_json`]): atomically (a
+/// temporary file beside it, renamed over it), mode `0600` on Unix (on Windows the profile
+/// folder's ACL). With `None` a stale one left by an earlier Play is removed instead (a link in
+/// its place is removed as a link), so a Play without a Link never hands the game an old token.
+/// A link or a folder at the name refuses a Play with a link file (`path-escapes`) before
+/// anything is written. **A refused or failed Play leaves no fresh link file**: a refusal comes
+/// before the write, and a play-arm write or a spawn that fails removes the file just written.
+///
+/// When the launcher starts the game itself (no Steam: a native game, or a Windows game under the
+/// caller's Wine or Proton), the plan it spawns carries [`LINK_FILE_ENV`] = the file's path, its
+/// `Z:\…` form under Wine or Proton; without a link file the variable is taken out of the plan's
+/// environment. A Steam start passes Steam no environment, so its game finds the file in its
+/// profile.
+///
+/// A plan not made by [`prepare_launch`] has no profile to write into: with a link file it is
+/// refused (`plan-stale`, `detail` = `link-unprepared`); without, it is spawned as it is.
+pub fn launch_with_link(
+    plan: &ProcessPlan,
+    spawner: &dyn Spawn,
+    engines: &EngineSet,
+    overrides: Option<&Path>,
+    link: Option<&LinkFile>,
+) -> Result<()> {
     let Some(gate) = &plan.gate else {
+        if link.is_some() {
+            return Err(LauncherError::new(codes::PLAN_STALE).with("detail", "link-unprepared"));
+        }
         return spawner.spawn(plan);
     };
     let _lock = ProfileLock::acquire(&gate.profile)?;
@@ -346,23 +473,70 @@ pub fn launch_with(
         };
         crate::flatpak::grant_sandbox_access(&gate.profile, overrides, flatpak)?;
     }
-    let Some(appid) = gate.arm else {
-        return spawner.spawn(plan);
+    // The profile, held open: the link file is written and removed relative to it, never through
+    // a link (`SafeDir`).
+    let profile = SafeDir::open(&gate.profile, &[], false)?
+        .ok_or_else(|| LauncherError::new(codes::PATH_ESCAPES))?;
+    if link.is_some() {
+        // A link or a folder there is no link file of ours: never written through, never replaced.
+        profile.check_regular_or_absent(LINK_FILE)?;
+    }
+    let link_path = gate.profile.join(LINK_FILE);
+    // What is spawned: for a game started directly, with the link file's path in its environment.
+    let linked;
+    let plan = if gate.arm.is_none() {
+        let mut p = plan.clone();
+        p.env.retain(|(k, _)| k != LINK_FILE_ENV);
+        if link.is_some() {
+            let text = path_text(&plain(&link_path), Flavor::of(&gate.game.platform))?;
+            p.env.push((LINK_FILE_ENV.to_owned(), text));
+        }
+        linked = p;
+        &linked
+    } else {
+        plan
     };
-    let path = gate.profile.join(PLAY_ARM_FILE);
-    // A link or a folder there is not an arm of ours: never read through it, never replace it.
-    check_regular_or_absent(&path)?;
-    let previous = match fs::read(&path) {
-        Ok(bytes) => Some(bytes),
-        Err(e) if e.kind() == ErrorKind::NotFound => None,
-        Err(e) => return Err(LauncherError::io_at(&e, &path)),
+    let arm = match gate.arm {
+        None => None,
+        Some(appid) => {
+            let path = gate.profile.join(PLAY_ARM_FILE);
+            // A link or a folder there is not an arm of ours: never read through it, never
+            // replace it.
+            check_regular_or_absent(&path)?;
+            let previous = match fs::read(&path) {
+                Ok(bytes) => Some(bytes),
+                Err(e) if e.kind() == ErrorKind::NotFound => None,
+                Err(e) => return Err(LauncherError::io_at(&e, &path)),
+            };
+            Some((appid, path, previous))
+        }
     };
-    write_play_arm(&path, appid)?;
+    // Every check is behind: the link file, then the arm, then the spawn.
+    match link {
+        Some(l) => profile.write_atomic(LINK_FILE, &l.to_json(), true)?,
+        None => {
+            profile.remove_file(LINK_FILE)?;
+        }
+    }
+    // A Play that does not happen leaves no fresh link file.
+    let unlink = || {
+        if link.is_some() {
+            let _ = profile.remove_file(LINK_FILE);
+        }
+    };
+    let Some((appid, path, previous)) = arm else {
+        return spawner.spawn(plan).inspect_err(|_| unlink());
+    };
+    if let Err(e) = write_play_arm(&path, appid) {
+        unlink();
+        return Err(e);
+    }
     if let Err(e) = spawner.spawn(plan) {
         let _ = match previous {
             Some(bytes) => write_atomic(&path, &bytes),
             None => fs::remove_file(&path).map_err(|e| LauncherError::io_at(&e, &path)),
         };
+        unlink();
         return Err(e);
     }
     Ok(())
@@ -481,6 +655,17 @@ enum Flavor {
     Native,
     /// Under Proton: `Z:\…` with backslashes.
     Proton,
+}
+
+impl Flavor {
+    /// The flavour of a game on `platform`: Proton's for a Windows game on Linux (Steam's Proton,
+    /// or the caller's Wine/Proton/umu), the native one otherwise.
+    fn of(platform: &Platform) -> Flavor {
+        match platform {
+            Platform::LinuxProton { .. } | Platform::LinuxWine { .. } => Flavor::Proton,
+            _ => Flavor::Native,
+        }
+    }
 }
 
 fn path_text(p: &Path, flavor: Flavor) -> Result<String> {
@@ -861,10 +1046,7 @@ pub fn prepare_launch_with(
     let resolved = mods?;
     let mods = resolved.with;
 
-    let flavor = match game.platform {
-        Platform::LinuxProton { .. } | Platform::LinuxWine { .. } => Flavor::Proton,
-        _ => Flavor::Native,
-    };
+    let flavor = Flavor::of(&game.platform);
     let x = Expander {
         profile: path_text(&plain(&profile), flavor)?,
         game: path_text(&plain(&game_root), flavor)?,
