@@ -451,7 +451,7 @@ pub(crate) fn revoke_recorded(profile: &Path, overrides: Option<&Path>) -> Optio
         .iter()
         .filter(|l| !l.preexisting)
         .map(|l| (l.entry.as_str(), l.edit.as_ref()))
-        .chain(Some((record.entry.as_str(), record.edit.as_ref())).filter(|_| !record.preexisting))
+        .chain((!record.preexisting).then_some((record.entry.as_str(), record.edit.as_ref())))
         .collect();
     if ours.is_empty() {
         return done();
