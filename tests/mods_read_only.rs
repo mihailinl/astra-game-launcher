@@ -76,6 +76,8 @@ const WRITES: &[&str] = &[
     "uninstall_ledger(",
     "launch::launch(",
     "launch_with(",
+    "launch::launch_linked(",
+    "launch::launch_with_link(",
     "prepare_launch(",
     "prepare_launch_with(",
     "remove_gone_ok(",

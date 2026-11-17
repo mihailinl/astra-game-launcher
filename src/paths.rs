@@ -24,8 +24,8 @@ pub(crate) const PLAY_ARM_FILE: &str = "play-arm.json";
 /// The player's answer to "play with your mods?" for this game ([`crate::set_mods_choice`]).
 /// Never one of the ledger's files.
 pub(crate) const MODS_CHOICE_FILE: &str = "mods-choice.json";
-/// Astra Link's discovery file (marketplace plan A§3.1). Reserved now, before its writer ships
-/// (it waits for `link-v1` to freeze), so no integration installed meanwhile can hold the name.
+/// Astra Link's discovery file (`link-v1.md` §2), written by [`crate::launch_with_link`] beside
+/// the play-arm. No integration may place it.
 pub(crate) const LINK_FILE: &str = "astra-link.json";
 /// What [`crate::launch()`] granted Flathub's Steam in the user's Flatpak overrides
 /// (`crate::flatpak`), so that [`crate::uninstall`] takes exactly that away again. Never one of

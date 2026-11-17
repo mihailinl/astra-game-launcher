@@ -80,9 +80,10 @@ pub use install::{
     installed, restore_game_files, uninstall, uninstall_with,
 };
 pub use launch::{
-    MODS_CHOICE_UNREADABLE, MODS_PACK_PATH_REFUSED, ProcessPlan, STEAM_LAUNCH_OPTIONS_DOORSTOP,
-    Spawn, StdSpawn, SteamCommand, find_steam, find_steam_command, launch, launch_with,
-    prepare_launch, prepare_launch_with, remove_play_arm_if_older,
+    LINK_FILE_ENV, LINK_FILE_SCHEMA, LinkFile, MODS_CHOICE_UNREADABLE, MODS_PACK_PATH_REFUSED,
+    ProcessPlan, STEAM_LAUNCH_OPTIONS_DOORSTOP, Spawn, StdSpawn, SteamCommand, find_steam,
+    find_steam_command, launch, launch_linked, launch_with, launch_with_link, prepare_launch,
+    prepare_launch_with, remove_play_arm_if_older,
 };
 pub use ledger::{
     LEDGER_SCHEMA, Ledger, LedgerBackup, LedgerFile, LedgerGame, LedgerGameFile, LedgerSource,
@@ -110,7 +111,7 @@ pub use plan::{
     Provenance, VALVE_ANTI_CHEAT, is_hijack_name, plan_install, plan_install_in,
     plan_install_with_user_pack_root, vac_verdict,
 };
-pub use running::is_running;
+pub use running::{is_running, running_pids};
 pub use steam_appinfo::{
     ONLINE_CATEGORIES, VAC_CATEGORY, launch_executable, launch_executables, launch_programs,
     online_codes, online_game, steam_roots, store_categories, store_categories_of,
@@ -132,6 +133,9 @@ pub const MODS_CHOICE_FILE_NAME: &str = paths::MODS_CHOICE_FILE;
 /// What [`launch`] granted Flathub's Steam, inside a profile ([`FlatpakGrant`]; the `flatpak`
 /// module docs). [`uninstall`] takes the grant away and removes it.
 pub const FLATPAK_GRANT_FILE_NAME: &str = paths::FLATPAK_GRANT_FILE;
+
+/// Astra Link's discovery file, `<profile>/astra-link.json` ([`launch_with_link`]).
+pub const LINK_FILE_NAME: &str = paths::LINK_FILE;
 
 /// `path-escapes` (`reason` = `unc`, `verbatim-unc`, `device`, `verbatim`, `not-absolute`) unless
 /// `path` is an absolute drive-letter path on Windows (a mapped network drive or `subst` behind the

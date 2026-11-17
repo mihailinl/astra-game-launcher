@@ -14,8 +14,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use astra_game_launcher::{
-    GameTarget, LauncherError, Platform, ProcessPlan, RunnerKind, Spawn, WineRunner, codes,
-    installed, launch_with, prepare_launch,
+    GameTarget, LINK_FILE_ENV, LINK_FILE_NAME, LauncherError, LinkFile, Platform, ProcessPlan,
+    RunnerKind, Spawn, WineRunner, codes, installed, launch_with, launch_with_link, prepare_launch,
 };
 use common::*;
 
@@ -684,4 +684,37 @@ fn the_program_spawned_is_the_canonical_one_and_a_changed_runner_is_refused_at_l
         Some("runner-changed")
     );
     assert!(rec.0.borrow().is_empty());
+}
+
+/// Under Wine or Proton the game finds Astra Link's file at the path Windows code reads it by:
+/// `ASTRA_LINK_FILE` in its `Z:\\…` form (`link-v1.md` §2), the file itself in the profile.
+#[test]
+fn under_wine_the_link_file_is_named_in_its_z_drive_form() {
+    let w = World::new();
+    let game = w.game(w.runner(RunnerKind::Wine, &[]));
+    w.installed(&game);
+    let p = w.play(&game).unwrap();
+    let link = LinkFile {
+        url: "ws://127.0.0.1:40000/link".to_owned(),
+        token: "t".to_owned(),
+        integration: "someone.x".to_owned(),
+        game: "local-0123456789abcdef".to_owned(),
+        issued_unix_ms: 1,
+        expires_unix_ms: 2,
+    };
+    let rec = Record(RefCell::new(Vec::new()));
+    launch_with_link(&p, &rec, &no_markers(), None, Some(&link)).unwrap();
+    let file = plain(&fs::canonicalize(w.profile()).unwrap().join(LINK_FILE_NAME));
+    let z = format!("Z:{}", file.to_str().unwrap().replace('/', "\\"));
+    let spawned = &rec.0.borrow()[0];
+    assert_eq!(
+        spawned
+            .env
+            .iter()
+            .filter(|(k, _)| k == LINK_FILE_ENV)
+            .map(|(_, v)| v.as_str())
+            .collect::<Vec<_>>(),
+        [z.as_str()]
+    );
+    assert_eq!(fs::read(&file).unwrap(), link.to_json());
 }
