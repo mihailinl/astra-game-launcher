@@ -67,7 +67,8 @@ pub use error::{LauncherError, Result, codes};
 pub use fetch::UreqFetch;
 pub use fetch::{Fetch, MAX_DOWNLOAD_BYTES, fetch_verified};
 pub use flatpak::{
-    Added, FLATPAK_REVOKE_FAILED, FlatpakGrant, GrantEdit, SANDBOX_FOLDER, STEAM_FLATPAK_APP,
+    Added, FLATPAK_REVOKE_FAILED, FlatpakGrant, GrantEdit, GrantEntry, LINK_FOLDER, SANDBOX_FOLDER,
+    STEAM_FLATPAK_APP,
 };
 pub use former::FormerKind;
 pub use game::{
@@ -134,7 +135,9 @@ pub const MODS_CHOICE_FILE_NAME: &str = paths::MODS_CHOICE_FILE;
 /// module docs). [`uninstall`] takes the grant away and removes it.
 pub const FLATPAK_GRANT_FILE_NAME: &str = paths::FLATPAK_GRANT_FILE;
 
-/// Astra Link's discovery file, `<profile>/astra-link.json` ([`launch_with_link`]).
+/// Astra Link's discovery file's name: `<profile>/`[`LINK_FOLDER`]`/astra-link.json` since
+/// 0.6.1 ([`launch_with_link`], [`ProcessPlan::link_file`]); 0.6.0 wrote it at the profile's top,
+/// where every Play removes it.
 pub const LINK_FILE_NAME: &str = paths::LINK_FILE;
 
 /// `path-escapes` (`reason` = `unc`, `verbatim-unc`, `device`, `verbatim`, `not-absolute`) unless

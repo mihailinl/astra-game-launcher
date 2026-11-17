@@ -4,9 +4,10 @@
 
 //! Play through Flathub's Steam (0.5.3): the plan is `flatpak run com.valvesoftware.Steam
 //! -applaunch …`, and `launch` grants Steam's sandbox read/write access to exactly
-//! `<profile>/BepInEx` — never the profile, whose root holds the ledger, the backups and the
-//! grant's own record — in the user's Flatpak overrides, right before the spawn, after reading
-//! Steam's permissions; `uninstall` takes out exactly what the grant added. Every overrides file
+//! `<profile>/BepInEx` and (0.6.1) read access to exactly `<profile>/link`, Astra Link's folder —
+//! never the profile, whose root holds the ledger, the backups and the grant's own record — in
+//! the user's Flatpak overrides, right before the spawn, after reading Steam's permissions;
+//! `uninstall` takes out exactly what the grant added. Every overrides file
 //! here is a temporary one and every `flatpak` a script: nothing touches this machine's Flatpak.
 
 #![cfg(unix)]
@@ -18,10 +19,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use astra_game_launcher::{
-    FLATPAK_GRANT_FILE_NAME, FLATPAK_REVOKE_FAILED, FlatpakGrant, LEDGER_FILE_NAME, LauncherError,
-    MODS_CHOICE_FILE_NAME, PLAY_ARM_FILE_NAME, Platform, ProcessPlan, SANDBOX_FOLDER,
-    STEAM_FLATPAK_APP, Spawn, SteamCommand, UninstallReport, codes, flatpak::grant_sandbox_access,
-    launch_with, prepare_launch, uninstall_with,
+    FLATPAK_GRANT_FILE_NAME, FLATPAK_REVOKE_FAILED, FlatpakGrant, GrantEntry, LEDGER_FILE_NAME,
+    LINK_FILE_NAME, LINK_FOLDER, LauncherError, MODS_CHOICE_FILE_NAME, PLAY_ARM_FILE_NAME,
+    Platform, ProcessPlan, SANDBOX_FOLDER, STEAM_FLATPAK_APP, Spawn, SteamCommand, UninstallReport,
+    codes, flatpak::grant_sandbox_access, launch_with, prepare_launch, uninstall_with,
 };
 use common::*;
 
@@ -97,6 +98,20 @@ impl World {
 
     fn entry(&self) -> String {
         format!("{}:rw", self.granted().display())
+    }
+
+    /// `<profile>/link`, granted read-only.
+    fn link_folder(&self) -> PathBuf {
+        self.profile().join(LINK_FOLDER)
+    }
+
+    fn link_entry(&self) -> String {
+        format!("{}:ro", self.link_folder().display())
+    }
+
+    /// Both entries as a grant adds them, each with its `;`.
+    fn both(&self) -> String {
+        format!("{};{};", self.entry(), self.link_entry())
     }
 
     fn prepare(&self) -> Result<ProcessPlan, LauncherError> {
@@ -193,20 +208,43 @@ fn the_flatpak_plan_is_the_native_one_behind_flatpak_run() {
     assert_eq!(w.record(), None);
 }
 
-/// The grant is `<profile>/BepInEx` and nothing above it: the ledger, the backups, the grant's
-/// own record, the play-arm and the mods choice — every file the launcher trusts outside the
-/// sandbox — are outside the folder granted, and so is the profile itself.
+/// The grant is `<profile>/BepInEx` (read/write) and `<profile>/link` (read-only, made by the
+/// Play) and nothing above them: the ledger, the backups, the grant's own record, the play-arm
+/// and the mods choice — every file the launcher trusts outside the sandbox — are outside the
+/// folders granted, and so is the profile itself.
 ///
-/// Mutation (watched red): `grant_sandbox_access` granting the profile instead of its `BepInEx`.
+/// Mutation (watched red): `grant_sandbox_access` granting the profile instead of its `BepInEx`;
+/// granting `link` read/write; granting `link/astra-link.json` instead of the folder.
 #[test]
-fn the_grant_is_bepinex_alone_never_the_profiles_root() {
+fn the_grant_is_bepinex_and_link_never_the_profiles_root() {
     let w = World::installed(PERMISSIONS);
     w.launch(&w.plan(), &Spy::on(&w)).unwrap();
     let record = w.record().unwrap();
     assert_eq!(record.entry, w.entry());
+    let link = record.link.clone().unwrap();
+    assert_eq!(
+        link,
+        GrantEntry {
+            entry: w.link_entry(),
+            preexisting: false,
+            edit: link.edit,
+        }
+    );
+    assert_eq!(
+        w.overrides_text(),
+        Some(format!("[Context]\nfilesystems={}\n", w.both()))
+    );
     let granted = PathBuf::from(record.entry.strip_suffix(":rw").unwrap());
     assert_eq!(granted, w.granted());
     assert!(granted.is_dir());
+    let read_only = PathBuf::from(link.entry.strip_suffix(":ro").unwrap());
+    assert_eq!(read_only, w.link_folder());
+    assert!(fs::symlink_metadata(&read_only).unwrap().is_dir());
+    assert!(
+        w.plan().link_file().unwrap().starts_with(&read_only),
+        "the link file is inside the folder granted"
+    );
+    assert!(!w.profile().join(LINK_FILE_NAME).starts_with(&read_only));
     for name in [
         LEDGER_FILE_NAME,
         FLATPAK_GRANT_FILE_NAME,
@@ -217,10 +255,12 @@ fn the_grant_is_bepinex_alone_never_the_profiles_root() {
     ] {
         let p = w.profile().join(name);
         assert!(!p.starts_with(&granted), "{name} inside the grant");
+        assert!(!p.starts_with(&read_only), "{name} inside the grant");
     }
     assert!(w.profile().join(LEDGER_FILE_NAME).is_file());
     assert!(w.profile().join(FLATPAK_GRANT_FILE_NAME).is_file());
     assert!(!w.profile().starts_with(&granted));
+    assert!(!w.profile().starts_with(&read_only));
     // Everything the game is handed from the profile is inside it.
     let plan = w.plan();
     let profile = w.profile().display().to_string();
@@ -293,11 +333,7 @@ fn a_users_overrides_survive_play_and_uninstall_byte_for_byte() {
     let spy = Spy::on(&w);
     let plan = w.plan();
     w.launch(&plan, &spy).unwrap();
-    let granted = USERS.replacen(
-        "!/home/u/.ssh;",
-        &format!("!/home/u/.ssh;{};", w.entry()),
-        1,
-    );
+    let granted = USERS.replacen("!/home/u/.ssh;", &format!("!/home/u/.ssh;{}", w.both()), 1);
     assert_eq!(
         spy.seen.borrow().as_slice(),
         [Some(granted.clone())],
@@ -314,10 +350,16 @@ fn a_users_overrides_survive_play_and_uninstall_byte_for_byte() {
         ),
         (STEAM_FLATPAK_APP, w.entry(), w.overrides(), false)
     );
+    assert_eq!(
+        record.link.as_ref().map(|l| l.entry.clone()),
+        Some(w.link_entry())
+    );
+    assert!(!record.link.unwrap().preexisting);
     // Again: nothing added twice, and still ours.
     w.launch(&w.plan(), &spy).unwrap();
     assert_eq!(w.overrides_text().as_deref(), Some(granted.as_str()));
-    assert!(!w.record().unwrap().preexisting);
+    let record = w.record().unwrap();
+    assert!(!record.preexisting && !record.link.unwrap().preexisting);
     let r = w.uninstall();
     assert!(r.warnings.is_empty(), "{:?}", r.warnings);
     assert_eq!(w.overrides_text().as_deref(), Some(USERS));
@@ -335,11 +377,7 @@ fn a_users_overrides_survive_play_and_uninstall_byte_for_byte() {
         let w = World::installed(PERMISSIONS);
         write(&w.overrides(), seed.as_bytes());
         w.launch(&w.plan(), &Spy::on(&w)).unwrap();
-        assert!(
-            w.overrides_text()
-                .unwrap()
-                .contains(&format!("{};", w.entry()))
-        );
+        assert!(w.overrides_text().unwrap().contains(&w.both()), "{seed:?}");
         let r = w.uninstall();
         assert!(r.warnings.is_empty(), "{:?}", r.warnings);
         assert_eq!(w.overrides_text().as_deref(), Some(seed), "{seed:?}");
@@ -355,41 +393,92 @@ fn an_absent_overrides_file_is_created_and_deleted_again() {
     w.launch(&w.plan(), &Spy::on(&w)).unwrap();
     assert_eq!(
         w.overrides_text(),
-        Some(format!("[Context]\nfilesystems={};\n", w.entry()))
+        Some(format!("[Context]\nfilesystems={}\n", w.both()))
     );
     assert!(w.uninstall().warnings.is_empty());
     assert!(!w.overrides().exists());
 }
 
-/// A folder the user listed already, in any mode, is theirs: nothing is written, and uninstall
-/// takes nothing out.
+/// A folder the user listed already, in any mode, is theirs: nothing is written for it, and
+/// uninstall takes nothing of it out; each of the two folders on its own.
+///
+/// Mutation (watched red): `revoke_recorded` taking out a `link` entry recorded `preexisting`.
 #[test]
 fn an_already_listed_folder_is_the_users() {
     let w = World::installed(PERMISSIONS);
     let seed = format!(
-        "[Context]\nfilesystems={}:ro;\nshared=network;\n",
-        w.granted().display()
+        "[Context]\nfilesystems={}:ro;{}:rw;\nshared=network;\n",
+        w.granted().display(),
+        w.link_folder().display()
     );
     write(&w.overrides(), seed.as_bytes());
     w.launch(&w.plan(), &Spy::on(&w)).unwrap();
     assert_eq!(w.overrides_text().as_deref(), Some(seed.as_str()));
-    assert!(w.record().unwrap().preexisting);
+    let record = w.record().unwrap();
+    assert!(record.preexisting && record.link.unwrap().preexisting);
     let r = w.uninstall();
     assert!(r.warnings.is_empty());
     assert_eq!(w.overrides_text().as_deref(), Some(seed.as_str()));
     assert_eq!(w.record(), None);
+
+    // Only `BepInEx` listed: `link` is added, and only it comes out again.
+    let w = World::installed(PERMISSIONS);
+    let seed = format!("[Context]\nfilesystems={};\n", w.granted().display());
+    write(&w.overrides(), seed.as_bytes());
+    w.launch(&w.plan(), &Spy::on(&w)).unwrap();
+    assert_eq!(
+        w.overrides_text(),
+        Some(format!(
+            "[Context]\nfilesystems={};{};\n",
+            w.granted().display(),
+            w.link_entry()
+        ))
+    );
+    let record = w.record().unwrap();
+    assert!(record.preexisting && !record.link.unwrap().preexisting);
+    assert!(w.uninstall().warnings.is_empty());
+    assert_eq!(w.overrides_text().as_deref(), Some(seed.as_str()));
+
+    // Only `link` listed, spelled exactly as a grant would: `BepInEx` is added, and only it
+    // comes out again.
+    let w = World::installed(PERMISSIONS);
+    let seed = format!("[Context]\nfilesystems={};\n", w.link_entry());
+    write(&w.overrides(), seed.as_bytes());
+    w.launch(&w.plan(), &Spy::on(&w)).unwrap();
+    let record = w.record().unwrap();
+    assert!(!record.preexisting && record.link.unwrap().preexisting);
+    assert!(w.uninstall().warnings.is_empty());
+    assert_eq!(w.overrides_text().as_deref(), Some(seed.as_str()));
 }
 
-/// A folder the user denies Steam (`!<folder>`) is refused, never overridden.
+/// A folder the user denies Steam (`!<folder>`), `BepInEx` or `link`, is refused, never
+/// overridden, and nothing is written: not the other folder's entry either.
+///
+/// Mutation (watched red): `place` treating a denied folder as absent.
 #[test]
 fn a_denied_folder_is_refused() {
-    let w = World::installed(PERMISSIONS);
-    let seed = format!("[Context]\nfilesystems=!{};\n", w.granted().display());
-    write(&w.overrides(), seed.as_bytes());
-    let spy = Spy::on(&w);
-    unusable(&w.launch(&w.plan(), &spy).unwrap_err(), "denied");
-    assert!(spy.seen.borrow().is_empty());
-    assert_eq!(w.overrides_text().as_deref(), Some(seed.as_str()));
+    for denied in [SANDBOX_FOLDER, LINK_FOLDER] {
+        let w = World::installed(PERMISSIONS);
+        let seed = format!(
+            "[Context]\nfilesystems=!{};\n",
+            w.profile().join(denied).display()
+        );
+        write(&w.overrides(), seed.as_bytes());
+        let spy = Spy::on(&w);
+        let e = w.launch(&w.plan(), &spy).unwrap_err();
+        unusable(&e, "denied");
+        assert_eq!(
+            e.params["path"],
+            w.profile().join(denied).display().to_string()
+        );
+        assert!(spy.seen.borrow().is_empty());
+        assert_eq!(
+            w.overrides_text().as_deref(),
+            Some(seed.as_str()),
+            "{denied}"
+        );
+        assert_eq!(w.record(), None);
+    }
 }
 
 /// Steam's sandbox without `network` or `ipc` (or a `flatpak` that cannot say) refuses before
@@ -473,6 +562,25 @@ fn a_linked_or_escaping_folder_is_refused() {
     fs::create_dir_all(&linked_folder).unwrap();
     std::os::unix::fs::symlink(&real, linked_folder.join(SANDBOX_FOLDER)).unwrap();
     unusable(&grant(&linked_folder).unwrap_err(), "path");
+    // A `link` that is a link to a folder elsewhere, or a file: refused, left as it was.
+    let linked_link = profile_with("linked-link");
+    std::os::unix::fs::symlink(&real, linked_link.join(LINK_FOLDER)).unwrap();
+    let e = grant(&linked_link).unwrap_err();
+    unusable(&e, "path");
+    assert_eq!(
+        e.params["path"],
+        linked_link.join(LINK_FOLDER).display().to_string()
+    );
+    assert!(
+        fs::symlink_metadata(linked_link.join(LINK_FOLDER))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let file_link = profile_with("file-link");
+    fs::write(file_link.join(LINK_FOLDER), b"x").unwrap();
+    unusable(&grant(&file_link).unwrap_err(), "path");
+    assert_eq!(fs::read(file_link.join(LINK_FOLDER)).unwrap(), b"x");
     for name in ["a;b", "a=b", "a[b]", "a\\b", "a:b", "a\nb"] {
         unusable(&grant(&profile_with(name)).unwrap_err(), "path");
     }
@@ -487,13 +595,14 @@ fn a_linked_or_escaping_folder_is_refused() {
         );
     }
     assert_eq!(w.overrides_text(), None, "nothing written");
-    // The plain profile next to them is granted its `BepInEx`, recorded beside it.
+    // The plain profile next to them is granted its `BepInEx` and its `link` (made), recorded
+    // beside it.
     grant(&real).unwrap();
-    assert!(
-        w.overrides_text()
-            .unwrap()
-            .contains(&format!("{}/{SANDBOX_FOLDER}:rw;", real.display()))
-    );
+    assert!(w.overrides_text().unwrap().contains(&format!(
+        "{0}/{SANDBOX_FOLDER}:rw;{0}/{LINK_FOLDER}:ro;",
+        real.display()
+    )));
+    assert!(real.join(LINK_FOLDER).is_dir());
     assert!(real.join(FLATPAK_GRANT_FILE_NAME).is_file());
 }
 
@@ -553,4 +662,108 @@ fn revoke_edits_only_the_callers_overrides_file() {
     let r = uninstall_with(&w.profile(), &w.target(), Some(&decoy)).unwrap();
     assert_eq!(r.warnings, [FLATPAK_REVOKE_FAILED]);
     assert_eq!(w.overrides_text().unwrap(), granted);
+}
+
+/// What 0.6.0 left: `BepInEx`'s entry alone in the overrides file, and a record without `link`.
+fn as_0_6_0_left_it(w: &World, seed: Option<&str>) {
+    let (text, added) = match seed {
+        None => (format!("[Context]\nfilesystems={};\n", w.entry()), "file"),
+        Some(seed) => (
+            seed.replacen(
+                "!/home/u/.ssh;",
+                &format!("!/home/u/.ssh;{};", w.entry()),
+                1,
+            ),
+            "item",
+        ),
+    };
+    write(&w.overrides(), text.as_bytes());
+    let record = format!(
+        r#"{{"app":"{STEAM_FLATPAK_APP}","entry":"{}","overrides":"{}","preexisting":false,"edit":{{"added":"{added}","separator":false,"newline":false}}}}"#,
+        w.entry(),
+        w.overrides().display()
+    );
+    write(
+        &w.profile().join(FLATPAK_GRANT_FILE_NAME),
+        record.as_bytes(),
+    );
+    assert_eq!(w.record().unwrap().link, None);
+}
+
+/// A record 0.6.0 wrote (`BepInEx` alone) is upgraded by the next Play: `link` is added beside
+/// the entry it kept, and uninstall then takes out both, byte for byte, a file the 0.6.0 grant
+/// created included. Without that Play, it still revokes cleanly.
+///
+/// Mutation (watched red): `grant_sandbox_access` taking a listed `BepInEx` with an old record
+/// for the user's (`place` ignoring `earlier`); `revoke_recorded` ignoring `link`.
+#[test]
+fn a_0_6_0_record_is_upgraded_and_still_revokes() {
+    for seed in [Some(USERS), None] {
+        let w = World::installed(PERMISSIONS);
+        as_0_6_0_left_it(&w, seed);
+        let before = w.record().unwrap();
+        w.launch(&w.plan(), &Spy::on(&w)).unwrap();
+        let after = w.record().unwrap();
+        assert_eq!(
+            (after.entry.clone(), after.preexisting, after.edit),
+            (before.entry, false, before.edit),
+            "the BepInEx entry is still the one 0.6.0 added"
+        );
+        assert_eq!(after.link.as_ref().unwrap().entry, w.link_entry());
+        assert!(!after.link.unwrap().preexisting);
+        assert!(w.overrides_text().unwrap().contains(&w.both()));
+        let r = w.uninstall();
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert_eq!(w.overrides_text().as_deref(), seed, "{seed:?}");
+        assert_eq!(w.record(), None);
+
+        // Not upgraded: 0.6.0's own grant still comes out.
+        let w = World::installed(PERMISSIONS);
+        as_0_6_0_left_it(&w, seed);
+        let r = w.uninstall();
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert_eq!(w.overrides_text().as_deref(), seed, "{seed:?}");
+    }
+}
+
+/// An entry that is not exactly ours stays through grant and revoke: another spelling of the
+/// `link` folder, a folder below it, another profile's `link`. And a record whose `link` names
+/// anything but this profile's `link:ro` edits nothing.
+///
+/// Mutation (watched red): `revoke_recorded` without comparing the record's `link` entry to the
+/// profile's.
+#[test]
+fn a_foreign_entry_is_untouched() {
+    let w = World::installed(PERMISSIONS);
+    let link = w.link_folder().display().to_string();
+    let foreign = format!(
+        "{link}/;{link}/sub:ro;{}:ro;",
+        w.profiles.join("other/link").display()
+    );
+    let seed = format!("[Context]\nfilesystems={foreign}\n");
+    write(&w.overrides(), seed.as_bytes());
+    w.launch(&w.plan(), &Spy::on(&w)).unwrap();
+    assert_eq!(
+        w.overrides_text(),
+        Some(format!("[Context]\nfilesystems={foreign}{}\n", w.both()))
+    );
+    assert!(w.uninstall().warnings.is_empty());
+    assert_eq!(w.overrides_text().as_deref(), Some(seed.as_str()));
+
+    // A record edited to name another folder's entry for `link`.
+    let w = World::installed(PERMISSIONS);
+    let other = format!("{}:ro", w.profiles.join("other/link").display());
+    let seed = format!("[Context]\nfilesystems={other};\n");
+    write(&w.overrides(), seed.as_bytes());
+    w.launch(&w.plan(), &Spy::on(&w)).unwrap();
+    let granted = w.overrides_text().unwrap();
+    let mut record = w.record().unwrap();
+    record.link.as_mut().unwrap().entry = other.clone();
+    write(
+        &w.profile().join(FLATPAK_GRANT_FILE_NAME),
+        &serde_json::to_vec(&record).unwrap(),
+    );
+    let r = w.uninstall();
+    assert_eq!(r.warnings, [FLATPAK_REVOKE_FAILED]);
+    assert_eq!(w.overrides_text().unwrap(), granted, "nothing taken out");
 }

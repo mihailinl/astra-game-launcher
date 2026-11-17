@@ -24,8 +24,15 @@ pub(crate) const PLAY_ARM_FILE: &str = "play-arm.json";
 /// The player's answer to "play with your mods?" for this game ([`crate::set_mods_choice`]).
 /// Never one of the ledger's files.
 pub(crate) const MODS_CHOICE_FILE: &str = "mods-choice.json";
-/// Astra Link's discovery file (`link-v1.md` §2), written by [`crate::launch_with_link`] beside
-/// the play-arm. No integration may place it.
+/// The folder Astra Link's discovery file lives in, `<profile>/link/` (0.6.1): the one profile
+/// folder besides `BepInEx` that Flathub's Steam is granted (read-only, `crate::flatpak`).
+/// Flatpak binds a granted path when Steam's sandbox starts, long before Play, so a grant of the
+/// file itself would pin the inode an earlier Play left; a folder grant sees every rename inside
+/// it. No integration may place it.
+pub(crate) const LINK_DIR: &str = "link";
+/// Astra Link's discovery file (`link-v1.md` §2), written by [`crate::launch_with_link`] into
+/// [`LINK_DIR`]. Also the name 0.6.0 wrote at the profile's top, which every Play removes and
+/// which stays reserved there so that no integration may place it.
 pub(crate) const LINK_FILE: &str = "astra-link.json";
 /// What [`crate::launch()`] granted Flathub's Steam in the user's Flatpak overrides
 /// (`crate::flatpak`), so that [`crate::uninstall`] takes exactly that away again. Never one of
@@ -104,7 +111,8 @@ pub(crate) fn parse_jailed(s: &str) -> Result<JailPath> {
 }
 
 /// The profile's own files ([`crate::reserved::PROFILE_FILE_NAMES`]: the ledger, its lock, the
-/// backups, the play-arm file, the mods choice, `astra-link.json`). Case-insensitive.
+/// backups, the play-arm file, the mods choice, the `link` folder, 0.6.0's `astra-link.json`).
+/// Case-insensitive.
 pub(crate) fn is_reserved(first: &str) -> bool {
     crate::reserved::profile_name_is_reserved(first)
 }

@@ -9,27 +9,43 @@
 //! starts from its sandbox would never see the integration. So [`crate::launch()`], immediately
 //! before it spawns a plan whose Steam is the Flatpak ([`crate::ProcessPlan::sandbox_grant`]),
 //! grants Steam's sandbox read/write access to exactly the profile's `BepInEx` folder (BepInEx
-//! writes its log there) in the user's Flatpak overrides, and [`crate::uninstall`] takes it away again.
+//! writes its log there) and read access to exactly its `link` folder (Astra Link's
+//! `astra-link.json`, [`crate::launch_with_link`]) in the user's Flatpak overrides, and
+//! [`crate::uninstall`] takes both away again.
 //!
-//! - **What is granted** is `<profile>/BepInEx` alone ([`SANDBOX_FOLDER`]), never the profile:
-//!   the profile's root holds the ledger, the backups and `flatpak-grant.json`, which the launcher
-//!   reads and acts on outside the sandbox. A plan that hands the game a profile path outside
-//!   `BepInEx` (an argument, a `[[config_writes]]` file, a mods chain's `chain.ini`) is refused by
+//! - **What is granted** is `<profile>/BepInEx` ([`SANDBOX_FOLDER`], `rw`) and `<profile>/link`
+//!   ([`LINK_FOLDER`], `ro`) and nothing else, never the profile: the profile's root holds the
+//!   ledger, the backups and `flatpak-grant.json`, which the launcher reads and acts on outside
+//!   the sandbox. A plan that hands the game a profile path outside `BepInEx` (an argument, a
+//!   `[[config_writes]]` file, a mods chain's `chain.ini`) is refused by
 //!   [`crate::prepare_launch`] (`reason` = `layout`) rather than granted more.
+//! - **Why a folder for the link file** (0.6.1): Flatpak binds a granted path when Steam's
+//!   sandbox starts, long before Play. A grant of the file itself is skipped while the file is
+//!   missing, and once it exists pins the inode it had then, so every later Play's atomic rename
+//!   would be invisible inside. A folder's grant sees every rename inside it. Like `BepInEx`'s,
+//!   it reaches a sandbox Steam started after the grant: the first grant needs one restart of
+//!   Steam. The folder is the launcher's, created before the grant when missing; a link or a file
+//!   at its name is refused (`path`).
 //! - **The overrides file** is a GKeyFile, `$FLATPAK_USER_DIR/overrides/com.valvesoftware.Steam`,
 //!   else under `$XDG_DATA_HOME/flatpak`, else `~/.local/share/flatpak` ([`user_overrides_file`]).
-//!   The launcher adds one entry, `<canonical profile folder>/BepInEx:rw`, to `[Context] filesystems` and
-//!   leaves every other byte of the file as it was: other entries, keys, groups, comments, order.
-//!   A folder already listed (any mode) is left alone and recorded as the user's
-//!   (`preexisting`); one the user denies (`!<folder>`) is refused, never overridden.
-//! - **What was granted** is recorded in the profile, `flatpak-grant.json` ([`FlatpakGrant`]), a
-//!   profile file no manifest may write ([`crate::reserved::PROFILE_FILE_NAMES`]).
-//! - **Revoke** ([`crate::uninstall`], before the profile's files go): when the record says the
-//!   launcher added the entry, exactly that token is removed, every other entry left as it is
+//!   The launcher adds exactly two entries, `<canonical profile folder>/BepInEx:rw` then
+//!   `<canonical profile folder>/link:ro`, to `[Context] filesystems` and leaves every other byte
+//!   of the file as it was: other entries, keys, groups, comments, order. A folder already listed
+//!   (any mode) is left alone and recorded as the user's (`preexisting`, each folder on its own);
+//!   one the user denies (`!<folder>`) is refused, never overridden, and nothing is written.
+//! - **What was granted** is recorded in the profile, `flatpak-grant.json` ([`FlatpakGrant`]: the
+//!   `BepInEx` entry in its top-level fields, the `link` entry in [`FlatpakGrant::link`]), a
+//!   profile file no manifest may write ([`crate::reserved::PROFILE_FILE_NAMES`]). A record 0.6.0
+//!   wrote holds the `BepInEx` entry alone: the next grant keeps it as it was and adds the `link`
+//!   entry beside it.
+//! - **Revoke** ([`crate::uninstall`], before the profile's files go): for each entry the record
+//!   says the launcher added, the `link` one first and then the `BepInEx` one (the reverse of the
+//!   order they were added in), exactly that token is removed, every other entry left as it is
 //!   (the user's `!/x`, `/y:ro`, another spelling of another folder), and so is whatever else the
 //!   grant added and nothing more ([`GrantEdit`]): the `;` it closed a list with, the
-//!   `filesystems=` line, the `[Context]` group, the file. The file comes back byte for byte. Never a reason for an uninstall to fail: what could
-//!   not be undone is the warning [`FLATPAK_REVOKE_FAILED`].
+//!   `filesystems=` line, the `[Context]` group, the file. The file comes back byte for byte.
+//!   Never a reason for an uninstall to fail: what could not be undone is the warning
+//!   [`FLATPAK_REVOKE_FAILED`].
 //! - **Steam's own permissions** are read before anything is written: the game reaches the
 //!   companion over a localhost WebSocket and a shared-memory ring, so Steam's sandbox must have
 //!   both `network` and `ipc` (`flatpak info --show-permissions`, what Flatpak says now, never a
@@ -63,7 +79,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{LauncherError, Result, codes};
-use crate::paths::{FLATPAK_GRANT_FILE, check_regular_or_absent, plain, write_atomic};
+use crate::paths::{FLATPAK_GRANT_FILE, LINK_DIR, check_regular_or_absent, plain, write_atomic};
+use crate::safe_dir::SafeDir;
 
 /// Flathub's Steam.
 pub const STEAM_FLATPAK_APP: &str = "com.valvesoftware.Steam";
@@ -90,15 +107,32 @@ static OVERRIDES_EDIT: Mutex<()> = Mutex::new(());
 pub struct FlatpakGrant {
     /// Always [`STEAM_FLATPAK_APP`].
     pub app: String,
-    /// The `filesystems` token: `<canonical profile folder>:rw`.
+    /// The `BepInEx` folder's `filesystems` token: `<canonical profile folder>/BepInEx:rw`.
     pub entry: String,
     /// The overrides file it went into.
     pub overrides: PathBuf,
-    /// The folder was listed already (the user's own entry): nothing was written, and revoke
-    /// takes nothing out.
+    /// The folder was listed already (the user's own entry): nothing was written for it, and
+    /// revoke takes nothing of it out.
     pub preexisting: bool,
     /// What the grant added to the overrides file, so that revoke takes out exactly that and the
     /// file comes back byte for byte. `None` when it added nothing (`preexisting`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit: Option<GrantEdit>,
+    /// The `link` folder's entry ([`LINK_FOLDER`], 0.6.1): `<canonical profile folder>/link:ro`.
+    /// `None` in a record 0.6.0 wrote, until the next grant adds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<GrantEntry>,
+}
+
+/// One more folder's entry in a [`FlatpakGrant`] ([`FlatpakGrant::link`]), by the same rules as
+/// the record's top-level `entry`, `preexisting` and `edit`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantEntry {
+    /// The `filesystems` token.
+    pub entry: String,
+    /// The folder was listed already (the user's own entry): nothing was written for it.
+    pub preexisting: bool,
+    /// What the grant added for it; `None` when it added nothing (`preexisting`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edit: Option<GrantEdit>,
 }
@@ -264,16 +298,24 @@ pub fn parse_steam_permissions(text: &str) -> Result<()> {
     }
 }
 
-/// The one folder of a profile Flathub's Steam is granted: what the game reads and writes at
-/// runtime (Doorstop's target `BepInEx/core/…`, the plugins, `BepInEx/config/*.cfg`, the log).
-/// Never the profile itself, whose ledger, backups and records the launcher trusts later.
+/// The folder of a profile Flathub's Steam is granted read/write access to: what the game reads
+/// and writes at runtime (Doorstop's target `BepInEx/core/…`, the plugins, `BepInEx/config/*.cfg`,
+/// the log). Never the profile itself, whose ledger, backups and records the launcher trusts
+/// later. The one other folder granted is [`LINK_FOLDER`], read-only.
 pub const SANDBOX_FOLDER: &str = "BepInEx";
 
-/// Grants Flathub's Steam read/write access to exactly `<profile>/BepInEx` ([`SANDBOX_FOLDER`];
+/// The folder of a profile Flathub's Steam is granted read access to: where
+/// [`crate::launch_with_link`] writes Astra Link's `astra-link.json` (0.6.1). A folder and not the
+/// file, because Flatpak binds a granted path once, when Steam's sandbox starts (the module docs).
+pub const LINK_FOLDER: &str = LINK_DIR;
+
+/// Grants Flathub's Steam read/write access to exactly `<profile>/BepInEx` ([`SANDBOX_FOLDER`])
+/// and read access to exactly `<profile>/link` ([`LINK_FOLDER`], created first when missing;
 /// `profile` is the canonical profile folder) in the overrides file `overrides`, after
 /// `flatpak`'s [`check_steam_permissions`], and records it in `<profile>/flatpak-grant.json`,
 /// outside the grant. The module docs say what is written and what is refused; nothing is
-/// written before every check passed.
+/// written to the overrides file or the record before every check passed, and the overrides
+/// file is written once.
 pub fn grant_sandbox_access(
     profile: &Path,
     overrides: &Path,
@@ -287,55 +329,107 @@ pub fn grant_sandbox_access(
     }
     let entry_path = checked_folder(&profile.join(SANDBOX_FOLDER))?;
     let entry = format!("{entry_path}:rw");
+    // The link folder is the launcher's: made here when missing, a real folder (a link or a file
+    // at its name is refused, never followed).
+    let link_folder = profile.join(LINK_FOLDER);
+    SafeDir::open(profile, &[LINK_FOLDER.to_owned()], true)
+        .map_err(|_| unusable("path").with("path", link_folder.display().to_string()))?;
+    let link_path = checked_folder(&link_folder)?;
+    let link_entry = format!("{link_path}:ro");
     let record_path = profile.join(FLATPAK_GRANT_FILE);
     check_regular_or_absent(&record_path)?;
 
     let _edit = OVERRIDES_EDIT.lock().unwrap_or_else(|p| p.into_inner());
     let target = overrides_target(overrides)?;
     let existing = read_overrides(&target)?;
-    let text = existing.clone().unwrap_or_default();
-    let (preexisting, edit) = match listing(&text, &entry_path) {
-        Listing::Denied => return Err(unusable("denied").with("path", entry_path)),
-        Listing::Absent => {
-            let (new, mut edit) = append_entry(&text, &entry);
-            if existing.is_none() {
-                edit.added = Added::File;
-            }
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent).map_err(|_| overrides_error(&target))?;
-            }
-            write_atomic(&target, new.as_bytes()).map_err(|_| overrides_error(&target))?;
-            (false, Some(edit))
+    let mut text = existing.clone().unwrap_or_default();
+    let earlier = read_record(profile);
+    let mut bepinex = place(
+        &mut text,
+        &entry_path,
+        &entry,
+        earlier.as_ref().map(|r| GrantEntry {
+            entry: r.entry.clone(),
+            preexisting: r.preexisting,
+            edit: r.edit,
+        }),
+    )?;
+    let mut link = place(
+        &mut text,
+        &link_path,
+        &link_entry,
+        earlier.and_then(|r| r.link),
+    )?;
+    if existing.as_deref() != Some(text.as_str()) {
+        // The first entry added to a file that was not there created it.
+        if existing.is_none()
+            && let Some(edit) = [&mut bepinex.edit, &mut link.edit]
+                .into_iter()
+                .flatten()
+                .next()
+        {
+            edit.added = Added::File;
         }
-        // Ours from an earlier Play (our record says so, and our exact token is there): still
-        // ours, with what that Play added, so uninstall still takes exactly that out.
-        Listing::Listed => match read_record(profile) {
-            Some(r) if !r.preexisting && r.entry == entry && has_token(&text, &entry) => {
-                (false, r.edit)
-            }
-            _ => (true, None),
-        },
-    };
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|_| overrides_error(&target))?;
+        }
+        write_atomic(&target, text.as_bytes()).map_err(|_| overrides_error(&target))?;
+    }
     let grant = FlatpakGrant {
         app: STEAM_FLATPAK_APP.to_owned(),
-        entry,
+        entry: bepinex.entry,
         overrides: overrides.to_path_buf(),
-        preexisting,
-        edit,
+        preexisting: bepinex.preexisting,
+        edit: bepinex.edit,
+        link: Some(link),
     };
     let json = serde_json::to_vec(&grant).map_err(LauncherError::io)?;
     write_atomic(&record_path, &json)?;
     Ok(grant)
 }
 
-/// Takes the entry `<profile>/flatpak-grant.json` records out of the user's overrides file
-/// `overrides` ([`user_overrides_file`]), undoing exactly what the grant added
-/// ([`FlatpakGrant::edit`]), when the launcher added it (`preexisting` false), then removes the
-/// record. `profile` is the canonical profile folder. The record must name exactly `overrides`
-/// and exactly this profile's `<profile>/BepInEx:rw`: a record that names anything else edits
-/// nothing. Nothing recorded, an overrides file that is gone, or an entry that is gone already:
-/// nothing to do. [`FLATPAK_REVOKE_FAILED`] when it could not be done (the record is kept then);
-/// never an error.
+/// One folder's entry placed in `text` (`folder` is its path, `entry` its token): appended when
+/// `[Context] filesystems` does not name the folder, refused (`denied`) when the user denies it,
+/// and otherwise the user's (`preexisting`), unless `earlier` (what the profile's record says an
+/// earlier grant did) says the launcher added exactly this token, which is still there: then it
+/// is still ours, with what that grant added, so revoke still takes exactly that out.
+fn place(
+    text: &mut String,
+    folder: &str,
+    entry: &str,
+    earlier: Option<GrantEntry>,
+) -> Result<GrantEntry> {
+    let (preexisting, edit) = match listing(text, folder) {
+        Listing::Denied => return Err(unusable("denied").with("path", folder)),
+        Listing::Absent => {
+            let (new, edit) = append_entry(text, entry);
+            *text = new;
+            (false, Some(edit))
+        }
+        Listing::Listed => match earlier {
+            Some(r) if !r.preexisting && r.entry == entry && has_token(text, entry) => {
+                (false, r.edit)
+            }
+            _ => (true, None),
+        },
+    };
+    Ok(GrantEntry {
+        entry: entry.to_owned(),
+        preexisting,
+        edit,
+    })
+}
+
+/// Takes the entries `<profile>/flatpak-grant.json` records out of the user's overrides file
+/// `overrides` ([`user_overrides_file`]), undoing exactly what the grant added for each
+/// ([`FlatpakGrant::edit`], [`FlatpakGrant::link`]) when the launcher added it (`preexisting`
+/// false), the `link` entry first, then removes the record. `profile` is the canonical profile
+/// folder. The record must name exactly `overrides`, exactly this profile's
+/// `<profile>/BepInEx:rw` and, when it has one, exactly its `<profile>/link:ro`: a record that
+/// names anything else edits nothing. A record 0.6.0 wrote (no `link`) takes out its `BepInEx`
+/// entry alone. Nothing recorded, an overrides file that is gone, or entries that are gone
+/// already: nothing to do. [`FLATPAK_REVOKE_FAILED`] when it could not be done (the record is
+/// kept then); never an error.
 pub(crate) fn revoke_recorded(profile: &Path, overrides: Option<&Path>) -> Option<&'static str> {
     let record_path = profile.join(FLATPAK_GRANT_FILE);
     match fs::symlink_metadata(&record_path) {
@@ -350,12 +444,28 @@ pub(crate) fn revoke_recorded(profile: &Path, overrides: Option<&Path>) -> Optio
         let _ = fs::remove_file(&record_path);
         None
     };
-    if record.preexisting {
+    // What the launcher added, the `link` entry first: the reverse of the order a grant adds
+    // them in, so each edit is undone on the text it was made on.
+    let ours: Vec<(&str, Option<&GrantEdit>)> = record
+        .link
+        .iter()
+        .filter(|l| !l.preexisting)
+        .map(|l| (l.entry.as_str(), l.edit.as_ref()))
+        .chain((!record.preexisting).then_some((record.entry.as_str(), record.edit.as_ref())))
+        .collect();
+    if ours.is_empty() {
         return done();
     }
-    let mine = plain(&profile.join(SANDBOX_FOLDER))
-        .to_str()
-        .is_some_and(|p| record.entry == format!("{p}:rw"));
+    let token = |folder: &str, mode: &str| {
+        plain(&profile.join(folder))
+            .to_str()
+            .map(|p| format!("{p}:{mode}"))
+    };
+    let mine = token(SANDBOX_FOLDER, "rw").is_some_and(|t| record.entry == t)
+        && record
+            .link
+            .as_ref()
+            .is_none_or(|l| token(LINK_FOLDER, "ro").is_some_and(|t| l.entry == t));
     // The file edited is the caller's, never one the record chose: the record must name it
     // exactly.
     let Some(overrides) =
@@ -375,10 +485,19 @@ pub(crate) fn revoke_recorded(profile: &Path, overrides: Option<&Path>) -> Optio
         Ok(None) => return done(),
         Err(_) => return Some(FLATPAK_REVOKE_FAILED),
     };
-    let Some(new) = remove_entry(&text, &record.entry, record.edit.as_ref()) else {
+    let mut new = text.clone();
+    for (entry, edit) in &ours {
+        if let Some(t) = remove_entry(&new, entry, *edit) {
+            new = t;
+        }
+    }
+    if new == text {
         return done();
-    };
-    let written = if new.is_empty() && record.edit.is_some_and(|e| e.added == Added::File) {
+    }
+    let created = ours
+        .iter()
+        .any(|(_, e)| e.is_some_and(|e| e.added == Added::File));
+    let written = if new.is_empty() && created {
         fs::remove_file(&target).map_err(|e| LauncherError::io_at(&e, &target))
     } else {
         write_atomic(&target, new.as_bytes())
@@ -754,6 +873,38 @@ mod tests {
         let (granted, edit) = append_entry(seed, ENTRY);
         let back = remove_entry(&granted, ENTRY, Some(&edit)).unwrap();
         (granted, back)
+    }
+
+    const LINK: &str = "/data/astra/profiles/game/link:ro";
+
+    /// Both entries, as a grant adds them (`BepInEx` then `link`) and as revoke takes them out
+    /// (`link` then `BepInEx`): every seed comes back byte for byte, a file the first created
+    /// included.
+    ///
+    /// The order matters: undone `BepInEx` first, the line its grant added would be kept, empty.
+    #[test]
+    fn two_entries_come_out_in_the_reverse_order_they_went_in() {
+        for seed in [
+            "",
+            "[Context]\nfilesystems=/a;/b:ro",
+            "[Context]\nshared=network;\n",
+            "[Session Bus Policy]\nx=talk",
+            "[Context]\r\nfilesystems=/a\r\n",
+        ] {
+            let (one, first) = append_entry(seed, ENTRY);
+            let (two, second) = append_entry(&one, LINK);
+            assert_eq!(second.added, Added::Item, "{seed:?}");
+            let mut back = two.clone();
+            for (entry, edit) in [(LINK, &second), (ENTRY, &first)] {
+                back = remove_entry(&back, entry, Some(edit)).unwrap();
+            }
+            assert_eq!(back, seed, "{seed:?} -> {two:?}");
+        }
+        let (one, first) = append_entry("", ENTRY);
+        let (two, second) = append_entry(&one, LINK);
+        let wrong = remove_entry(&two, ENTRY, Some(&first)).unwrap();
+        let wrong = remove_entry(&wrong, LINK, Some(&second)).unwrap();
+        assert_eq!(wrong, "[Context]\nfilesystems=\n");
     }
 
     #[test]

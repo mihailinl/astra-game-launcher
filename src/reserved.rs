@@ -33,15 +33,17 @@ use crate::manifest::IntegrationInfo;
 use crate::paths;
 
 /// The names no manifest may place at the top of a profile, matched ignoring ASCII case: the
-/// ledger, its lock, the backups folder, the play-arm file, the mods choice, `astra-link.json`
-/// (Astra Link's discovery file, `link-v1.md` §2, which [`crate::launch_with_link`] writes) and
-/// what Play granted Flathub's Steam.
+/// ledger, its lock, the backups folder, the play-arm file, the mods choice, the `link` folder
+/// (where [`crate::launch_with_link`] writes Astra Link's discovery file, `link-v1.md` §2, since
+/// 0.6.1), `astra-link.json` (where 0.6.0 wrote it, removed by every Play; reserved for one more
+/// release) and what Play granted Flathub's Steam.
 pub const PROFILE_FILE_NAMES: &[&str] = &[
     paths::LEDGER_FILE,
     paths::LOCK_FILE,
     paths::BACKUP_DIR,
     paths::PLAY_ARM_FILE,
     paths::MODS_CHOICE_FILE,
+    paths::LINK_DIR,
     paths::LINK_FILE,
     paths::FLATPAK_GRANT_FILE,
 ];
@@ -239,6 +241,8 @@ mod tests {
     fn profile_names_ignore_ascii_case() {
         assert!(profile_name_is_reserved("Astra-Link.JSON"));
         assert!(profile_name_is_reserved("MODS-CHOICE.json"));
+        assert!(profile_name_is_reserved("Link"));
+        assert!(!profile_name_is_reserved("links"));
         assert!(!profile_name_is_reserved("astra-link.json.bak"));
         assert!(!profile_name_is_reserved("BepInEx"));
     }

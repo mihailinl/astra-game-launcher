@@ -190,6 +190,42 @@ entry added for Flathub's Steam could not be taken out of the overrides file aga
 named another prefix than the game's own, or carried a line break or a quote that would have put a
 line of its own into `user.reg`; it was not written, and that override is left as it is.
 
+## Astra Link's file in its own folder, granted to Flathub's Steam (0.6.1)
+
+**The link file moved: `<profile>/link/astra-link.json`**, on every platform (0.6.0 wrote
+`<profile>/astra-link.json`). Flathub's Steam binds the folders it is granted when its sandbox
+starts, long before Play. A grant of the file itself would be skipped while the file is missing
+and, once it exists, would pin the file an earlier Play left, so every later Play's new token
+(written to a temporary file and renamed over the old one) would be invisible to the game. A
+folder's grant sees every rename inside it.
+
+- **For a game integration's author:** look for `<profile>/link/astra-link.json`, or for the path
+  in `ASTRA_LINK_FILE` when the launcher starts the game itself (`Z:\…` under Wine or Proton).
+  Everything else in the section below holds as it was.
+- **For Astra (the library):** `ProcessPlan::link_file()` is the new path, and `launch_with_link`
+  writes it there by the same rules (under the profile lock, after every check, atomically
+  through a temporary file in `link/`, `0600`; a refused or failed Play leaves no fresh file).
+  The folder `link` is the launcher's: every Play makes it under the lock when it is missing, a
+  real folder, and leaves it in place. A link or a file named `link` refuses the Play
+  (`path-escapes`) before anything is written. Every Play removes a `<profile>/astra-link.json`
+  0.6.0 left (a link there is removed as a link; a folder there is left alone). `link` is a
+  reserved profile name now (no `[[files]]` or `[[config_writes]]` may place it or anything in
+  it); `astra-link.json` stays reserved for one more release. `LINK_FILE_NAME` is still
+  `astra-link.json`, the file's name inside `LINK_FOLDER` (`"link"`).
+- **Flathub's Steam:** `launch` grants `<profile>/link:ro` beside `<profile>/BepInEx:rw`, in the
+  same `[Context] filesystems` of the user's overrides, in one write, and `uninstall` takes both
+  out again (`link` first), so the file still comes back byte for byte. Each folder is judged on
+  its own: one the user listed already is theirs, one they deny refuses the Play (`denied`) and
+  nothing is written. `flatpak-grant.json` records the second entry as
+  `FlatpakGrant::link: Option<GrantEntry { entry, preexisting, edit }>`; a record 0.6.0 wrote
+  (`BepInEx` alone) is upgraded by the next Play and still revokes cleanly without one.
+  `grant_sandbox_access` makes `link` when it is missing, and refuses (`path`) a link or a file
+  of that name.
+- **One Steam restart, as with `BepInEx`:** Flatpak applies a new grant only to a sandbox started
+  after it. The first Play after updating to 0.6.1 adds the `link` grant to a Steam that is
+  already running, so the game cannot see `link/` until Steam is restarted once; from then on
+  every Play's file is seen.
+
 ## Astra Link v1 (0.6.0)
 
 [Astra Link](https://github.com/mihailinl/AstraPlugins/blob/master/spec/games/link-v1.md) is the
@@ -199,7 +235,8 @@ where it is, and holds `[integration.link]` to the spec.
 
 **For a game integration's author: finding the link.** On every Play through Astra of an
 integration Astra grants a Link (only one installed from the signed games catalogue), the launcher
-writes `<profile>/astra-link.json`, the same folder your `${profile}` paths point at:
+writes `<profile>/link/astra-link.json` (0.6.0 wrote `<profile>/astra-link.json`; see 0.6.1 above),
+in the `link` folder of the same profile your `${profile}` paths point at:
 
 ```json
 {"schema":1,"url":"ws://127.0.0.1:<port>/link","token":"…","integration":"<your id>",
@@ -211,7 +248,7 @@ writes `<profile>/astra-link.json`, the same folder your `${profile}` paths poin
 - When the launcher starts the game itself (not through Steam: a native game, or a Windows game
   under the player's own Wine or Proton), the file's path is also in the environment variable
   **`ASTRA_LINK_FILE`**, in its `Z:\…` form under Wine or Proton. A Steam start passes Steam no
-  environment, so look in your profile folder then. An integration's `[launch] env` cannot set
+  environment, so look in your profile's `link` folder then. An integration's `[launch] env` cannot set
   `ASTRA_LINK_FILE`: the launcher replaces it, or removes it on a Play without a link.
 - **The file may be absent**: an older Astra or launcher writes none, a Play without a Link removes
   the one an earlier Play left, and a Play that was refused or failed leaves none. Run
@@ -744,7 +781,7 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
 
 ```json
 {"schema": "astra.gi-probe/1",
- "tool": {"version": "0.6.0", "source_tree_sha256": "<hex>"},
+ "tool": {"version": "0.6.1", "source_tree_sha256": "<hex>"},
  "subcommand": "compat", "verdict": "pass",
  "input": {}, "source": {}, "against": {"astra": {}, "launcher": {}},
  "steps": [{"step": 1, "check": "…", "status": "pass"}],
@@ -1035,7 +1072,7 @@ algorithm) and bakes it in:
 
 ```
 astra-game-launcher --version
-# astra-game-launcher 0.6.0 (source tree sha256 <hex>)
+# astra-game-launcher 0.6.1 (source tree sha256 <hex>)
 ```
 
 Astra's own release notes / About screen show the same hash for the commit it pinned. A GitHub
@@ -1045,7 +1082,7 @@ a hash you compute yourself. Recompute it from a clone of a tag with one line (r
 and `sha256sum`; `scripts/tree-hash.sh` is this same command, runnable against any directory):
 
 ```bash
-V=0.6.0 REPO=https://github.com/mihailinl/astra-game-launcher
+V=0.6.1 REPO=https://github.com/mihailinl/astra-game-launcher
 rm -rf /tmp/astra-gl-verify && mkdir -p /tmp/astra-gl-verify && \
 git clone --quiet --depth 1 --branch "v$V" "$REPO" /tmp/astra-gl-verify/src && \
 cd /tmp/astra-gl-verify/src && git archive "v$V" | tar -x -C /tmp/astra-gl-verify && \
