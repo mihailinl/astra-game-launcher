@@ -190,6 +190,76 @@ entry added for Flathub's Steam could not be taken out of the overrides file aga
 named another prefix than the game's own, or carried a line break or a quote that would have put a
 line of its own into `user.reg`; it was not written, and that override is left as it is.
 
+## Astra Link v1 (0.6.0)
+
+[Astra Link](https://github.com/mihailinl/AstraPlugins/blob/master/spec/games/link-v1.md) is the
+socket a game integration's own code speaks to Astra over: tools the AI may call, facts about the
+game, triggers. Astra's daemon runs the socket; this launcher writes the file that tells the game
+where it is, and holds `[integration.link]` to the spec.
+
+**For a game integration's author: finding the link.** On every Play through Astra of an
+integration Astra grants a Link (only one installed from the signed games catalogue), the launcher
+writes `<profile>/astra-link.json`, the same folder your `${profile}` paths point at:
+
+```json
+{"schema":1,"url":"ws://127.0.0.1:<port>/link","token":"…","integration":"<your id>",
+ "game":"<key>","issued_unix_ms":…,"expires_unix_ms":…}
+```
+
+- `game` is Astra's key for the game, always a string: a Steam appid in digits (`"892970"`),
+  `local-<16 hex>` for a game the user added by hand, `epic-<AppName>` for an Epic game.
+- When the launcher starts the game itself (not through Steam: a native game, or a Windows game
+  under the player's own Wine or Proton), the file's path is also in the environment variable
+  **`ASTRA_LINK_FILE`**, in its `Z:\…` form under Wine or Proton. A Steam start passes Steam no
+  environment, so look in your profile folder then. An integration's `[launch] env` cannot set
+  `ASTRA_LINK_FILE`: the launcher replaces it, or removes it on a Play without a link.
+- **The file may be absent**: an older Astra or launcher writes none, a Play without a Link removes
+  the one an earlier Play left, and a Play that was refused or failed leaves none. Run
+  presentation-only then; never fail for it.
+- The token is good for one `hello`, and unused it expires at `expires_unix_ms` (`link-v1.md`
+  §3). Read the file once at start, and again only after `error{not_granted}`.
+- It is mode `0600` on Linux; any process of the same user can read it, as on Windows.
+
+**For Astra (the library).** `launch_with_link(&plan, &spawner, &engines, overrides, Some(&link))`
+(or `launch_linked(&plan, &spawner, &engines, Some(&link))`, with the user's Flatpak overrides)
+writes it from a `LinkFile { url, token, integration, game, issued_unix_ms, expires_unix_ms }`
+(`LinkFile::to_json` is its exact bytes, `LINK_FILE_SCHEMA` = 1): under the profile lock, beside
+`play-arm.json` and by its rule — after every check `launch` makes again, right before the spawn,
+atomically (a temporary file beside it, renamed over it), `0600` on Unix (on Windows the profile
+folder's ACL). A link or a folder at the name refuses the Play (`path-escapes`) before anything is
+written; a failed play-arm write or spawn removes the file just written. `launch` and
+`launch_with` are `launch_with_link(…, None)`: they remove a stale `astra-link.json` (a link in its
+place is removed as a link, never followed). `ProcessPlan::link_file()` says where it goes;
+`LINK_FILE_NAME` and `LINK_FILE_ENV` (`ASTRA_LINK_FILE`) name it. A plan not made by
+`prepare_launch` (read back from JSON) has no profile to write into: with a link it is refused,
+`plan-stale` with `detail` = `link-unprepared`. `astra-link.json` is a reserved profile name: no
+`[[files]]` or `[[config_writes]]` may place it (`path-escapes`, `reason` = `reserved`).
+
+`running_pids(exe_file) -> Vec<u32>`: the processes `is_running` counts for a program's file name
+(the same matcher: on Linux each process's first argument, which under Wine or Proton is the
+game's Windows path, so the Wine process running the game is found; on Windows the image name;
+this process never), which the daemon holds a Link peer's pid against (`link-v1.md` §3).
+
+**`[integration.link]`** (`Manifest::lint`, so `gi-probe check`; spec `manifest.md` §2.6, at
+AstraPlugins `fe665e4`): besides its counts (16 tools, 16 triggers, 32 events), names
+(`^[a-z][a-z0-9_]{0,31}$`, once each per list) and lengths, `context` is the path of the context
+schema (no longer a boolean), `talk` a boolean; a tool's `result` schema path is required, and its
+`danger` is `"low"` or `"high"` and `companion` a boolean; an event's `speaks` is a boolean and its
+`name` one of the seven v1 words (`session_started`, `session_ended`, `player_hurt`,
+`player_fell`, `player_died`, `player_revived`, `goal_reached`; `link_limits::EVENT_WORDS`). Every
+path is relative and inside the package. Nothing is read in as a default: an absent key stays
+absent, and `link_digest` is of the table as written. `Manifest::link_files` names `context` and
+each `result` too, so `gi-probe check` holds them to the zip.
+
+| `link-invalid` `reason` | `field` | what the author can do |
+|---|---|---|
+| `shape` | `integration.link.context`, `.talk`, `….tools[i].companion`, `….events[i].speaks` | `context` is a path; the others are `true` or `false` |
+| `danger` | `….tools[i].danger` | write `"low"` or `"high"` (absent means `"high"`) |
+| `missing` | `….tools[i].result` | name the schema of the tool's result |
+| `unknown-event` | `….events[i].name` | use one of the seven v1 words |
+
+`speaks` on a trigger, or `danger`/`companion` on an event, is `unknown-key`.
+
 ## Playing together with the player's own mods (0.4.0)
 
 An integration that declares `[integration.mods]` (astra-bepinex's manifest doc, §7) can run
@@ -600,7 +670,8 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
      `reserved-name`) and what it may place and launch (`loader-undeclared`, K18;
      `community-limit`) — `--provenance first-party` skips these —, `${bridge_token}` only with
      `[integration.capabilities] companion = ["presentation"]` (`capability-undeclared`), Astra
-     Link v1's counts, names and lengths (`link-invalid`), and `[integration.engine]` a
+     Link v1's counts, names, lengths and keys (`link-invalid`, `unknown-key`; the section
+     "Astra Link v1" above), and `[integration.engine]` a
      descriptor Pass B admits. The report's `link.digest` is the link's consent digest
      (`link_digest`: SHA-256 of the RFC 8785 JCS of `[integration.link]` exactly as written, no
      default added; AstraPlugins `manifest.md` §2.6.1), `link` itself `null` with no
@@ -609,7 +680,8 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
      as §2.6.1 says (and its reference, `tomllib`, reads it): a release checked out with CRLF
      has the LF file's digest (`toml_newlines`, which `Manifest::parse` and
      `Descriptor::from_toml` read through);
-  3. every file `[integration.link]` names is in the zip (schemas ≤4 KiB, the skill ≤16 KiB);
+  3. every file `[integration.link]` names is in the zip (the `context`, `params`, `result` and
+     `data` schemas ≤4 KiB, the skill ≤16 KiB);
      holding the schemas to `link-v1.md` §6's restricted profile waits for `link-v1` to freeze;
   4. the descriptor claims none of the spec's negative folders (as `validate-descriptor`);
   5. with `--foundation`: `built_on{id, version, verified}`, verified only when every file the
@@ -672,7 +744,7 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
 
 ```json
 {"schema": "astra.gi-probe/1",
- "tool": {"version": "0.5.4", "source_tree_sha256": "<hex>"},
+ "tool": {"version": "0.6.0", "source_tree_sha256": "<hex>"},
  "subcommand": "compat", "verdict": "pass",
  "input": {}, "source": {}, "against": {"astra": {}, "launcher": {}},
  "steps": [{"step": 1, "check": "…", "status": "pass"}],
@@ -963,7 +1035,7 @@ algorithm) and bakes it in:
 
 ```
 astra-game-launcher --version
-# astra-game-launcher 0.5.4 (source tree sha256 <hex>)
+# astra-game-launcher 0.6.0 (source tree sha256 <hex>)
 ```
 
 Astra's own release notes / About screen show the same hash for the commit it pinned. A GitHub
@@ -973,7 +1045,7 @@ a hash you compute yourself. Recompute it from a clone of a tag with one line (r
 and `sha256sum`; `scripts/tree-hash.sh` is this same command, runnable against any directory):
 
 ```bash
-V=0.5.4 REPO=https://github.com/mihailinl/astra-game-launcher
+V=0.6.0 REPO=https://github.com/mihailinl/astra-game-launcher
 rm -rf /tmp/astra-gl-verify && mkdir -p /tmp/astra-gl-verify && \
 git clone --quiet --depth 1 --branch "v$V" "$REPO" /tmp/astra-gl-verify/src && \
 cd /tmp/astra-gl-verify/src && git archive "v$V" | tar -x -C /tmp/astra-gl-verify && \
