@@ -346,9 +346,33 @@ pub const SCHEMA_REFUSALS: &[(&str, &[(&str, &str)])] = &[
         "manifests/invalid/target-anti-cheat-missing.toml",
         &[("manifest-invalid", "")],
     ),
+    // At this pin the golden predates AstraPlugins b16f410 (Link v1 after the daemon's recheck):
+    // its `context = false` is the draft's switch, which is a path now, and its tools carry no
+    // `result`, which is required now. At fe665e4 it is fixed, and refused for its count alone
+    // (`tests/link_v1.rs`, from `tests/fixtures/link-v1/`).
     (
         "manifests/invalid/link-too-many-tools.toml",
-        &[("link-invalid", "integration.link.tools")],
+        &[
+            ("link-invalid", "integration.link.context"),
+            ("link-invalid", "integration.link.tools"),
+            ("link-invalid", "integration.link.tools[0].result"),
+            ("link-invalid", "integration.link.tools[1].result"),
+            ("link-invalid", "integration.link.tools[2].result"),
+            ("link-invalid", "integration.link.tools[3].result"),
+            ("link-invalid", "integration.link.tools[4].result"),
+            ("link-invalid", "integration.link.tools[5].result"),
+            ("link-invalid", "integration.link.tools[6].result"),
+            ("link-invalid", "integration.link.tools[7].result"),
+            ("link-invalid", "integration.link.tools[8].result"),
+            ("link-invalid", "integration.link.tools[9].result"),
+            ("link-invalid", "integration.link.tools[10].result"),
+            ("link-invalid", "integration.link.tools[11].result"),
+            ("link-invalid", "integration.link.tools[12].result"),
+            ("link-invalid", "integration.link.tools[13].result"),
+            ("link-invalid", "integration.link.tools[14].result"),
+            ("link-invalid", "integration.link.tools[15].result"),
+            ("link-invalid", "integration.link.tools[16].result"),
+        ],
     ),
     (
         "manifests/invalid/unknown-top-level-key.toml",
@@ -499,8 +523,12 @@ pub const SPEC_DEFECTS_AT_PIN: &[SpecDefect] = &[
     },
     SpecDefect {
         golden: "testdata/games/manifests/valid/game-specific-link.toml",
-        seen: Seen::Answered(&[("loader-undeclared", "")]),
-        why: "places winhttp.dll, a name mod loaders hijack-load by, with no [integration.loader] proxies naming it: as a community release that is loader-undeclared (merged plan §2.5, K18). Add `[integration.loader] proxies = [\"winhttp.dll\"]`",
+        seen: Seen::Answered(&[
+            ("loader-undeclared", ""),
+            ("link-invalid", "integration.link.context"),
+            ("link-invalid", "integration.link.tools[0].result"),
+        ]),
+        why: "places winhttp.dll, a name mod loaders hijack-load by, with no [integration.loader] proxies naming it: as a community release that is loader-undeclared (merged plan §2.5, K18). Add `[integration.loader] proxies = [\"winhttp.dll\"]`. And at this pin it predates AstraPlugins b16f410: `context = true` (a path now) and a tool with no `result` (required now); fixed at fe665e4 (`tests/link_v1.rs`)",
     },
     SpecDefect {
         golden: "testdata/games/manifests/valid/runner-builtin.toml",

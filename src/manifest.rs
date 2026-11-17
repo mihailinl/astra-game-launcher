@@ -167,7 +167,8 @@ pub const BRIDGE_TOKEN_VARIABLE: &str = "bridge_token";
 const CAPABILITIES: &[(&str, &[&str])] = &[("companion", &[COMPANION_PRESENTATION])];
 
 /// Astra Link v1's limits on `[integration.link]` (A§2, `link-v1.md` §5): tools, triggers and
-/// events at most; a name's longest; a description's or label's longest, in characters.
+/// events at most; a name's longest; a description's or label's longest, in characters; the
+/// closed event words; a tool's dangers.
 pub mod link_limits {
     pub const TOOLS: usize = 16;
     pub const TRIGGERS: usize = 16;
@@ -178,6 +179,19 @@ pub mod link_limits {
     pub const SCHEMA_BYTES: u64 = 4 * 1024;
     /// The `skill` file's size, in bytes.
     pub const SKILL_BYTES: u64 = 16 * 1024;
+    /// The names an event may have: `link-v1.md` §5's closed v1 list ("Event words").
+    pub const EVENT_WORDS: &[&str] = &[
+        "session_started",
+        "session_ended",
+        "player_hurt",
+        "player_fell",
+        "player_died",
+        "player_revived",
+        "goal_reached",
+    ];
+    /// A tool's `danger` (`link-v1.md` §5, "Tool danger"); absent means `"high"`, which the
+    /// daemon reads, never this crate.
+    pub const DANGERS: &[&str] = &["low", "high"];
 }
 
 /// The `[integration.*]` tables and `[integration] sdk`, read once by [`Manifest::parse`].
@@ -1036,22 +1050,27 @@ impl Manifest {
         Ok(())
     }
 
-    /// The files `[integration.link]` names, `(field, path)` in the manifest's order: each
-    /// tool's `params`, each trigger's and event's `data`, then `skill`. Only the string ones.
+    /// The files `[integration.link]` names, `(field, path)` in the manifest's order: the
+    /// `context` schema, each tool's `params` and `result`, each trigger's and event's `data`,
+    /// then `skill`. Only the string ones.
     pub fn link_files(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();
         let Some(link) = self.link() else {
             return out;
         };
-        for (list, file) in [
-            ("tools", "params"),
-            ("triggers", "data"),
-            ("events", "data"),
-        ] {
-            if let Some(toml::Value::Array(items)) = link.get(list) {
+        if let Some(p) = link.get("context").and_then(toml::Value::as_str) {
+            out.push(("integration.link.context".to_owned(), p.to_owned()));
+        }
+        for rule in &LINK_LISTS {
+            if let Some(toml::Value::Array(items)) = link.get(rule.list) {
                 for (i, item) in items.iter().enumerate() {
-                    if let Some(p) = item.get(file).and_then(toml::Value::as_str) {
-                        out.push((format!("integration.link.{list}[{i}].{file}"), p.to_owned()));
+                    for file in rule.files {
+                        if let Some(p) = item.get(*file).and_then(toml::Value::as_str) {
+                            out.push((
+                                format!("integration.link.{}[{i}].{file}", rule.list),
+                                p.to_owned(),
+                            ));
+                        }
                     }
                 }
             }
@@ -1072,8 +1091,12 @@ impl Manifest {
     ///    `community_limits`) — Astra's own (`first_party`) are not asked;
     /// 2. `capability-undeclared` ([`Manifest::check_capabilities_used`]);
     /// 3. `[integration.link]`: its shape, Astra Link v1's counts, names (`^[a-z][a-z0-9_]{0,31}$`,
-    ///    once each per list), description and label lengths, and relative file paths
-    ///    (`link-invalid{field, reason}`, or `unknown-key` for a key it does not have);
+    ///    once each per list; an event's one of [`link_limits::EVENT_WORDS`], `unknown-event`),
+    ///    description and label lengths, relative file paths (`context`, `skill`, a tool's
+    ///    `params` and its required `result`, a trigger's and an event's `data`), the booleans
+    ///    `talk`, a tool's `companion` and an event's `speaks` (`shape`), and a tool's `danger`
+    ///    (`"low"` or `"high"`, `danger`) (`link-invalid{field, reason}`, or `unknown-key` for a
+    ///    key it does not have, `speaks` on a trigger among them);
     /// 4. `[integration.foundation]`'s unknown keys (`unknown-key`);
     /// 5. an `[integration] sdk` that is no usable URL (`manifest-invalid{key=integration.sdk}`:
     ///    metadata, which parse drops);
@@ -1140,8 +1163,57 @@ fn is_link_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
 }
 
-/// `[integration.link]` against Astra Link v1 (spec `manifest.md` §2.6, `link-v1.md`): every
-/// finding, in the table's order.
+/// One `[integration.link]` list's rules (spec `manifest.md` §2.6 and its schema).
+struct LinkList {
+    list: &'static str,
+    /// At most this many entries.
+    most: usize,
+    /// The text an entry must carry (a tool's `description`, a trigger's `label`), at most
+    /// [`link_limits::DESCRIPTION_CHARS`] characters.
+    text: Option<&'static str>,
+    /// The paths an entry must carry, each relative and inside the package.
+    files: &'static [&'static str],
+    /// The booleans an entry may carry (absent stays absent: no default is read in).
+    flags: &'static [&'static str],
+    /// Whether an entry may carry `danger`, one of [`link_limits::DANGERS`].
+    danger: bool,
+    /// The names an entry may have, when the list is closed (events: [`link_limits::EVENT_WORDS`]).
+    words: Option<&'static [&'static str]>,
+}
+
+const LINK_LISTS: [LinkList; 3] = [
+    LinkList {
+        list: "tools",
+        most: link_limits::TOOLS,
+        text: Some("description"),
+        files: &["params", "result"],
+        flags: &["companion"],
+        danger: true,
+        words: None,
+    },
+    LinkList {
+        list: "triggers",
+        most: link_limits::TRIGGERS,
+        text: Some("label"),
+        files: &["data"],
+        flags: &[],
+        danger: false,
+        words: None,
+    },
+    LinkList {
+        list: "events",
+        most: link_limits::EVENTS,
+        text: None,
+        files: &["data"],
+        flags: &["speaks"],
+        danger: false,
+        words: Some(link_limits::EVENT_WORDS),
+    },
+];
+
+/// `[integration.link]` against Astra Link v1 (spec `manifest.md` §2.6, `link-v1.md` §5): every
+/// finding, in the table's order. The table is read as it is: nothing here adds a default, since
+/// its digest is of the table as parsed (§2.6.1).
 fn lint_link(link: &toml::Value, out: &mut Vec<LauncherError>) {
     let toml::Value::Table(t) = link else {
         out.push(link_invalid("integration.link", "shape"));
@@ -1151,6 +1223,7 @@ fn lint_link(link: &toml::Value, out: &mut Vec<LauncherError>) {
         "context",
         "shares_other_players",
         "skill",
+        "talk",
         "tools",
         "triggers",
         "events",
@@ -1158,28 +1231,26 @@ fn lint_link(link: &toml::Value, out: &mut Vec<LauncherError>) {
     for k in t.keys().filter(|k| !KEYS.contains(&k.as_str())) {
         out.push(unknown_key(format!("integration.link.{k}")));
     }
-    for k in ["context", "shares_other_players"] {
+    for k in ["shares_other_players", "talk"] {
         if t.get(k).is_some_and(|v| !v.is_bool()) {
             out.push(link_invalid(&format!("integration.link.{k}"), "shape"));
         }
     }
     let is_path = |p: &str| !p.contains('\\') && relative_components(p).is_some();
-    match t.get("skill") {
-        Some(toml::Value::String(p)) if !is_path(p) => {
-            out.push(link_invalid("integration.link.skill", "not-a-path"));
+    // `context` names the context schema, `skill` the skill file: paths, both optional.
+    for k in ["context", "skill"] {
+        let field = format!("integration.link.{k}");
+        match t.get(k) {
+            Some(toml::Value::String(p)) if !is_path(p) => {
+                out.push(link_invalid(&field, "not-a-path"));
+            }
+            Some(toml::Value::String(_)) | None => {}
+            Some(_) => out.push(link_invalid(&field, "shape")),
         }
-        Some(toml::Value::String(_)) | None => {}
-        Some(_) => out.push(link_invalid("integration.link.skill", "shape")),
     }
-    // (list, at most, the file key, the text key and whether it is required).
-    let lists: [(&str, usize, &str, Option<&str>); 3] = [
-        ("tools", link_limits::TOOLS, "params", Some("description")),
-        ("triggers", link_limits::TRIGGERS, "data", Some("label")),
-        ("events", link_limits::EVENTS, "data", None),
-    ];
-    for (list, most, file, text) in lists {
-        let field = format!("integration.link.{list}");
-        let items = match t.get(list) {
+    for rule in &LINK_LISTS {
+        let field = format!("integration.link.{}", rule.list);
+        let items = match t.get(rule.list) {
             None => continue,
             Some(toml::Value::Array(items)) => items,
             Some(_) => {
@@ -1187,10 +1258,10 @@ fn lint_link(link: &toml::Value, out: &mut Vec<LauncherError>) {
                 continue;
             }
         };
-        if items.len() > most {
+        if items.len() > rule.most {
             out.push(
                 link_invalid(&field, "too-many")
-                    .with("limit", most.to_string())
+                    .with("limit", rule.most.to_string())
                     .with("count", items.len().to_string()),
             );
         }
@@ -1201,8 +1272,13 @@ fn lint_link(link: &toml::Value, out: &mut Vec<LauncherError>) {
                 out.push(link_invalid(&at, "shape"));
                 continue;
             };
-            for k in e.keys() {
-                if !["name", file].contains(&k.as_str()) && text != Some(k.as_str()) {
+            for k in e.keys().map(String::as_str) {
+                let known = k == "name"
+                    || rule.text == Some(k)
+                    || rule.files.contains(&k)
+                    || rule.flags.contains(&k)
+                    || (rule.danger && k == "danger");
+                if !known {
                     out.push(unknown_key(format!("{at}.{k}")));
                 }
             }
@@ -1210,13 +1286,17 @@ fn lint_link(link: &toml::Value, out: &mut Vec<LauncherError>) {
                 Some(n) if !is_link_name(n) => {
                     out.push(link_invalid(&format!("{at}.name"), "name"))
                 }
+                // An event's name is a word of the closed v1 list (`link-v1.md` §5).
+                Some(n) if rule.words.is_some_and(|w| !w.contains(&n)) => {
+                    out.push(link_invalid(&format!("{at}.name"), "unknown-event"));
+                }
                 Some(n) if !names.insert(n.to_owned()) => {
                     out.push(link_invalid(&format!("{at}.name"), "duplicate"));
                 }
                 Some(_) => {}
                 None => out.push(link_invalid(&format!("{at}.name"), "missing")),
             }
-            if let Some(text) = text {
+            if let Some(text) = rule.text {
                 match e.get(text).and_then(toml::Value::as_str) {
                     Some(d) if d.chars().count() > link_limits::DESCRIPTION_CHARS => out.push(
                         link_invalid(&format!("{at}.{text}"), "too-long")
@@ -1229,12 +1309,27 @@ fn lint_link(link: &toml::Value, out: &mut Vec<LauncherError>) {
                     None => out.push(link_invalid(&format!("{at}.{text}"), "missing")),
                 }
             }
-            match e.get(file).and_then(toml::Value::as_str) {
-                Some(p) if !is_path(p) => {
-                    out.push(link_invalid(&format!("{at}.{file}"), "not-a-path"));
+            for file in rule.files {
+                match e.get(*file).and_then(toml::Value::as_str) {
+                    Some(p) if !is_path(p) => {
+                        out.push(link_invalid(&format!("{at}.{file}"), "not-a-path"));
+                    }
+                    Some(_) => {}
+                    None => out.push(link_invalid(&format!("{at}.{file}"), "missing")),
                 }
-                Some(_) => {}
-                None => out.push(link_invalid(&format!("{at}.{file}"), "missing")),
+            }
+            for flag in rule.flags {
+                if e.get(*flag).is_some_and(|v| !v.is_bool()) {
+                    out.push(link_invalid(&format!("{at}.{flag}"), "shape"));
+                }
+            }
+            if rule.danger
+                && let Some(d) = e.get("danger")
+                && !d
+                    .as_str()
+                    .is_some_and(|d| link_limits::DANGERS.contains(&d))
+            {
+                out.push(link_invalid(&format!("{at}.danger"), "danger"));
             }
         }
     }
@@ -1597,12 +1692,12 @@ evidence = "{core}"
         };
         let tool = |name: &str, d: &str| {
             format!(
-                "[[integration.link.tools]]\nname = \"{name}\"\ndescription = \"{d}\"\nparams = \"astra/t.json\"\n"
+                "[[integration.link.tools]]\nname = \"{name}\"\ndescription = \"{d}\"\nparams = \"astra/t.json\"\nresult = \"astra/t.result.json\"\n"
             )
         };
         assert!(
             lint(&format!(
-                "context = true\nskill = \"astra/SKILL.md\"\n{}",
+                "context = \"astra/context.json\"\ntalk = true\nskill = \"astra/SKILL.md\"\n{}",
                 tool("drop_item", "Drop it")
             ))
             .is_empty()
@@ -1622,9 +1717,6 @@ evidence = "{core}"
                 "[[integration.link.triggers]]\nname = \"g{i}\"\nlabel = \"G\"\ndata = \"astra/g.json\"\n"
             )
         };
-        let event = |i: usize| {
-            format!("[[integration.link.events]]\nname = \"e{i}\"\ndata = \"astra/e.json\"\n")
-        };
         for (list, item, most) in [
             (
                 "tools",
@@ -1632,7 +1724,6 @@ evidence = "{core}"
                 16,
             ),
             ("triggers", &trigger, 16),
-            ("events", &event, 32),
         ] {
             let at: String = (0..most).map(item).collect();
             assert!(lint(&at).is_empty(), "{list} at {most}: {:?}", lint(&at));
@@ -1691,15 +1782,23 @@ evidence = "{core}"
             )]
         );
         assert_eq!(
-            lint("context = \"yes\"\n"),
+            lint("context = true\n"),
             [(
                 codes::LINK_INVALID,
                 "integration.link.context".into(),
                 "shape".into()
             )]
         );
+        assert_eq!(
+            lint("context = \"../context.json\"\n"),
+            [(
+                codes::LINK_INVALID,
+                "integration.link.context".into(),
+                "not-a-path".into()
+            )]
+        );
         let m = Manifest::parse(&link(&format!(
-            "skill = \"astra/SKILL.md\"\n{}[[integration.link.events]]\nname = \"died\"\ndata = \"astra/e.json\"\n",
+            "skill = \"astra/SKILL.md\"\ncontext = \"astra/c.json\"\n{}[[integration.link.events]]\nname = \"player_died\"\ndata = \"astra/e.json\"\n",
             tool("t", "x")
         )))
         .unwrap();
@@ -1707,8 +1806,16 @@ evidence = "{core}"
             m.link_files(),
             [
                 (
+                    "integration.link.context".to_owned(),
+                    "astra/c.json".to_owned()
+                ),
+                (
                     "integration.link.tools[0].params".to_owned(),
                     "astra/t.json".to_owned()
+                ),
+                (
+                    "integration.link.tools[0].result".to_owned(),
+                    "astra/t.result.json".to_owned()
                 ),
                 (
                     "integration.link.events[0].data".to_owned(),
@@ -1719,6 +1826,167 @@ evidence = "{core}"
                     "astra/SKILL.md".to_owned()
                 ),
             ]
+        );
+    }
+
+    /// The keys `link-v1.md` §5 added (`talk`, a tool's `danger`, `companion` and required
+    /// `result`, an event's `speaks` and closed name), each held to its shape, and none read in
+    /// as a default.
+    #[test]
+    fn link_v1_keys() {
+        let link = |body: &str| manifest(&format!("[integration.link]\n{body}"), "", "");
+        let lint = |body: &str| -> Vec<(&'static str, String, String)> {
+            Manifest::parse(&link(body))
+                .unwrap()
+                .lint(false)
+                .iter()
+                .map(|e| {
+                    (
+                        e.code,
+                        e.param("field").or(e.param("key")).unwrap_or("").to_owned(),
+                        e.param("reason").unwrap_or("").to_owned(),
+                    )
+                })
+                .collect()
+        };
+        let bad = |field: &str, reason: &str| {
+            vec![(codes::LINK_INVALID, field.to_owned(), reason.to_owned())]
+        };
+        let tool = |extra: &str| {
+            format!(
+                "[[integration.link.tools]]\nname = \"come_here\"\ndescription = \"Walk to the player\"\nparams = \"astra/p.json\"\n{extra}"
+            )
+        };
+        let result = "result = \"astra/r.json\"\n";
+        let event = |name: &str, extra: &str| {
+            format!(
+                "[[integration.link.events]]\nname = \"{name}\"\ndata = \"astra/e.json\"\n{extra}"
+            )
+        };
+
+        // Every key at its spec's value.
+        assert!(
+            lint(&format!(
+                "talk = false\n{}{}",
+                tool(&format!("{result}danger = \"low\"\ncompanion = true\n")),
+                event("goal_reached", "speaks = true\n")
+            ))
+            .is_empty()
+        );
+        assert!(
+            lint(&tool(&format!(
+                "{result}danger = \"high\"\ncompanion = false\n"
+            )))
+            .is_empty()
+        );
+
+        // `talk`, `companion`, `speaks`: booleans.
+        assert_eq!(
+            lint("talk = \"yes\"\n"),
+            bad("integration.link.talk", "shape")
+        );
+        assert_eq!(
+            lint(&tool(&format!("{result}companion = 1\n"))),
+            bad("integration.link.tools[0].companion", "shape")
+        );
+        assert_eq!(
+            lint(&event("player_died", "speaks = \"true\"\n")),
+            bad("integration.link.events[0].speaks", "shape")
+        );
+
+        // `danger`: "low" or "high", nothing else, not even another type.
+        for d in ["\"medium\"", "\"Low\"", "\"\"", "true", "[\"low\"]"] {
+            assert_eq!(
+                lint(&tool(&format!("{result}danger = {d}\n"))),
+                bad("integration.link.tools[0].danger", "danger"),
+                "{d}"
+            );
+        }
+
+        // A tool's `result` is required and a path inside the package, like `params`.
+        assert_eq!(
+            lint(&tool("")),
+            bad("integration.link.tools[0].result", "missing")
+        );
+        for p in [
+            "../r.json",
+            "/r.json",
+            "astra\\\\r.json",
+            "astra/../../r.json",
+        ] {
+            assert_eq!(
+                lint(&tool(&format!("result = '{p}'\n"))),
+                bad("integration.link.tools[0].result", "not-a-path"),
+                "{p}"
+            );
+        }
+
+        // Only an event speaks; `danger` and `companion` are a tool's.
+        assert_eq!(
+            lint(
+                "[[integration.link.triggers]]\nname = \"boss_spawned\"\nlabel = \"A boss\"\ndata = \"astra/g.json\"\nspeaks = true\n"
+            ),
+            vec![(
+                codes::UNKNOWN_KEY,
+                "integration.link.triggers[0].speaks".to_owned(),
+                String::new()
+            )]
+        );
+        assert_eq!(
+            lint(&event(
+                "player_died",
+                "danger = \"low\"\ncompanion = true\n"
+            )),
+            vec![
+                (
+                    codes::UNKNOWN_KEY,
+                    "integration.link.events[0].companion".to_owned(),
+                    String::new()
+                ),
+                (
+                    codes::UNKNOWN_KEY,
+                    "integration.link.events[0].danger".to_owned(),
+                    String::new()
+                ),
+            ]
+        );
+
+        // An event's name is one of the closed v1 words, each at most once.
+        let all: String = link_limits::EVENT_WORDS
+            .iter()
+            .map(|w| event(w, ""))
+            .collect();
+        assert!(lint(&all).is_empty(), "{:?}", lint(&all));
+        assert_eq!(link_limits::EVENT_WORDS.len(), 7);
+        assert_eq!(
+            lint(&event("boss_defeated", "")),
+            bad("integration.link.events[0].name", "unknown-event")
+        );
+        let past: String = (0..=link_limits::EVENTS)
+            .map(|i| event(link_limits::EVENT_WORDS[i % 7], ""))
+            .collect();
+        assert_eq!(
+            lint(&past).first(),
+            Some(&(
+                codes::LINK_INVALID,
+                "integration.link.events".to_owned(),
+                "too-many".to_owned()
+            ))
+        );
+
+        // Read as written: lint adds nothing to the table, so an absent key stays absent and the
+        // digest tells the two apart.
+        let absent = Manifest::parse(&link(&tool(result))).unwrap();
+        let before = absent.link().cloned();
+        assert!(absent.lint(false).is_empty());
+        assert_eq!(absent.link().cloned(), before);
+        let tools = before.as_ref().unwrap()["tools"].as_array().unwrap();
+        assert!(tools[0].get("danger").is_none() && tools[0].get("companion").is_none());
+        let explicit =
+            Manifest::parse(&link(&tool(&format!("{result}danger = \"high\"\n")))).unwrap();
+        assert_ne!(
+            link_digest(absent.link()).unwrap(),
+            link_digest(explicit.link()).unwrap()
         );
     }
 

@@ -2668,6 +2668,10 @@ fn check_answers_every_manifest_golden_as_labelled() {
 const LINK_SCHEMA: &[u8] =
     br#"{"type":"object","properties":{"item":{"type":"string","maxLength":32}}}"#;
 
+/// A schema whose data reaches the AI (`link-v1.md` §6, the AI profile): a tool's result, the
+/// context.
+const LINK_AI_SCHEMA: &[u8] = br#"{"type":"object","properties":{"dropped":{"type":"boolean"}}}"#;
+
 /// A community release with a Link, its schema files and skill in the zip.
 fn community_release(id: &str, extra_files: &[(&str, &[u8])]) -> Vec<u8> {
     let manifest = format!(
@@ -2683,12 +2687,13 @@ license = "MIT"
 companion = ["presentation"]
 
 [integration.link]
-context = true
+context = "astra/context.json"
 skill = "astra/SKILL.md"
 [[integration.link.tools]]
 name = "drop_item"
 description = "Drop the item the player holds"
 params = "astra/tools/drop_item.json"
+result = "astra/tools/drop_item.result.json"
 
 [target]
 steam_appid = 4000
@@ -2716,7 +2721,9 @@ set = {{ Token = "${{bridge_token}}" }}
         E::File("plugins/Astra.Example.dll", b"MZ plugin"),
         E::File("plugins/readme.txt", b"hello"),
         E::File("astra/SKILL.md", b"# Example"),
+        E::File("astra/context.json", LINK_AI_SCHEMA),
         E::File("astra/tools/drop_item.json", LINK_SCHEMA),
+        E::File("astra/tools/drop_item.result.json", LINK_AI_SCHEMA),
     ];
     entries.retain(|e| {
         !extra_files
@@ -2811,6 +2818,8 @@ fn check_holds_the_links_files_to_the_zip() {
         E::File("astra-probe.dll", DLL),
         E::File("plugins/Astra.Example.dll", b"MZ plugin"),
         E::File("astra/SKILL.md", b"# Example"),
+        E::File("astra/context.json", LINK_AI_SCHEMA),
+        E::File("astra/tools/drop_item.result.json", LINK_AI_SCHEMA),
     ]);
     let (exit, r) = check(&put(&tmp, "gone", "astra-gi.zip", &z), &[]);
     assert_eq!(exit, 1, "{r:#}");
@@ -3012,7 +3021,9 @@ fn check_refuses_a_reserved_profile_name_inside_a_sweep() {
         E::File("astra-probe.dll", DLL),
         E::File("plugins/astra-link.json", b"{}"),
         E::File("astra/SKILL.md", b"# Example"),
+        E::File("astra/context.json", LINK_AI_SCHEMA),
         E::File("astra/tools/drop_item.json", LINK_SCHEMA),
+        E::File("astra/tools/drop_item.result.json", LINK_AI_SCHEMA),
     ]);
     let (exit, r) = check(&put(&tmp, "r", "astra-gi.zip", &z), &[]);
     assert_eq!(exit, 1, "{r:#}");
