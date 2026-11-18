@@ -184,7 +184,11 @@ pub mod codes {
     pub const RESERVED_NAME: &str = "reserved-name";
     /// `[integration.link]` past a rule or limit of Astra Link v1 (`field`; `reason` = `shape`,
     /// `too-many`, `name`, `duplicate`, `too-long`, `missing`, `not-a-path`, `not-in-zip`,
-    /// `too-large`; `limit` where there is one), or a value its consent digest cannot hold
+    /// `too-large`, `danger`, `unknown-event`; the spec's semantic rules by their names,
+    /// `tools-over-16-without-game`, `game-without-stop`, `stops-not-low`,
+    /// `work-ended-misdeclared`, `knowledge-without-licence`; the knowledge folder's
+    /// `not-a-folder`, `not-markdown`, `too-deep`, `not-utf8`, `link`; `limit` where there is one, `path` for an
+    /// entry of the zip), or a value its consent digest cannot hold
     /// (`reason` = `not-digestable`, `type` = the TOML type: `crate::link_digest`).
     pub const LINK_INVALID: &str = "link-invalid";
     /// A community integration places `file`, a name mod loaders hijack-load by, that its

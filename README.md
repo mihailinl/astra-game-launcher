@@ -190,6 +190,40 @@ entry added for Flathub's Steam could not be taken out of the overrides file aga
 named another prefix than the game's own, or carried a line break or a quote that would have put a
 line of its own into `user.reg`; it was not written, and that override is left as it is.
 
+## Astra Link v1: actions in the game, the knowledge base, `work_ended` (0.7.0)
+
+`Manifest::lint` (so `gi-probe check`) answers AstraPlugins #192, #193 and #194 (`manifest.md`
+§2.6, `link-v1.md` §5, at AstraPlugins `1ba3fcbc`). A release this adds to was `link-invalid` or
+`unknown-key` under 0.6.x:
+
+- **A tool's `danger` may be `"game"`**: an action in the player's own game, when they ask, in a
+  world where they are alone (`link_limits::DANGERS`, `DANGER_GAME`). A GI with one declares a tool
+  with **`stops = true`**, a boolean, which ends all of her game work and is `danger = "low"`
+  (`game-without-stop`, `stops-not-low`).
+- **24 tools beside a `game` tool**, 16 otherwise: `link_limits::tools_most(has_game_tool)` is the
+  one place the number is chosen, for this lint and, once it reads it, the daemon. 17 to 24 tools
+  with no `game` tool is `tools-over-16-without-game`; past 24 is `too-many`, as before (with no
+  `game` tool, both).
+- **`work_ended`** is the eighth event word (`link_limits::EVENT_WORDS`), declared only beside a
+  `game` tool and never with `speaks = true` (`work-ended-misdeclared`).
+- **The knowledge base**: `knowledge`, the path of a folder of Markdown files, held to the schema's
+  pattern too (at most 4 segments of ASCII letters, digits, `_`, `.` and `-`, none starting with `.`
+  or `-`; `not-a-path`, `shape`), and `knowledge_licence`, an SPDX id or text of 1 to 128
+  characters, required with it and not empty there (`knowledge-without-licence`, `too-long`,
+  `shape`). `Manifest::link_knowledge` returns the folder;
+  it is not one of `Manifest::link_files`, which are each one file. `gi-probe check`'s step 3 holds
+  the folder in the zip to `link-v1.md` §5 "Knowledge": at most 256 `.md` files of UTF-8 text, each
+  at most 256 KiB, together at most 4 MiB, at most 4 folders deep, no link
+  (`link-invalid{field=integration.link.knowledge}`, `reason` = `not-in-zip`, `not-a-folder`,
+  `not-markdown`, `too-large`, `too-many`, `too-deep`, `not-utf8`, `link`; `path` the entry). An empty
+  base is a folder when the zip holds its folder entry. "4 folders deep" is read as 4 folders below
+  the base (`<base>/a/b/c/d/x.md` passes); the spec has no vector for it yet.
+
+Each of the spec's semantic rules is a `link-invalid` whose `reason` is the rule's own name. Two
+things this release does not do: hold a `work_ended` `data` schema to the work-ended profile (the
+same wait as every schema's restricted profile, `link-schemas-unvalidated`), and compute the
+knowledge folder's part digest, `link.knowledge_digest`, which the catalogue's ingest computes.
+
 ## Astra Link's file in its own folder, granted to Flathub's Steam (0.6.1)
 
 **The link file moved: `<profile>/link/astra-link.json`**, on every platform (0.6.0 wrote
@@ -278,22 +312,29 @@ game's Windows path, so the Wine process running the game is found; on Windows t
 this process never), which the daemon holds a Link peer's pid against (`link-v1.md` §3).
 
 **`[integration.link]`** (`Manifest::lint`, so `gi-probe check`; spec `manifest.md` §2.6, at
-AstraPlugins `fe665e4`): besides its counts (16 tools, 16 triggers, 32 events), names
-(`^[a-z][a-z0-9_]{0,31}$`, once each per list) and lengths, `context` is the path of the context
-schema (no longer a boolean), `talk` a boolean; a tool's `result` schema path is required, and its
-`danger` is `"low"` or `"high"` and `companion` a boolean; an event's `speaks` is a boolean and its
-`name` one of the seven v1 words (`session_started`, `session_ended`, `player_hurt`,
-`player_fell`, `player_died`, `player_revived`, `goal_reached`; `link_limits::EVENT_WORDS`). Every
-path is relative and inside the package. Nothing is read in as a default: an absent key stays
+AstraPlugins `1ba3fcbc`): besides its counts (16 tools, or 24 beside a `danger = "game"` tool; 16
+triggers, 32 events), names (`^[a-z][a-z0-9_]{0,31}$`, once each per list) and lengths, `context`
+is the path of the context schema (no longer a boolean), `talk` a boolean, `knowledge` the path of
+the knowledge base's folder with its `knowledge_licence`; a tool's `result` schema path is
+required, its `danger` is `"low"`, `"game"` or `"high"`, and `companion` and `stops` booleans; an
+event's `speaks` is a boolean and its `name` one of the eight v1 words (`session_started`,
+`session_ended`, `player_hurt`, `player_fell`, `player_died`, `player_revived`, `goal_reached`,
+`work_ended`; `link_limits::EVENT_WORDS`). Every path is relative and inside the package. The
+rules of 0.7.0 are in its section above. Nothing is read in as a default: an absent key stays
 absent, and `link_digest` is of the table as written. `Manifest::link_files` names `context` and
 each `result` too, so `gi-probe check` holds them to the zip.
 
 | `link-invalid` `reason` | `field` | what the author can do |
 |---|---|---|
 | `shape` | `integration.link.context`, `.talk`, `….tools[i].companion`, `….events[i].speaks` | `context` is a path; the others are `true` or `false` |
-| `danger` | `….tools[i].danger` | write `"low"` or `"high"` (absent means `"high"`) |
+| `danger` | `….tools[i].danger` | write `"low"`, `"game"` or `"high"` (absent means `"high"`) |
 | `missing` | `….tools[i].result` | name the schema of the tool's result |
-| `unknown-event` | `….events[i].name` | use one of the seven v1 words |
+| `unknown-event` | `….events[i].name` | use one of the eight v1 words |
+| `tools-over-16-without-game` | `integration.link.tools` | at most 16 tools, unless one is `danger = "game"` (then 24) |
+| `game-without-stop` | `integration.link.tools` | add the tool that ends her game work: `stops = true`, `danger = "low"` |
+| `stops-not-low` | `….tools[i].stops` | a `stops` tool is `danger = "low"` |
+| `work-ended-misdeclared` | `….events[i]` | declare `work_ended` only beside a `game` tool, and without `speaks` |
+| `knowledge-without-licence` | `integration.link.knowledge_licence` | say the knowledge base's licence |
 
 `speaks` on a trigger, or `danger`/`companion` on an event, is `unknown-key`.
 
@@ -718,7 +759,8 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
      has the LF file's digest (`toml_newlines`, which `Manifest::parse` and
      `Descriptor::from_toml` read through);
   3. every file `[integration.link]` names is in the zip (the `context`, `params`, `result` and
-     `data` schemas ≤4 KiB, the skill ≤16 KiB);
+     `data` schemas ≤4 KiB, the skill ≤16 KiB), and the knowledge base's folder within its limits
+     (0.7.0 above);
      holding the schemas to `link-v1.md` §6's restricted profile waits for `link-v1` to freeze;
   4. the descriptor claims none of the spec's negative folders (as `validate-descriptor`);
   5. with `--foundation`: `built_on{id, version, verified}`, verified only when every file the
@@ -781,7 +823,7 @@ gi-probe pick --source astra.unreal --listing releases.json [--prerelease]
 
 ```json
 {"schema": "astra.gi-probe/1",
- "tool": {"version": "0.6.1", "source_tree_sha256": "<hex>"},
+ "tool": {"version": "0.7.0", "source_tree_sha256": "<hex>"},
  "subcommand": "compat", "verdict": "pass",
  "input": {}, "source": {}, "against": {"astra": {}, "launcher": {}},
  "steps": [{"step": 1, "check": "…", "status": "pass"}],
@@ -1072,7 +1114,7 @@ algorithm) and bakes it in:
 
 ```
 astra-game-launcher --version
-# astra-game-launcher 0.6.1 (source tree sha256 <hex>)
+# astra-game-launcher 0.7.0 (source tree sha256 <hex>)
 ```
 
 Astra's own release notes / About screen show the same hash for the commit it pinned. A GitHub
@@ -1082,7 +1124,7 @@ a hash you compute yourself. Recompute it from a clone of a tag with one line (r
 and `sha256sum`; `scripts/tree-hash.sh` is this same command, runnable against any directory):
 
 ```bash
-V=0.6.1 REPO=https://github.com/mihailinl/astra-game-launcher
+V=0.7.0 REPO=https://github.com/mihailinl/astra-game-launcher
 rm -rf /tmp/astra-gl-verify && mkdir -p /tmp/astra-gl-verify && \
 git clone --quiet --depth 1 --branch "v$V" "$REPO" /tmp/astra-gl-verify/src && \
 cd /tmp/astra-gl-verify/src && git archive "v$V" | tar -x -C /tmp/astra-gl-verify && \

@@ -168,9 +168,14 @@ const CAPABILITIES: &[(&str, &[&str])] = &[("companion", &[COMPANION_PRESENTATIO
 
 /// Astra Link v1's limits on `[integration.link]` (A§2, `link-v1.md` §5): tools, triggers and
 /// events at most; a name's longest; a description's or label's longest, in characters; the
-/// closed event words; a tool's dangers.
+/// closed event words; a tool's dangers; the knowledge base's.
 pub mod link_limits {
+    /// Tools at most, for a GI with no `danger = "game"` tool ([`tools_most`]).
     pub const TOOLS: usize = 16;
+    /// Tools at most for a GI with a `danger = "game"` tool (`manifest.md` §2.6, semantic rule
+    /// `tools-over-16-without-game`): the game agent's turns put only that GI's tools on the
+    /// wire, so there is room for the actions a game needs.
+    pub const TOOLS_WITH_GAME: usize = 24;
     pub const TRIGGERS: usize = 16;
     pub const EVENTS: usize = 32;
     pub const NAME_CHARS: usize = 32;
@@ -188,10 +193,34 @@ pub mod link_limits {
         "player_died",
         "player_revived",
         "goal_reached",
+        "work_ended",
     ];
-    /// A tool's `danger` (`link-v1.md` §5, "Tool danger"); absent means `"high"`, which the
-    /// daemon reads, never this crate.
-    pub const DANGERS: &[&str] = &["low", "high"];
+    /// A tool's `danger` (`link-v1.md` §5, "Tool danger"; `"game"`, §5 "Actions in the game");
+    /// absent means `"high"`, which the daemon reads, never this crate.
+    pub const DANGERS: &[&str] = &["low", "game", "high"];
+    /// The `danger` of an action in the player's own game (`link-v1.md` §5 "Actions in the
+    /// game"): a GI with one declares a `stops` tool, may have [`TOOLS_WITH_GAME`] tools and may
+    /// declare `work_ended`.
+    pub const DANGER_GAME: &str = "game";
+    /// The knowledge base (`link-v1.md` §5 "Knowledge", `manifest.md` §2.6): at most this many
+    /// files, each at most [`KNOWLEDGE_FILE_BYTES`], together at most [`KNOWLEDGE_BYTES`], at
+    /// most [`KNOWLEDGE_DEPTH`] folders deep (`gi-probe check` reads the zip).
+    pub const KNOWLEDGE_FILES: usize = 256;
+    pub const KNOWLEDGE_FILE_BYTES: u64 = 256 * 1024;
+    pub const KNOWLEDGE_BYTES: u64 = 4 * 1024 * 1024;
+    pub const KNOWLEDGE_DEPTH: usize = 4;
+    /// `knowledge_licence`'s longest, in characters.
+    pub const KNOWLEDGE_LICENCE_CHARS: usize = 128;
+
+    /// Tools at most for a GI that has (`true`) or has not a `danger = "game"` tool: the one
+    /// place the 16 and the 24 are chosen, read by this crate's lint and by the daemon.
+    pub const fn tools_most(has_game_tool: bool) -> usize {
+        if has_game_tool {
+            TOOLS_WITH_GAME
+        } else {
+            TOOLS
+        }
+    }
 }
 
 /// The `[integration.*]` tables and `[integration] sdk`, read once by [`Manifest::parse`].
@@ -1081,6 +1110,14 @@ impl Manifest {
         out
     }
 
+    /// The knowledge base's folder, `[integration.link] knowledge` (`link-v1.md` §5
+    /// "Knowledge"), when it is a string: a FOLDER of Markdown files, so never one of
+    /// [`Manifest::link_files`], which are each one file. `gi-probe check` holds the folder in the
+    /// zip to its limits ([`link_limits::KNOWLEDGE_FILES`] and the rest).
+    pub fn link_knowledge(&self) -> Option<&str> {
+        self.link()?.get("knowledge").and_then(toml::Value::as_str)
+    }
+
     /// What a release must pass beyond [`Manifest::parse`] before it is published, with no zip
     /// and no game: what `gi-probe check` (a catalogue's ingest) refuses, and a local import can.
     /// In this order, every one found:
@@ -1092,11 +1129,14 @@ impl Manifest {
     /// 2. `capability-undeclared` ([`Manifest::check_capabilities_used`]);
     /// 3. `[integration.link]`: its shape, Astra Link v1's counts, names (`^[a-z][a-z0-9_]{0,31}$`,
     ///    once each per list; an event's one of [`link_limits::EVENT_WORDS`], `unknown-event`),
-    ///    description and label lengths, relative file paths (`context`, `skill`, a tool's
-    ///    `params` and its required `result`, a trigger's and an event's `data`), the booleans
-    ///    `talk`, a tool's `companion` and an event's `speaks` (`shape`), and a tool's `danger`
-    ///    (`"low"` or `"high"`, `danger`) (`link-invalid{field, reason}`, or `unknown-key` for a
-    ///    key it does not have, `speaks` on a trigger among them);
+    ///    description and label lengths, relative file paths (`context`, `skill`, `knowledge`, a
+    ///    tool's `params` and its required `result`, a trigger's and an event's `data`), the
+    ///    booleans `talk`, a tool's `companion` and `stops` and an event's `speaks` (`shape`), a
+    ///    tool's `danger` (`"low"`, `"game"` or `"high"`, `danger`), `knowledge_licence`'s length,
+    ///    and the spec's semantic rules, each its own `reason`: `tools-over-16-without-game`,
+    ///    `game-without-stop`, `stops-not-low`, `work-ended-misdeclared`,
+    ///    `knowledge-without-licence` (`link-invalid{field, reason}`, or `unknown-key` for a key it
+    ///    does not have, `speaks` on a trigger among them);
     /// 4. `[integration.foundation]`'s unknown keys (`unknown-key`);
     /// 5. an `[integration] sdk` that is no usable URL (`manifest-invalid{key=integration.sdk}`:
     ///    metadata, which parse drops);
@@ -1154,6 +1194,23 @@ fn link_invalid(field: &str, reason: &str) -> LauncherError {
         .with("reason", reason)
 }
 
+/// The knowledge folder's path as the schema has it (`manifest.schema.json`, `knowledge`):
+/// `^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*){0,3}$` — at most 4 segments of
+/// ASCII letters, digits, `_`, `.` and `-`, none starting with `.` or `-` (so no `..`). A path
+/// must also pass the launcher's own path rule (no Windows device name, no trailing dot), which
+/// every file it places passes too.
+fn is_knowledge_path(p: &str) -> bool {
+    let segments: Vec<&str> = p.split('/').collect();
+    segments.len() <= 4
+        && segments.iter().all(|s| {
+            let b = s.as_bytes();
+            !b.is_empty()
+                && (b[0].is_ascii_alphanumeric() || b[0] == b'_')
+                && b.iter()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'-'))
+        })
+}
+
 /// A Link name: `^[a-z][a-z0-9_]{0,31}$`.
 fn is_link_name(name: &str) -> bool {
     let b = name.as_bytes();
@@ -1184,10 +1241,11 @@ struct LinkList {
 const LINK_LISTS: [LinkList; 3] = [
     LinkList {
         list: "tools",
-        most: link_limits::TOOLS,
+        // The schema's ceiling; past 16 only beside a `game` tool ([`link_limits::tools_most`]).
+        most: link_limits::TOOLS_WITH_GAME,
         text: Some("description"),
         files: &["params", "result"],
-        flags: &["companion"],
+        flags: &["companion", "stops"],
         danger: true,
         words: None,
     },
@@ -1224,6 +1282,8 @@ fn lint_link(link: &toml::Value, out: &mut Vec<LauncherError>) {
         "shares_other_players",
         "skill",
         "talk",
+        "knowledge",
+        "knowledge_licence",
         "tools",
         "triggers",
         "events",
@@ -1231,22 +1291,61 @@ fn lint_link(link: &toml::Value, out: &mut Vec<LauncherError>) {
     for k in t.keys().filter(|k| !KEYS.contains(&k.as_str())) {
         out.push(unknown_key(format!("integration.link.{k}")));
     }
+    // A `danger = "game"` tool (`link-v1.md` §5 "Actions in the game") decides the tools' limit,
+    // whether a `stops` tool is required and whether `work_ended` may be declared.
+    let tool_entries = || {
+        t.get("tools")
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+    };
+    let has_game = tool_entries()
+        .any(|e| e.get("danger").and_then(toml::Value::as_str) == Some(link_limits::DANGER_GAME));
     for k in ["shares_other_players", "talk"] {
         if t.get(k).is_some_and(|v| !v.is_bool()) {
             out.push(link_invalid(&format!("integration.link.{k}"), "shape"));
         }
     }
     let is_path = |p: &str| !p.contains('\\') && relative_components(p).is_some();
-    // `context` names the context schema, `skill` the skill file: paths, both optional.
-    for k in ["context", "skill"] {
+    // `context` names the context schema, `skill` the skill file, `knowledge` the knowledge
+    // base's folder: paths, all optional. The knowledge folder's path is also held to the
+    // schema's own pattern (`is_knowledge_path`).
+    for k in ["context", "skill", "knowledge"] {
         let field = format!("integration.link.{k}");
         match t.get(k) {
-            Some(toml::Value::String(p)) if !is_path(p) => {
+            Some(toml::Value::String(p))
+                if !is_path(p) || (k == "knowledge" && !is_knowledge_path(p)) =>
+            {
                 out.push(link_invalid(&field, "not-a-path"));
             }
             Some(toml::Value::String(_)) | None => {}
             Some(_) => out.push(link_invalid(&field, "shape")),
         }
+    }
+    // The knowledge base's licence: an SPDX id or text of 1 to 128 characters, shown on the
+    // consent sheet (the schema's minLength and maxLength, nothing more: a licence may span
+    // lines); required, and not empty, with `knowledge` (semantic rule
+    // `knowledge-without-licence`, which reads an empty licence as none).
+    let licence_field = "integration.link.knowledge_licence";
+    let knowledge = t.contains_key("knowledge");
+    match t.get("knowledge_licence") {
+        Some(toml::Value::String(l))
+            if l.chars().count() > link_limits::KNOWLEDGE_LICENCE_CHARS =>
+        {
+            out.push(
+                link_invalid(licence_field, "too-long")
+                    .with("limit", link_limits::KNOWLEDGE_LICENCE_CHARS.to_string()),
+            );
+        }
+        Some(toml::Value::String(l)) if l.is_empty() && !knowledge => {
+            out.push(link_invalid(licence_field, "shape"));
+        }
+        Some(toml::Value::String(l)) if !l.is_empty() => {}
+        Some(toml::Value::String(_)) | None if knowledge => {
+            out.push(link_invalid(licence_field, "knowledge-without-licence"));
+        }
+        Some(toml::Value::String(_)) | None => {}
+        Some(_) => out.push(link_invalid(licence_field, "shape")),
     }
     for rule in &LINK_LISTS {
         let field = format!("integration.link.{}", rule.list);
@@ -1262,6 +1361,15 @@ fn lint_link(link: &toml::Value, out: &mut Vec<LauncherError>) {
             out.push(
                 link_invalid(&field, "too-many")
                     .with("limit", rule.most.to_string())
+                    .with("count", items.len().to_string()),
+            );
+        }
+        if rule.list == "tools" && !has_game && items.len() > link_limits::TOOLS {
+            // Tools: more than 16 only beside a `game` tool (`manifest.md` §2.6). Past 24 with
+            // none, both are said, as the spec's schema and semantic rule both refuse it.
+            out.push(
+                link_invalid(&field, "tools-over-16-without-game")
+                    .with("limit", link_limits::TOOLS.to_string())
                     .with("count", items.len().to_string()),
             );
         }
@@ -1331,7 +1439,28 @@ fn lint_link(link: &toml::Value, out: &mut Vec<LauncherError>) {
             {
                 out.push(link_invalid(&format!("{at}.danger"), "danger"));
             }
+            // A `stops` tool ends all of her game work and changes nothing: it is `low`.
+            if rule.list == "tools"
+                && e.get("stops").and_then(toml::Value::as_bool) == Some(true)
+                && e.get("danger").and_then(toml::Value::as_str) != Some("low")
+            {
+                out.push(link_invalid(&format!("{at}.stops"), "stops-not-low"));
+            }
+            // `work_ended` only beside a `game` tool, and never `speaks`: its turn is the
+            // daemon's own work-ended turn (`link-v1.md` §5 "work_ended").
+            if rule.list == "events"
+                && e.get("name").and_then(toml::Value::as_str) == Some("work_ended")
+                && (!has_game || e.get("speaks").and_then(toml::Value::as_bool) == Some(true))
+            {
+                out.push(link_invalid(&at, "work-ended-misdeclared"));
+            }
         }
+    }
+    // A GI with a `game` tool declares a `stops` tool (`link-v1.md` §5 "Actions in the game").
+    if has_game
+        && !tool_entries().any(|e| e.get("stops").and_then(toml::Value::as_bool) == Some(true))
+    {
+        out.push(link_invalid("integration.link.tools", "game-without-stop"));
     }
 }
 
@@ -1702,16 +1831,19 @@ evidence = "{core}"
             ))
             .is_empty()
         );
+        // 17 tools with no `game` tool: past 16, which only a `game` tool lifts to 24
+        // (`link_v1_game_actions` holds the 24).
         let many: String = (0..17).map(|i| tool(&format!("t{i}"), "x")).collect();
         assert_eq!(
             lint(&many),
             [(
                 codes::LINK_INVALID,
                 "integration.link.tools".into(),
-                "too-many".into()
+                "tools-over-16-without-game".into()
             )]
         );
-        // Each list at its own limit (Link v1: 16 tools, 16 triggers, 32 events), and one past it.
+        // Each list at its own limit (Link v1: 16 tools without a `game` tool, 16 triggers, 32
+        // events), and one past it.
         let trigger = |i: usize| {
             format!(
                 "[[integration.link.triggers]]\nname = \"g{i}\"\nlabel = \"G\"\ndata = \"astra/g.json\"\n"
@@ -1728,12 +1860,17 @@ evidence = "{core}"
             let at: String = (0..most).map(item).collect();
             assert!(lint(&at).is_empty(), "{list} at {most}: {:?}", lint(&at));
             let past: String = (0..=most).map(item).collect();
+            let reason = if list == "tools" {
+                "tools-over-16-without-game"
+            } else {
+                "too-many"
+            };
             assert_eq!(
                 lint(&past),
                 [(
                     codes::LINK_INVALID,
                     format!("integration.link.{list}"),
-                    "too-many".into()
+                    reason.into()
                 )],
                 "{list} past {most}"
             );
@@ -1894,7 +2031,7 @@ evidence = "{core}"
             bad("integration.link.events[0].speaks", "shape")
         );
 
-        // `danger`: "low" or "high", nothing else, not even another type.
+        // `danger`: "low", "game" or "high", nothing else, not even another type.
         for d in ["\"medium\"", "\"Low\"", "\"\"", "true", "[\"low\"]"] {
             assert_eq!(
                 lint(&tool(&format!("{result}danger = {d}\n"))),
@@ -1951,13 +2088,16 @@ evidence = "{core}"
             ]
         );
 
-        // An event's name is one of the closed v1 words, each at most once.
+        // An event's name is one of the closed v1 words, each at most once (`work_ended` only
+        // beside a `game` tool: `link_v1_game_actions`).
         let all: String = link_limits::EVENT_WORDS
             .iter()
+            .filter(|w| **w != "work_ended")
             .map(|w| event(w, ""))
             .collect();
         assert!(lint(&all).is_empty(), "{:?}", lint(&all));
-        assert_eq!(link_limits::EVENT_WORDS.len(), 7);
+        assert_eq!(link_limits::EVENT_WORDS.len(), 8);
+        assert_eq!(link_limits::EVENT_WORDS[7], "work_ended");
         assert_eq!(
             lint(&event("boss_defeated", "")),
             bad("integration.link.events[0].name", "unknown-event")
@@ -1987,6 +2127,192 @@ evidence = "{core}"
         assert_ne!(
             link_digest(absent.link()).unwrap(),
             link_digest(explicit.link()).unwrap()
+        );
+    }
+
+    /// What AstraPlugins #192, #193 and #194 added (`link-v1.md` §5 "Actions in the game",
+    /// "Knowledge", "work_ended"; `manifest.md` §2.6): a `game` tool, the `stops` tool it needs,
+    /// 24 tools beside one, `work_ended`, the knowledge base and its licence.
+    #[test]
+    fn link_v1_game_actions() {
+        let lint = |body: &str| -> Vec<(&'static str, String, String)> {
+            Manifest::parse(&manifest(&format!("[integration.link]\n{body}"), "", ""))
+                .unwrap()
+                .lint(false)
+                .iter()
+                .map(|e| {
+                    (
+                        e.code,
+                        e.param("field").or(e.param("key")).unwrap_or("").to_owned(),
+                        e.param("reason").unwrap_or("").to_owned(),
+                    )
+                })
+                .collect()
+        };
+        let bad = |field: &str, reason: &str| {
+            vec![(codes::LINK_INVALID, field.to_owned(), reason.to_owned())]
+        };
+        let tool = |name: &str, extra: &str| {
+            format!(
+                "[[integration.link.tools]]\nname = \"{name}\"\ndescription = \"Do it\"\nparams = \"astra/p.json\"\nresult = \"astra/r.json\"\n{extra}"
+            )
+        };
+        let gather = tool("gather", "danger = \"game\"\n");
+        let stop = tool("stop_work", "danger = \"low\"\nstops = true\n");
+        let fill = |n: usize| -> String { (0..n).map(|i| tool(&format!("t{i}"), "")).collect() };
+        let ended = |extra: &str| {
+            format!(
+                "[[integration.link.events]]\nname = \"work_ended\"\ndata = \"astra/w.json\"\n{extra}"
+            )
+        };
+
+        // A game tool with its stops tool, and work_ended beside them.
+        assert!(lint(&format!("{gather}{stop}{}", ended(""))).is_empty());
+        // A game tool needs a stops tool; a stops tool is low, and a boolean.
+        assert_eq!(
+            lint(&gather),
+            bad("integration.link.tools", "game-without-stop")
+        );
+        for d in ["\"high\"", "\"game\""] {
+            assert_eq!(
+                lint(&tool("stop_work", &format!("danger = {d}\nstops = true\n"))),
+                bad("integration.link.tools[0].stops", "stops-not-low"),
+                "{d}"
+            );
+        }
+        assert_eq!(
+            lint(&tool("stop_work", "danger = \"low\"\nstops = \"yes\"\n")),
+            bad("integration.link.tools[0].stops", "shape")
+        );
+        // `stops = false` is no stops tool.
+        assert_eq!(
+            lint(&format!(
+                "{gather}{}",
+                tool("stop_work", "danger = \"low\"\nstops = false\n")
+            )),
+            bad("integration.link.tools", "game-without-stop")
+        );
+
+        // 16 tools, or 24 beside a game tool; never 25.
+        assert!(lint(&fill(16)).is_empty());
+        let over = lint(&fill(17));
+        assert_eq!(over.len(), 1);
+        assert_eq!(
+            (over[0].1.as_str(), over[0].2.as_str()),
+            ("integration.link.tools", "tools-over-16-without-game")
+        );
+        assert!(lint(&format!("{gather}{stop}{}", fill(22))).is_empty());
+        let past = lint(&format!("{gather}{stop}{}", fill(23)));
+        assert_eq!(
+            past.iter().map(|f| f.2.as_str()).collect::<Vec<_>>(),
+            ["too-many"]
+        );
+        // 25 with no game tool: past both limits, and both are said.
+        assert_eq!(
+            lint(&fill(25))
+                .iter()
+                .map(|f| f.2.as_str())
+                .collect::<Vec<_>>(),
+            ["too-many", "tools-over-16-without-game"]
+        );
+        assert_eq!(link_limits::tools_most(false), 16);
+        assert_eq!(link_limits::tools_most(true), 24);
+
+        // work_ended: only beside a game tool, never speaks.
+        assert_eq!(
+            lint(&ended("")),
+            bad("integration.link.events[0]", "work-ended-misdeclared")
+        );
+        assert_eq!(
+            lint(&format!("{gather}{stop}{}", ended("speaks = true\n"))),
+            bad("integration.link.events[0]", "work-ended-misdeclared")
+        );
+
+        // The knowledge base: a path, with its licence (at most 128 characters, plain text).
+        assert!(
+            lint("knowledge = \"astra/knowledge\"\nknowledge_licence = \"CC0-1.0\"\n").is_empty()
+        );
+        assert_eq!(
+            lint("knowledge = \"astra/knowledge\"\n"),
+            bad(
+                "integration.link.knowledge_licence",
+                "knowledge-without-licence"
+            )
+        );
+        // The schema's pattern: at most 4 segments of ASCII letters, digits, `_` `.` `-`, none
+        // starting with `.` or `-`.
+        assert!(lint("knowledge = \"a/b/c/d\"\nknowledge_licence = \"CC0-1.0\"\n").is_empty());
+        for p in [
+            "../saves",
+            "astra/../../saves",
+            "/saves",
+            "astra\\\\k",
+            "astra/my guides",
+            ".knowledge",
+            "astra/.k",
+            "a/b/c/d/e",
+            "astra/знания",
+            "k+b",
+            "-k",
+            "astra/",
+            "astra//k",
+        ] {
+            assert_eq!(
+                lint(&format!(
+                    "knowledge = '{p}'\nknowledge_licence = \"CC0-1.0\"\n"
+                )),
+                bad("integration.link.knowledge", "not-a-path"),
+                "{p}"
+            );
+        }
+        assert_eq!(
+            lint("knowledge = true\nknowledge_licence = \"CC0-1.0\"\n"),
+            bad("integration.link.knowledge", "shape")
+        );
+        let long = "x".repeat(link_limits::KNOWLEDGE_LICENCE_CHARS + 1);
+        assert_eq!(
+            lint(&format!(
+                "knowledge = \"k\"\nknowledge_licence = \"{long}\"\n"
+            )),
+            bad("integration.link.knowledge_licence", "too-long")
+        );
+        // Only its length and type: a licence of a space, or of two lines, is the schema's.
+        for l in [
+            "\" \"",
+            "\"MIT\\t\"",
+            "\"CC-BY-SA-4.0\\nAttribution: a wiki\"",
+        ] {
+            assert!(
+                lint(&format!("knowledge = \"k\"\nknowledge_licence = {l}\n")).is_empty(),
+                "{l}"
+            );
+        }
+        assert_eq!(
+            lint("knowledge = \"k\"\nknowledge_licence = 1\n"),
+            bad("integration.link.knowledge_licence", "shape")
+        );
+        // Empty beside `knowledge` is no licence (the semantic rule); alone, below minLength.
+        assert_eq!(
+            lint("knowledge = \"k\"\nknowledge_licence = \"\"\n"),
+            bad(
+                "integration.link.knowledge_licence",
+                "knowledge-without-licence"
+            )
+        );
+        assert_eq!(
+            lint("knowledge_licence = \"\"\n"),
+            bad("integration.link.knowledge_licence", "shape")
+        );
+        let m = Manifest::parse(&manifest(
+            "[integration.link]\nknowledge = \"astra/knowledge\"\nknowledge_licence = \"CC0-1.0\"\n",
+            "",
+            "",
+        ))
+        .unwrap();
+        assert_eq!(m.link_knowledge(), Some("astra/knowledge"));
+        assert!(
+            m.link_files().is_empty(),
+            "the folder is not one of the link's files"
         );
     }
 

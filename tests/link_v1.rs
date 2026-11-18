@@ -2,10 +2,11 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! `[integration.link]` as Astra Link v1 has it at AstraPlugins `fe665e4` (`manifest.md` §2.6,
-//! `link-v1.md` §5): the spec's own manifest goldens for `talk`, a tool's `danger`, `companion`
-//! and required `result`, an event's `speaks` and closed name, held to [`Manifest::lint`] and
-//! [`link_digest`]. The goldens are `tests/fixtures/link-v1/` (its README says why they are not in
+//! `[integration.link]` as Astra Link v1 has it at AstraPlugins `1ba3fcbc` (`manifest.md` §2.6,
+//! `link-v1.md` §5): the spec's own manifest goldens for `talk`, a tool's `danger` (`game`
+//! included), `companion`, `stops` and required `result`, 24 tools beside a `game` tool, an
+//! event's `speaks` and closed name (`work_ended` included), and the knowledge base, held to
+//! [`Manifest::lint`] and [`link_digest`]. The goldens are `tests/fixtures/link-v1/` (its README says why they are not in
 //! the vendored copy yet), each byte checked against its `SHA256SUMS`.
 //!
 //! The digests: `game-specific-link`'s is the spec's own vector (`vectors.json` `link.digest` at
@@ -77,6 +78,11 @@ fn the_specs_valid_link_manifests_pass_the_lint() {
     for rel in [
         "manifests/valid/game-specific-link.toml",
         "manifests/valid/link-danger-speaks-talk.toml",
+        // AstraPlugins #192, #193, #194: a `game` tool with its `stops` tool, 24 tools beside
+        // one, a knowledge base with its licence.
+        "manifests/valid/link-danger-game.toml",
+        "manifests/valid/link-24-tools.toml",
+        "manifests/valid/link-knowledge.toml",
     ] {
         assert_eq!(lint(rel), [], "{rel}");
     }
@@ -109,7 +115,34 @@ fn each_invalid_link_manifest_is_refused_for_its_rule_alone() {
             ),
         ),
         ("link-tool-no-result", link("tools[0].result", "missing")),
+        // 25 tools: past the 24 even beside a `game` tool.
         ("link-too-many-tools", link("tools", "too-many")),
+        // The spec's semantic rules, each the `reason` of its own name.
+        (
+            "link-tools-over-16-without-game",
+            link("tools", "tools-over-16-without-game"),
+        ),
+        ("link-game-without-stop", link("tools", "game-without-stop")),
+        (
+            "link-stops-not-low",
+            link("tools[1].stops", "stops-not-low"),
+        ),
+        (
+            "link-work-ended-without-game",
+            link("events[0]", "work-ended-misdeclared"),
+        ),
+        (
+            "link-work-ended-speaks",
+            link("events[0]", "work-ended-misdeclared"),
+        ),
+        (
+            "link-knowledge-without-licence",
+            link("knowledge_licence", "knowledge-without-licence"),
+        ),
+        (
+            "link-knowledge-path-escapes",
+            link("knowledge", "not-a-path"),
+        ),
     ] {
         assert_eq!(
             lint(&format!("manifests/invalid/{rel}.toml")),
@@ -162,5 +195,68 @@ fn the_link_digest_covers_the_new_keys_as_written() {
                 "{rel}: {from} -> {to}"
             );
         }
+    }
+}
+
+/// The keys AstraPlugins #192 and #193 added (`stops`, a `game` danger, `knowledge`,
+/// `knowledge_licence`) are in the consent digest (`manifest.md` §2.6.1): each written
+/// differently, the digest differs. No vector covers these goldens, so no digest is pinned here.
+#[test]
+fn the_link_digest_covers_the_game_and_knowledge_keys() {
+    for (rel, from, to) in [
+        (
+            "manifests/valid/link-danger-game.toml",
+            "stops = true",
+            "stops = false",
+        ),
+        (
+            "manifests/valid/link-danger-game.toml",
+            "danger = \"game\"",
+            "danger = \"high\"",
+        ),
+        (
+            "manifests/valid/link-knowledge.toml",
+            "knowledge = \"astra/knowledge\"",
+            "knowledge = \"astra/other\"",
+        ),
+        (
+            "manifests/valid/link-knowledge.toml",
+            "knowledge_licence = \"CC-BY-SA-4.0\"",
+            "knowledge_licence = \"CC0-1.0\"",
+        ),
+    ] {
+        let lf = text(rel);
+        // The first LINE that is `from`: the goldens' comments name the same keys.
+        let mut done = false;
+        let changed: Vec<&str> = lf
+            .lines()
+            .map(|l| {
+                if !done && l == from {
+                    done = true;
+                    to
+                } else {
+                    l
+                }
+            })
+            .collect();
+        assert!(done, "{rel} has a line {from}");
+        let digest = |t: &str| {
+            link_digest(Manifest::parse(t).unwrap().link())
+                .unwrap()
+                .unwrap()
+        };
+        // The control: the same lines joined back, unchanged, are the same digest, so only the
+        // one key's new value can tell the two apart.
+        let same: Vec<&str> = lf.lines().collect();
+        assert_eq!(
+            digest(&lf),
+            digest(&toml_newlines(&same.join("\n"))),
+            "{rel}"
+        );
+        assert_ne!(
+            digest(&lf),
+            digest(&toml_newlines(&changed.join("\n"))),
+            "{rel}: {from} -> {to}"
+        );
     }
 }

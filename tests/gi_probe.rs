@@ -2827,6 +2827,145 @@ fn check_holds_the_links_files_to_the_zip() {
     assert_eq!(r["findings"][0]["params"]["path"], "astra/tools/gone.json");
 }
 
+/// The knowledge base (`link-v1.md` §5 "Knowledge", AstraPlugins #193): a folder in the zip of at
+/// most 256 `.md` files of UTF-8 text, each at most 256 KiB, together at most 4 MiB, at most 4
+/// folders deep; step 3 says which rule a release breaks, with the entry's path.
+#[test]
+fn check_holds_the_knowledge_base_to_its_limits() {
+    let tmp = Tmp::new("check-knowledge");
+    let base = community_release("someone.example", &[]);
+    let pkg = astra_game_launcher::GiPackage::open(&base, &sha(&base)).unwrap();
+    let manifest = pkg.manifest_text().replace(
+        "skill = \"astra/SKILL.md\"\n",
+        "skill = \"astra/SKILL.md\"\nknowledge = \"astra/knowledge\"\nknowledge_licence = \"CC0-1.0\"\n",
+    );
+    assert!(manifest.contains("knowledge_licence"));
+    let release_with = |files: &[(String, Vec<u8>)], more: Vec<E>| {
+        let mut entries = vec![
+            E::File("astra-gi.toml", manifest.as_bytes()),
+            E::File("astra-probe.dll", DLL),
+            E::File("plugins/Astra.Example.dll", b"MZ plugin"),
+            E::File("astra/SKILL.md", b"# Example"),
+            E::File("astra/context.json", LINK_AI_SCHEMA),
+            E::File("astra/tools/drop_item.json", LINK_SCHEMA),
+            E::File("astra/tools/drop_item.result.json", LINK_AI_SCHEMA),
+        ];
+        entries.extend(files.iter().map(|(n, b)| E::File(n, b)));
+        entries.extend(more);
+        zip(&entries)
+    };
+    let release = |files: &[(String, Vec<u8>)]| release_with(files, Vec::new());
+    let md = |name: &str, bytes: Vec<u8>| (format!("astra/knowledge/{name}"), bytes);
+    let reasons = |r: &Value| -> Vec<(String, String)> {
+        r["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["field"] == "integration.link.knowledge")
+            .map(|f| {
+                assert_eq!(f["step"], 3, "{f:#}");
+                (
+                    f["params"]["reason"].as_str().unwrap().to_owned(),
+                    f["params"]["path"].as_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect()
+    };
+
+    // At every limit at once: 16 files of 256 KiB (4 MiB), one 4 folders deep.
+    let mut at: Vec<(String, Vec<u8>)> = (0..15)
+        .map(|i| md(&format!("f{i}.md"), vec![b'a'; 256 * 1024]))
+        .collect();
+    at.push(md("a/b/c/d/deep.md", vec![b'a'; 256 * 1024]));
+    let (exit, r) = check(&put(&tmp, "at", "astra-gi.zip", &release(&at)), &[]);
+    assert_eq!(exit, 0, "{r:#}");
+
+    // A folder beside it whose name starts the same is not the base: its text file is not one.
+    let beside = release_with(
+        &[md("ok.md", b"# ok".to_vec())],
+        vec![E::File("astra/knowledge2/notes.txt", b"not the base")],
+    );
+    let (exit, r) = check(&put(&tmp, "beside", "astra-gi.zip", &beside), &[]);
+    assert_eq!(exit, 0, "{r:#}");
+    // An empty base is a folder too, when the zip holds its folder entry.
+    let empty = release_with(&[], vec![E::Dir("astra/knowledge/")]);
+    let (exit, r) = check(&put(&tmp, "empty", "astra-gi.zip", &empty), &[]);
+    assert_eq!(exit, 0, "{r:#}");
+    // A FILE where the folder should be.
+    let file = release_with(&[], vec![E::File("astra/knowledge", b"# not a folder")]);
+    let (exit, r) = check(&put(&tmp, "file", "astra-gi.zip", &file), &[]);
+    assert_eq!(exit, 1, "{r:#}");
+    assert_eq!(
+        reasons(&r),
+        [("not-a-folder".to_owned(), "astra/knowledge".to_owned())]
+    );
+    // A link inside it: step 1 refuses the zip, and step 3 says which entry of the base it is.
+    let link = release_with(
+        &[md("ok.md", b"# ok".to_vec())],
+        vec![E::Symlink("astra/knowledge/elsewhere.md", "../../saves/x")],
+    );
+    let (exit, r) = check(&put(&tmp, "link", "astra-gi.zip", &link), &[]);
+    assert_eq!(exit, 1, "{r:#}");
+    assert!(
+        reasons(&r).contains(&("link".to_owned(), "astra/knowledge/elsewhere.md".to_owned())),
+        "{r:#}"
+    );
+
+    // Each broken alone.
+    let one = |file: (String, Vec<u8>)| vec![md("ok.md", b"# ok".to_vec()), file];
+    for (sub, files, want) in [
+        (
+            "big",
+            one(md("big.md", vec![b'a'; 256 * 1024 + 1])),
+            ("too-large", "astra/knowledge/big.md"),
+        ),
+        (
+            "txt",
+            one(md("notes.txt", b"text".to_vec())),
+            ("not-markdown", "astra/knowledge/notes.txt"),
+        ),
+        (
+            "deep",
+            one(md("a/b/c/d/e/deep.md", b"# deep".to_vec())),
+            ("too-deep", "astra/knowledge/a/b/c/d/e/deep.md"),
+        ),
+        (
+            "latin1",
+            one(md("bad.md", vec![b'#', b' ', 0xE9])),
+            ("not-utf8", "astra/knowledge/bad.md"),
+        ),
+    ] {
+        let (exit, r) = check(&put(&tmp, sub, "astra-gi.zip", &release(&files)), &[]);
+        assert_eq!(exit, 1, "{sub}: {r:#}");
+        assert_eq!(
+            reasons(&r),
+            [(want.0.to_owned(), want.1.to_owned())],
+            "{sub}"
+        );
+    }
+
+    // Past the folder's own limits: 257 files; 17 files of 256 KiB (past 4 MiB); no file at all.
+    let many: Vec<_> = (0..257)
+        .map(|i| md(&format!("f{i}.md"), b"# f".to_vec()))
+        .collect();
+    let heavy: Vec<_> = (0..17)
+        .map(|i| md(&format!("f{i}.md"), vec![b'a'; 256 * 1024]))
+        .collect();
+    for (sub, files, want) in [
+        ("many", many, ("too-many", "")),
+        ("heavy", heavy, ("too-large", "")),
+        ("none", Vec::new(), ("not-in-zip", "astra/knowledge")),
+    ] {
+        let (exit, r) = check(&put(&tmp, sub, "astra-gi.zip", &release(&files)), &[]);
+        assert_eq!(exit, 1, "{sub}: {r:#}");
+        assert_eq!(
+            reasons(&r),
+            [(want.0.to_owned(), want.1.to_owned())],
+            "{sub}"
+        );
+    }
+}
+
 /// `link.digest` (spec `manifest.md` §2.6.1): the library's `link_digest`, which
 /// `tests/link_digest.rs` holds to the spec's vectors; `link` is null with no table; a table it
 /// cannot digest is no digest and a finding of step 2.
