@@ -28,8 +28,12 @@
 //!    with `--provenance first-party`, Astra's own ids and names and the first-party grammar are
 //!    allowed. When the manifest does not parse, `[integration.engine]` is still asked;
 //! 3. every file `[integration.link]` names is in the zip, a `params`/`data` schema at most
-//!    4 KiB and the skill at most 16 KiB. Whether each schema keeps to `link-v1.md` §6's
-//!    restricted profile waits for `link-v1` to freeze; the report's `link` says so;
+//!    4 KiB and the skill at most 16 KiB; the knowledge base (`knowledge`, `link-v1.md` §5
+//!    "Knowledge") is a folder in the zip of at most 256 `.md` files of UTF-8 text, each at most
+//!    256 KiB, together at most 4 MiB, at most 4 folders deep, no link ([`knowledge_findings`]).
+//!    Whether each schema keeps to `link-v1.md` §6's restricted profile (and a `work_ended`
+//!    schema to its work-ended profile) waits for `link-v1` to freeze; the report's `link` says
+//!    so;
 //! 4. the descriptor claims none of the spec's negative folders (`validate-descriptor`'s step 3),
 //!    whatever its `mods` holds;
 //! 5. `built_on{id, version, verified}`: the foundation (`--foundation`, a release zip) as this
@@ -90,7 +94,7 @@ use crate::{Fatal, Finding, Probe, report, toml10};
 const STEPS: [&str; 8] = [
     "the launcher opens the zip and parses its manifest",
     "identity, capabilities, what a community release may place and launch, Astra Link's limits, the foundation claim and the engine descriptor",
-    "every file [integration.link] names is in the zip, within its size",
+    "every file [integration.link] names is in the zip, within its size; the knowledge base within its limits",
     "the engine descriptor claims none of the spec's negative folders",
     "built on the foundation: every file it places, placed alike",
     "code changed since the previous release",
@@ -168,6 +172,89 @@ fn entries(zip: &[u8]) -> BTreeMap<String, u64> {
         {
             out.insert(name.replace('\\', "/"), f.size());
         }
+    }
+    out
+}
+
+/// The knowledge base `dir` in a zip against `link-v1.md` §5 "Knowledge" (step 3): every entry
+/// below `dir/` a `.md` file of UTF-8 text at most [`link_limits::KNOWLEDGE_FILE_BYTES`], at most
+/// [`link_limits::KNOWLEDGE_DEPTH`] folders below `dir`, and no link; at most
+/// [`link_limits::KNOWLEDGE_FILES`] files and [`link_limits::KNOWLEDGE_BYTES`] together; and at
+/// least one file. Each finding is `link-invalid{field=integration.link.knowledge, reason}`, with
+/// the entry's `path` where there is one. A file past its size is not read.
+fn knowledge_findings(zip: &[u8], dir: &str) -> Vec<LauncherError> {
+    const FIELD: &str = "integration.link.knowledge";
+    const S_IFMT: u32 = 0o170000;
+    const S_IFLNK: u32 = 0o120000;
+    let bad = |reason: &str| {
+        LauncherError::new(codes::LINK_INVALID)
+            .with("field", FIELD)
+            .with("reason", reason)
+    };
+    let mut out = Vec::new();
+    let Ok(mut ar) = ZipArchive::new(Cursor::new(zip)) else {
+        return out;
+    };
+    let prefix = format!("{}/", dir.trim_end_matches('/'));
+    let (mut files, mut total) = (0usize, 0u64);
+    for i in 0..ar.len() {
+        let Ok(f) = ar.by_index(i) else { continue };
+        let Ok(name) = f.name().map(|n| n.replace('\\', "/")) else {
+            continue;
+        };
+        let Some(rel) = name.strip_prefix(&prefix).filter(|r| !r.is_empty()) else {
+            continue;
+        };
+        let at = |e: LauncherError| e.with("path", name.clone());
+        if f.unix_mode().is_some_and(|m| m & S_IFMT == S_IFLNK) {
+            out.push(at(bad("link")));
+            continue;
+        }
+        if f.is_dir() {
+            continue;
+        }
+        files += 1;
+        total = total.saturating_add(f.size());
+        if rel.split('/').count() - 1 > link_limits::KNOWLEDGE_DEPTH {
+            out.push(at(
+                bad("too-deep").with("limit", link_limits::KNOWLEDGE_DEPTH.to_string())
+            ));
+        }
+        if !rel.ends_with(".md") {
+            out.push(at(bad("not-markdown")));
+            continue;
+        }
+        if f.size() > link_limits::KNOWLEDGE_FILE_BYTES {
+            out.push(at(bad("too-large")
+                .with("limit", link_limits::KNOWLEDGE_FILE_BYTES.to_string())
+                .with("bytes", f.size().to_string())));
+            continue;
+        }
+        let mut bytes = Vec::new();
+        if f.take(link_limits::KNOWLEDGE_FILE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || std::str::from_utf8(&bytes).is_err()
+        {
+            out.push(at(bad("not-utf8")));
+        }
+    }
+    if files == 0 {
+        out.push(bad("not-in-zip").with("path", dir.to_owned()));
+    }
+    if files > link_limits::KNOWLEDGE_FILES {
+        out.push(
+            bad("too-many")
+                .with("limit", link_limits::KNOWLEDGE_FILES.to_string())
+                .with("count", files.to_string()),
+        );
+    }
+    if total > link_limits::KNOWLEDGE_BYTES {
+        out.push(
+            bad("too-large")
+                .with("limit", link_limits::KNOWLEDGE_BYTES.to_string())
+                .with("bytes", total.to_string()),
+        );
     }
     out
 }
@@ -297,6 +384,10 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
         .as_ref()
         .map(Manifest::link_files)
         .unwrap_or_default();
+    let knowledge = manifest
+        .as_ref()
+        .and_then(Manifest::link_knowledge)
+        .map(str::to_owned);
     let mut link = Value::Null;
     if let Some(m) = &manifest
         && m.link().is_some()
@@ -314,7 +405,9 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
     match (&manifest, is_zip) {
         (None, _) => p.skip(3, unread("the manifest does not parse")),
         (Some(_), false) => p.skip(3, "a manifest, not a zip"),
-        (Some(_), true) if link_files.is_empty() => p.skip(3, "no [integration.link] files"),
+        (Some(_), true) if link_files.is_empty() && knowledge.is_none() => {
+            p.skip(3, "no [integration.link] files")
+        }
         (Some(_), true) => {
             let (f0, n0) = (p.findings.len(), p.notices.len());
             let in_zip = entries(&bytes);
@@ -337,6 +430,11 @@ pub fn run(a: &CheckArgs) -> Result<(Value, bool), Fatal> {
                     Some(_) => continue,
                 };
                 p.finding(3, refusal(&e));
+            }
+            if let Some(dir) = &knowledge {
+                for e in knowledge_findings(&bytes, dir) {
+                    p.finding(3, refusal(&e));
+                }
             }
             p.notice(
                 3,
