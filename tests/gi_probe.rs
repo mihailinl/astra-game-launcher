@@ -2840,7 +2840,7 @@ fn check_holds_the_knowledge_base_to_its_limits() {
         "skill = \"astra/SKILL.md\"\nknowledge = \"astra/knowledge\"\nknowledge_licence = \"CC0-1.0\"\n",
     );
     assert!(manifest.contains("knowledge_licence"));
-    let release = |files: &[(String, Vec<u8>)]| {
+    let release_with = |files: &[(String, Vec<u8>)], more: Vec<E>| {
         let mut entries = vec![
             E::File("astra-gi.toml", manifest.as_bytes()),
             E::File("astra-probe.dll", DLL),
@@ -2851,8 +2851,10 @@ fn check_holds_the_knowledge_base_to_its_limits() {
             E::File("astra/tools/drop_item.result.json", LINK_AI_SCHEMA),
         ];
         entries.extend(files.iter().map(|(n, b)| E::File(n, b)));
+        entries.extend(more);
         zip(&entries)
     };
+    let release = |files: &[(String, Vec<u8>)]| release_with(files, Vec::new());
     let md = |name: &str, bytes: Vec<u8>| (format!("astra/knowledge/{name}"), bytes);
     let reasons = |r: &Value| -> Vec<(String, String)> {
         r["findings"]
@@ -2877,6 +2879,37 @@ fn check_holds_the_knowledge_base_to_its_limits() {
     at.push(md("a/b/c/d/deep.md", vec![b'a'; 256 * 1024]));
     let (exit, r) = check(&put(&tmp, "at", "astra-gi.zip", &release(&at)), &[]);
     assert_eq!(exit, 0, "{r:#}");
+
+    // A folder beside it whose name starts the same is not the base: its text file is not one.
+    let beside = release_with(
+        &[md("ok.md", b"# ok".to_vec())],
+        vec![E::File("astra/knowledge2/notes.txt", b"not the base")],
+    );
+    let (exit, r) = check(&put(&tmp, "beside", "astra-gi.zip", &beside), &[]);
+    assert_eq!(exit, 0, "{r:#}");
+    // An empty base is a folder too, when the zip holds its folder entry.
+    let empty = release_with(&[], vec![E::Dir("astra/knowledge/")]);
+    let (exit, r) = check(&put(&tmp, "empty", "astra-gi.zip", &empty), &[]);
+    assert_eq!(exit, 0, "{r:#}");
+    // A FILE where the folder should be.
+    let file = release_with(&[], vec![E::File("astra/knowledge", b"# not a folder")]);
+    let (exit, r) = check(&put(&tmp, "file", "astra-gi.zip", &file), &[]);
+    assert_eq!(exit, 1, "{r:#}");
+    assert_eq!(
+        reasons(&r),
+        [("not-a-folder".to_owned(), "astra/knowledge".to_owned())]
+    );
+    // A link inside it: step 1 refuses the zip, and step 3 says which entry of the base it is.
+    let link = release_with(
+        &[md("ok.md", b"# ok".to_vec())],
+        vec![E::Symlink("astra/knowledge/elsewhere.md", "../../saves/x")],
+    );
+    let (exit, r) = check(&put(&tmp, "link", "astra-gi.zip", &link), &[]);
+    assert_eq!(exit, 1, "{r:#}");
+    assert!(
+        reasons(&r).contains(&("link".to_owned(), "astra/knowledge/elsewhere.md".to_owned())),
+        "{r:#}"
+    );
 
     // Each broken alone.
     let one = |file: (String, Vec<u8>)| vec![md("ok.md", b"# ok".to_vec()), file];

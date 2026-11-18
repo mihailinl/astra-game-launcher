@@ -179,9 +179,16 @@ fn entries(zip: &[u8]) -> BTreeMap<String, u64> {
 /// The knowledge base `dir` in a zip against `link-v1.md` §5 "Knowledge" (step 3): every entry
 /// below `dir/` a `.md` file of UTF-8 text at most [`link_limits::KNOWLEDGE_FILE_BYTES`], at most
 /// [`link_limits::KNOWLEDGE_DEPTH`] folders below `dir`, and no link; at most
-/// [`link_limits::KNOWLEDGE_FILES`] files and [`link_limits::KNOWLEDGE_BYTES`] together; and at
-/// least one file. Each finding is `link-invalid{field=integration.link.knowledge, reason}`, with
-/// the entry's `path` where there is one. A file past its size is not read.
+/// [`link_limits::KNOWLEDGE_FILES`] files and [`link_limits::KNOWLEDGE_BYTES`] together. `dir`
+/// is a folder of the zip: an entry below it, or its own folder entry (an empty base is a folder
+/// too), else `not-in-zip`; a FILE named `dir` is `not-a-folder`. Each finding is
+/// `link-invalid{field=integration.link.knowledge, reason}`, with the entry's `path` where there
+/// is one.
+///
+/// Entries are listed raw (an entry that cannot be inflated is still counted; step 1 says why it
+/// cannot), and only a `.md` file within its size is read, and only while the files read so far
+/// are within the folder's own limits: past them the release is refused anyway, so a zip step 1
+/// refused for its size costs no more than the folder's own 4 MiB here.
 fn knowledge_findings(zip: &[u8], dir: &str) -> Vec<LauncherError> {
     const FIELD: &str = "integration.link.knowledge";
     const S_IFMT: u32 = 0o170000;
@@ -195,26 +202,48 @@ fn knowledge_findings(zip: &[u8], dir: &str) -> Vec<LauncherError> {
     let Ok(mut ar) = ZipArchive::new(Cursor::new(zip)) else {
         return out;
     };
-    let prefix = format!("{}/", dir.trim_end_matches('/'));
-    let (mut files, mut total) = (0usize, 0u64);
+    let dir = dir.trim_end_matches('/');
+    let prefix = format!("{dir}/");
+    // (index, name, size, is a link) of every file below the folder, in the zip's order.
+    let mut below = Vec::new();
+    let (mut a_folder, mut a_file) = (false, false);
     for i in 0..ar.len() {
-        let Ok(f) = ar.by_index(i) else { continue };
+        let Ok(f) = ar.by_index_raw(i) else { continue };
         let Ok(name) = f.name().map(|n| n.replace('\\', "/")) else {
             continue;
         };
-        let Some(rel) = name.strip_prefix(&prefix).filter(|r| !r.is_empty()) else {
+        let link = f.unix_mode().is_some_and(|m| m & S_IFMT == S_IFLNK);
+        if name == dir && !f.is_dir() {
+            a_file = true;
+            continue;
+        }
+        let Some(rel) = name.strip_prefix(&prefix) else {
             continue;
         };
+        a_folder = true;
+        if rel.is_empty() || (f.is_dir() && !link) {
+            continue;
+        }
+        below.push((i, name.clone(), f.size(), link));
+    }
+    if a_file && !a_folder {
+        out.push(bad("not-a-folder").with("path", dir.to_owned()));
+        return out;
+    }
+    if !a_folder {
+        out.push(bad("not-in-zip").with("path", dir.to_owned()));
+        return out;
+    }
+    let (mut files, mut total) = (0usize, 0u64);
+    for (i, name, size, link) in below {
         let at = |e: LauncherError| e.with("path", name.clone());
-        if f.unix_mode().is_some_and(|m| m & S_IFMT == S_IFLNK) {
+        if link {
             out.push(at(bad("link")));
             continue;
         }
-        if f.is_dir() {
-            continue;
-        }
         files += 1;
-        total = total.saturating_add(f.size());
+        total = total.saturating_add(size);
+        let rel = &name[prefix.len()..];
         if rel.split('/').count() - 1 > link_limits::KNOWLEDGE_DEPTH {
             out.push(at(
                 bad("too-deep").with("limit", link_limits::KNOWLEDGE_DEPTH.to_string())
@@ -224,23 +253,23 @@ fn knowledge_findings(zip: &[u8], dir: &str) -> Vec<LauncherError> {
             out.push(at(bad("not-markdown")));
             continue;
         }
-        if f.size() > link_limits::KNOWLEDGE_FILE_BYTES {
+        if size > link_limits::KNOWLEDGE_FILE_BYTES {
             out.push(at(bad("too-large")
                 .with("limit", link_limits::KNOWLEDGE_FILE_BYTES.to_string())
-                .with("bytes", f.size().to_string())));
+                .with("bytes", size.to_string())));
+            continue;
+        }
+        if files > link_limits::KNOWLEDGE_FILES || total > link_limits::KNOWLEDGE_BYTES {
             continue;
         }
         let mut bytes = Vec::new();
-        if f.take(link_limits::KNOWLEDGE_FILE_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .is_err()
-            || std::str::from_utf8(&bytes).is_err()
-        {
+        let read = ar.by_index(i).map(|f| {
+            f.take(link_limits::KNOWLEDGE_FILE_BYTES + 1)
+                .read_to_end(&mut bytes)
+        });
+        if matches!(read, Ok(Ok(_))) && std::str::from_utf8(&bytes).is_err() {
             out.push(at(bad("not-utf8")));
         }
-    }
-    if files == 0 {
-        out.push(bad("not-in-zip").with("path", dir.to_owned()));
     }
     if files > link_limits::KNOWLEDGE_FILES {
         out.push(

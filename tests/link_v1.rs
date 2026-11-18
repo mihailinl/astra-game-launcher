@@ -245,6 +245,14 @@ fn the_link_digest_covers_the_game_and_knowledge_keys() {
                 .unwrap()
                 .unwrap()
         };
+        // The control: the same lines joined back, unchanged, are the same digest, so only the
+        // one key's new value can tell the two apart.
+        let same: Vec<&str> = lf.lines().collect();
+        assert_eq!(
+            digest(&lf),
+            digest(&toml_newlines(&same.join("\n"))),
+            "{rel}"
+        );
         assert_ne!(
             digest(&lf),
             digest(&toml_newlines(&changed.join("\n"))),

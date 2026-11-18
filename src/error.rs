@@ -187,7 +187,7 @@ pub mod codes {
     /// `too-large`, `danger`, `unknown-event`; the spec's semantic rules by their names,
     /// `tools-over-16-without-game`, `game-without-stop`, `stops-not-low`,
     /// `work-ended-misdeclared`, `knowledge-without-licence`; the knowledge folder's
-    /// `not-markdown`, `too-deep`, `not-utf8`, `link`; `limit` where there is one, `path` for an
+    /// `not-a-folder`, `not-markdown`, `too-deep`, `not-utf8`, `link`; `limit` where there is one, `path` for an
     /// entry of the zip), or a value its consent digest cannot hold
     /// (`reason` = `not-digestable`, `type` = the TOML type: `crate::link_digest`).
     pub const LINK_INVALID: &str = "link-invalid";

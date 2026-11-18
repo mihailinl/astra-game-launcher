@@ -201,18 +201,23 @@ line of its own into `user.reg`; it was not written, and that override is left a
   with **`stops = true`**, a boolean, which ends all of her game work and is `danger = "low"`
   (`game-without-stop`, `stops-not-low`).
 - **24 tools beside a `game` tool**, 16 otherwise: `link_limits::tools_most(has_game_tool)` is the
-  one place the number is chosen, for this lint and for the daemon. 17 to 24 tools with no `game`
-  tool is `tools-over-16-without-game`; past 24 is `too-many`, as before.
+  one place the number is chosen, for this lint and, once it reads it, the daemon. 17 to 24 tools
+  with no `game` tool is `tools-over-16-without-game`; past 24 is `too-many`, as before (with no
+  `game` tool, both).
 - **`work_ended`** is the eighth event word (`link_limits::EVENT_WORDS`), declared only beside a
   `game` tool and never with `speaks = true` (`work-ended-misdeclared`).
-- **The knowledge base**: `knowledge`, the path of a folder of Markdown files (`not-a-path`,
-  `shape`), and `knowledge_licence`, an SPDX id or text of at most 128 characters, required with it
-  (`knowledge-without-licence`, `too-long`, `shape`). `Manifest::link_knowledge` returns the folder;
+- **The knowledge base**: `knowledge`, the path of a folder of Markdown files, held to the schema's
+  pattern too (at most 4 segments of ASCII letters, digits, `_`, `.` and `-`, none starting with `.`
+  or `-`; `not-a-path`, `shape`), and `knowledge_licence`, an SPDX id or text of 1 to 128
+  characters, required with it and not empty there (`knowledge-without-licence`, `too-long`,
+  `shape`). `Manifest::link_knowledge` returns the folder;
   it is not one of `Manifest::link_files`, which are each one file. `gi-probe check`'s step 3 holds
   the folder in the zip to `link-v1.md` §5 "Knowledge": at most 256 `.md` files of UTF-8 text, each
   at most 256 KiB, together at most 4 MiB, at most 4 folders deep, no link
-  (`link-invalid{field=integration.link.knowledge}`, `reason` = `not-in-zip`, `not-markdown`,
-  `too-large`, `too-many`, `too-deep`, `not-utf8`, `link`; `path` the entry).
+  (`link-invalid{field=integration.link.knowledge}`, `reason` = `not-in-zip`, `not-a-folder`,
+  `not-markdown`, `too-large`, `too-many`, `too-deep`, `not-utf8`, `link`; `path` the entry). An empty
+  base is a folder when the zip holds its folder entry. "4 folders deep" is read as 4 folders below
+  the base (`<base>/a/b/c/d/x.md` passes); the spec has no vector for it yet.
 
 Each of the spec's semantic rules is a `link-invalid` whose `reason` is the rule's own name. Two
 things this release does not do: hold a `work_ended` `data` schema to the work-ended profile (the

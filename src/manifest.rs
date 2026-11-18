@@ -1194,6 +1194,23 @@ fn link_invalid(field: &str, reason: &str) -> LauncherError {
         .with("reason", reason)
 }
 
+/// The knowledge folder's path as the schema has it (`manifest.schema.json`, `knowledge`):
+/// `^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*){0,3}$` — at most 4 segments of
+/// ASCII letters, digits, `_`, `.` and `-`, none starting with `.` or `-` (so no `..`). A path
+/// must also pass the launcher's own path rule (no Windows device name, no trailing dot), which
+/// every file it places passes too.
+fn is_knowledge_path(p: &str) -> bool {
+    let segments: Vec<&str> = p.split('/').collect();
+    segments.len() <= 4
+        && segments.iter().all(|s| {
+            let b = s.as_bytes();
+            !b.is_empty()
+                && (b[0].is_ascii_alphanumeric() || b[0] == b'_')
+                && b.iter()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'-'))
+        })
+}
+
 /// A Link name: `^[a-z][a-z0-9_]{0,31}$`.
 fn is_link_name(name: &str) -> bool {
     let b = name.as_bytes();
@@ -1291,20 +1308,26 @@ fn lint_link(link: &toml::Value, out: &mut Vec<LauncherError>) {
     }
     let is_path = |p: &str| !p.contains('\\') && relative_components(p).is_some();
     // `context` names the context schema, `skill` the skill file, `knowledge` the knowledge
-    // base's folder: paths, all optional.
+    // base's folder: paths, all optional. The knowledge folder's path is also held to the
+    // schema's own pattern (`is_knowledge_path`).
     for k in ["context", "skill", "knowledge"] {
         let field = format!("integration.link.{k}");
         match t.get(k) {
-            Some(toml::Value::String(p)) if !is_path(p) => {
+            Some(toml::Value::String(p))
+                if !is_path(p) || (k == "knowledge" && !is_knowledge_path(p)) =>
+            {
                 out.push(link_invalid(&field, "not-a-path"));
             }
             Some(toml::Value::String(_)) | None => {}
             Some(_) => out.push(link_invalid(&field, "shape")),
         }
     }
-    // The knowledge base's licence: an SPDX id or text, shown on the consent sheet; required with
-    // `knowledge` (semantic rule `knowledge-without-licence`).
+    // The knowledge base's licence: an SPDX id or text of 1 to 128 characters, shown on the
+    // consent sheet (the schema's minLength and maxLength, nothing more: a licence may span
+    // lines); required, and not empty, with `knowledge` (semantic rule
+    // `knowledge-without-licence`, which reads an empty licence as none).
     let licence_field = "integration.link.knowledge_licence";
+    let knowledge = t.contains_key("knowledge");
     match t.get("knowledge_licence") {
         Some(toml::Value::String(l))
             if l.chars().count() > link_limits::KNOWLEDGE_LICENCE_CHARS =>
@@ -1314,15 +1337,15 @@ fn lint_link(link: &toml::Value, out: &mut Vec<LauncherError>) {
                     .with("limit", link_limits::KNOWLEDGE_LICENCE_CHARS.to_string()),
             );
         }
-        Some(toml::Value::String(l)) if l.trim().is_empty() || l.chars().any(char::is_control) => {
+        Some(toml::Value::String(l)) if l.is_empty() && !knowledge => {
             out.push(link_invalid(licence_field, "shape"));
         }
-        Some(toml::Value::String(_)) => {}
-        Some(_) => out.push(link_invalid(licence_field, "shape")),
-        None if t.contains_key("knowledge") => {
+        Some(toml::Value::String(l)) if !l.is_empty() => {}
+        Some(toml::Value::String(_)) | None if knowledge => {
             out.push(link_invalid(licence_field, "knowledge-without-licence"));
         }
-        None => {}
+        Some(toml::Value::String(_)) | None => {}
+        Some(_) => out.push(link_invalid(licence_field, "shape")),
     }
     for rule in &LINK_LISTS {
         let field = format!("integration.link.{}", rule.list);
@@ -1340,8 +1363,10 @@ fn lint_link(link: &toml::Value, out: &mut Vec<LauncherError>) {
                     .with("limit", rule.most.to_string())
                     .with("count", items.len().to_string()),
             );
-        } else if rule.list == "tools" && items.len() > link_limits::tools_most(has_game) {
-            // Tools: more than 16 only beside a `game` tool (`manifest.md` §2.6).
+        }
+        if rule.list == "tools" && !has_game && items.len() > link_limits::TOOLS {
+            // Tools: more than 16 only beside a `game` tool (`manifest.md` §2.6). Past 24 with
+            // none, both are said, as the spec's schema and semantic rule both refuse it.
             out.push(
                 link_invalid(&field, "tools-over-16-without-game")
                     .with("limit", link_limits::TOOLS.to_string())
@@ -2182,6 +2207,14 @@ evidence = "{core}"
             past.iter().map(|f| f.2.as_str()).collect::<Vec<_>>(),
             ["too-many"]
         );
+        // 25 with no game tool: past both limits, and both are said.
+        assert_eq!(
+            lint(&fill(25))
+                .iter()
+                .map(|f| f.2.as_str())
+                .collect::<Vec<_>>(),
+            ["too-many", "tools-over-16-without-game"]
+        );
         assert_eq!(link_limits::tools_most(false), 16);
         assert_eq!(link_limits::tools_most(true), 24);
 
@@ -2206,7 +2239,24 @@ evidence = "{core}"
                 "knowledge-without-licence"
             )
         );
-        for p in ["../saves", "astra/../../saves", "/saves", "astra\\\\k"] {
+        // The schema's pattern: at most 4 segments of ASCII letters, digits, `_` `.` `-`, none
+        // starting with `.` or `-`.
+        assert!(lint("knowledge = \"a/b/c/d\"\nknowledge_licence = \"CC0-1.0\"\n").is_empty());
+        for p in [
+            "../saves",
+            "astra/../../saves",
+            "/saves",
+            "astra\\\\k",
+            "astra/my guides",
+            ".knowledge",
+            "astra/.k",
+            "a/b/c/d/e",
+            "astra/знания",
+            "k+b",
+            "-k",
+            "astra/",
+            "astra//k",
+        ] {
             assert_eq!(
                 lint(&format!(
                     "knowledge = '{p}'\nknowledge_licence = \"CC0-1.0\"\n"
@@ -2226,13 +2276,33 @@ evidence = "{core}"
             )),
             bad("integration.link.knowledge_licence", "too-long")
         );
-        for l in ["\"\"", "\" \"", "\"a\\nb\"", "1"] {
-            assert_eq!(
-                lint(&format!("knowledge = \"k\"\nknowledge_licence = {l}\n")),
-                bad("integration.link.knowledge_licence", "shape"),
+        // Only its length and type: a licence of a space, or of two lines, is the schema's.
+        for l in [
+            "\" \"",
+            "\"MIT\\t\"",
+            "\"CC-BY-SA-4.0\\nAttribution: a wiki\"",
+        ] {
+            assert!(
+                lint(&format!("knowledge = \"k\"\nknowledge_licence = {l}\n")).is_empty(),
                 "{l}"
             );
         }
+        assert_eq!(
+            lint("knowledge = \"k\"\nknowledge_licence = 1\n"),
+            bad("integration.link.knowledge_licence", "shape")
+        );
+        // Empty beside `knowledge` is no licence (the semantic rule); alone, below minLength.
+        assert_eq!(
+            lint("knowledge = \"k\"\nknowledge_licence = \"\"\n"),
+            bad(
+                "integration.link.knowledge_licence",
+                "knowledge-without-licence"
+            )
+        );
+        assert_eq!(
+            lint("knowledge_licence = \"\"\n"),
+            bad("integration.link.knowledge_licence", "shape")
+        );
         let m = Manifest::parse(&manifest(
             "[integration.link]\nknowledge = \"astra/knowledge\"\nknowledge_licence = \"CC0-1.0\"\n",
             "",
